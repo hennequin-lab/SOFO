@@ -51,11 +51,6 @@ val maxpool2d
   -> ksize:int * int
   -> t
 
-val dropout1d : ?p:float -> ?is_training:bool -> t -> t
-val dropout2d : ?p:float -> ?is_training:bool -> t -> t
-val dropout3d : ?p:float -> ?is_training:bool -> t -> t
-val dropout4d : ?p:float -> ?is_training:bool -> t -> t
-
 (** Binary operations *)
 val ( + ) : t -> t -> t
 
