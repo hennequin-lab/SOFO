@@ -267,7 +267,7 @@ let gumbel_softmax (x, dx) ~tau ~with_noise =
             ~keepdim:true
             ~dtype:(Tensor.type_ dx)
         in
-        Tensor.(logits_diff_summed * exp logits / (summed_exp_logits * summed_exp_logits))
+        Tensor.(logits_diff_summed * y / summed_exp_logits)
       in
       Tensor.(tmp1 - tmp2))
   in
