@@ -234,7 +234,7 @@ let gumbel_softmax (x, dx) ~tau ~with_noise =
   let gumbel_noise =
     if with_noise
     then (
-      let uniform_noise = Tensor.uniform (Tensor.copy x) ~from:0. ~to_:1. in
+      let uniform_noise = Tensor.uniform x ~from:0. ~to_:1. in
       Some Tensor.(neg (log (neg (log uniform_noise)))))
     else None
   in
