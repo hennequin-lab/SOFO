@@ -110,6 +110,9 @@ let unary_tests =
     ; "relu", [ `not_all_neg ], any_shape Maths.relu
     ; "sum", [], any_shape Maths.sum
     ; "mean", [], any_shape Maths.mean
+    ; ( "gumbel_softmax"
+      , [ `positive; `order_equal_to 2 ]
+      , any_shape (Maths.gumbel_softmax ~tau:2. ~with_noise:false) )
     ; ( "sum_dim"
       , []
       , fun shape ->

@@ -9,6 +9,9 @@ include Maths_typ
 
 let shape (x, _) = Tensor.shape x
 
+(* int list starting from 1 and ending at the last dim of a *)
+let all_dims_but_first a = List.range 1 (List.length (Tensor.shape a))
+
 (* get primal, which is the first element *)
 let primal = fst
 
@@ -225,6 +228,50 @@ let logsumexp (x, dx) ~dim ~keepdim =
       Tensor.(sum_dim_intlist ~dim:(Some dim) ~keepdim ~dtype:(type_ x) tmp))
   in
   (y, dy) |> assert_right_shape "logsumexp"
+
+(* x are the categorical probabilities. *)
+let gumbel_softmax (x, dx) ~tau ~with_noise =
+  let gumbel_noise =
+    if with_noise
+    then (
+      let uniform_noise = Tensor.uniform (Tensor.copy x) ~from:0. ~to_:1. in
+      Some Tensor.(neg (log (neg (log uniform_noise)))))
+    else None
+  in
+  (* let logits = Tensor.(div_scalar (log x + gumbel_noise) (Scalar.f tau)) in *)
+  let logits =
+    match gumbel_noise with
+    | None -> Tensor.(div_scalar (log x) (Scalar.f tau))
+    | Some gumbel_noise -> Tensor.(div_scalar (log x + gumbel_noise) (Scalar.f tau))
+  in
+  let reduce_dim_list = all_dims_but_first x in
+  let summed_exp_logits =
+    Tensor.(
+      sum_dim_intlist
+        (exp logits)
+        ~dim:(Some reduce_dim_list)
+        ~keepdim:true
+        ~dtype:(Tensor.type_ x))
+  in
+  let y = Tensor.(exp (logits - logsumexp ~dim:reduce_dim_list ~keepdim:true logits)) in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let tmp1 = Tensor.(div_scalar (y * dx / x) (Scalar.f tau)) in
+      let reduce_dim_list_dx = List.map reduce_dim_list ~f:Int.succ in
+      let tmp2 =
+        let logits_diff = Tensor.(div_scalar (exp logits * dx / x) (Scalar.f tau)) in
+        let logits_diff_summed =
+          Tensor.sum_dim_intlist
+            logits_diff
+            ~dim:(Some reduce_dim_list_dx)
+            ~keepdim:true
+            ~dtype:(Tensor.type_ dx)
+        in
+        Tensor.(logits_diff_summed * exp logits / (summed_exp_logits * summed_exp_logits))
+      in
+      Tensor.(tmp1 - tmp2))
+  in
+  (y, dy) |> assert_right_shape "gumbel_softmax"
 
 let maxpool2d
   ?(padding = 0, 0)
