@@ -1,0 +1,10 @@
+(tests
+ (names test_maths)
+ (libraries forward-torch alcotest)
+ (preprocess
+  (pps ppx_sexp_message)))
+
+(env
+ (dev
+  (flags
+   (:standard -warn-error -A))))

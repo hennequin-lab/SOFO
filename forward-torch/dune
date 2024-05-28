@@ -1,0 +1,12 @@
+(library
+ (name forward_torch)
+ (inline_tests)
+ (public_name forward-torch)
+ (libraries stdio base torch npy)
+ (preprocess
+  (pps ppx_sexp_message ppx_jane)))
+
+(env
+ (dev
+  (flags
+   (:standard -warn-error -A))))
