@@ -107,12 +107,13 @@ let unary_tests =
     ; "sigmoid", [], any_shape Maths.sigmoid
     ; "softplus", [], any_shape Maths.softplus
     ; "tanh", [], any_shape Maths.tanh
-    ; "relu", [ `not_all_neg ], any_shape Maths.relu
+    ; "relu", [ `positive ], any_shape Maths.relu
     ; "sum", [], any_shape Maths.sum
     ; "mean", [], any_shape Maths.mean
+    ; "max2d_dim1", [ `order_equal_to 2 ], any_shape (Maths.max_2d_dim1 ~keepdim:false)
     ; ( "gumbel_softmax"
       , [ `positive; `order_equal_to 2 ]
-      , any_shape (Maths.gumbel_softmax ~tau:2. ~with_noise:false) )
+      , any_shape (Maths.gumbel_softmax ~tau:2. ~with_noise:false ~discrete:false) )
     ; ( "sum_dim"
       , []
       , fun shape ->

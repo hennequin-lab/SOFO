@@ -201,6 +201,40 @@ let mean_dim (x, dx) ~dim ~keepdim =
   in
   (y, dy) |> assert_right_shape "mean_dim"
 
+(* let print s = Stdio.printf "%s\n%!" (Base.Sexp.to_string_hum s) *)
+
+let max_2d_dim1 (x, dx) ~keepdim =
+  let y, y_indices = Tensor.(max_dim x ~dim:1 ~keepdim) in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let[@warning "-8"] (bs :: n :: _) = Tensor.shape x in
+      let num_tangents = List.hd_exn (Tensor.shape dx) in
+      let device = Tensor.device x in
+      let kind = Tensor.type_ x in
+      let y_shape = Tensor.shape y in
+      let indices_offset =
+        let offset_block =
+          Tensor.arange_start
+            ~start:(Scalar.int 0)
+            ~end_:(Scalar.int bs)
+            ~options:(kind, device)
+          |> Tensor.reshape ~shape:[ 1; -1 ]
+        in
+        let second_dim_offset = Tensor.mul_scalar offset_block (Scalar.int n) in
+        Tensor.(second_dim_offset + Tensor.view y_indices ~size:[ 1; -1 ])
+      in
+      (* cast as integer and collapse to one long vector. *)
+      let indices_offset =
+        Tensor._cast_int indices_offset ~non_blocking:true
+        |> Tensor.view ~size:[ 1; -1 ]
+        |> Tensor.squeeze
+      in
+      let dx_collapsed = Tensor.reshape dx ~shape:[ num_tangents; -1 ] in
+      let dy = Tensor.index_select dx_collapsed ~dim:1 ~index:indices_offset in
+      Tensor.reshape dy ~shape:(num_tangents :: y_shape))
+  in
+  (y, dy) |> assert_right_shape "max_2d_dim1"
+
 (* y = x^T, dy = dx^T *)
 let transpose (x, dx) ~dim0 ~dim1 =
   let y = Tensor.transpose_copy x ~dim0 ~dim1 in
@@ -230,7 +264,7 @@ let logsumexp (x, dx) ~dim ~keepdim =
   (y, dy) |> assert_right_shape "logsumexp"
 
 (* x are the categorical probabilities. *)
-let gumbel_softmax (x, dx) ~tau ~with_noise =
+let gumbel_softmax (x, dx) ~tau ~with_noise ~discrete =
   let gumbel_noise =
     if with_noise
     then (
@@ -238,13 +272,13 @@ let gumbel_softmax (x, dx) ~tau ~with_noise =
       Some Tensor.(neg (log (neg (log uniform_noise)))))
     else None
   in
-  (* let logits = Tensor.(div_scalar (log x + gumbel_noise) (Scalar.f tau)) in *)
   let logits =
     match gumbel_noise with
     | None -> Tensor.(div_scalar (log x) (Scalar.f tau))
     | Some gumbel_noise -> Tensor.(div_scalar (log x + gumbel_noise) (Scalar.f tau))
   in
   let reduce_dim_list = all_dims_but_first x in
+  let num_classes = List.hd_exn reduce_dim_list in
   let summed_exp_logits =
     Tensor.(
       sum_dim_intlist
@@ -271,7 +305,15 @@ let gumbel_softmax (x, dx) ~tau ~with_noise =
       in
       Tensor.(tmp1 - tmp2))
   in
-  (y, dy) |> assert_right_shape "gumbel_softmax"
+  (* if discrete, return one-hot encoded version *)
+  let y_final =
+    if discrete
+    then (
+      let pos = Tensor.argmax y ~dim:1 ~keepdim:true in
+      Tensor.one_hot pos ~num_classes)
+    else y
+  in
+  (y_final, dy) |> assert_right_shape "gumbel_softmax"
 
 let maxpool2d
   ?(padding = 0, 0)
