@@ -264,18 +264,70 @@ let logsumexp (x, dx) ~dim ~keepdim =
   (y, dy) |> assert_right_shape "logsumexp"
 
 (* x are the categorical probabilities. *)
+(* let gumbel_softmax (x, dx) ~tau ~with_noise ~discrete =
+   let gumbel_noise =
+   if with_noise
+   then (
+   let uniform_noise = Tensor.uniform x ~from:0. ~to_:1. in
+   Some Tensor.(neg (log (neg (log uniform_noise)))))
+   else None
+   in
+   let logits =
+   match gumbel_noise with
+   | None -> Tensor.(div_scalar (log x) (Scalar.f tau))
+   | Some gumbel_noise -> Tensor.(div_scalar (log x + gumbel_noise) (Scalar.f tau))
+   in
+   let reduce_dim_list = all_dims_but_first x in
+   let num_classes = List.hd_exn reduce_dim_list in
+   let summed_exp_logits =
+   Tensor.(
+   sum_dim_intlist
+   (exp logits)
+   ~dim:(Some reduce_dim_list)
+   ~keepdim:true
+   ~dtype:(Tensor.type_ x))
+   in
+   let y = Tensor.(exp (logits - logsumexp ~dim:reduce_dim_list ~keepdim:true logits)) in
+   let dy =
+   with_tangent dx ~f:(fun dx ->
+   let tmp1 = Tensor.(div_scalar (y * dx / x) (Scalar.f tau)) in
+   let reduce_dim_list_dx = List.map reduce_dim_list ~f:Int.succ in
+   let tmp2 =
+   let logits_diff = Tensor.(div_scalar (exp logits * dx / x) (Scalar.f tau)) in
+   let logits_diff_summed =
+   Tensor.sum_dim_intlist
+   logits_diff
+   ~dim:(Some reduce_dim_list_dx)
+   ~keepdim:true
+   ~dtype:(Tensor.type_ dx)
+   in
+   Tensor.(logits_diff_summed * y / summed_exp_logits)
+   in
+   Tensor.(tmp1 - tmp2))
+   in
+   (* if discrete, return one-hot encoded version *)
+   let y_final =
+   if discrete
+   then (
+   let pos = Tensor.argmax y ~dim:1 ~keepdim:true in
+   Tensor.one_hot pos ~num_classes)
+   else y
+   in
+   (y_final, dy) |> assert_right_shape "gumbel_softmax" *)
+
+(* x are the categorical logits. *)
 let gumbel_softmax (x, dx) ~tau ~with_noise ~discrete =
   let gumbel_noise =
     if with_noise
     then (
       let uniform_noise = Tensor.uniform x ~from:0. ~to_:1. in
-      Some Tensor.(neg (log (neg (log uniform_noise)))))
+      Some Tensor.(neg_ (log_ (neg_ (log_ uniform_noise)))))
     else None
   in
   let logits =
     match gumbel_noise with
-    | None -> Tensor.(div_scalar (log x) (Scalar.f tau))
-    | Some gumbel_noise -> Tensor.(div_scalar (log x + gumbel_noise) (Scalar.f tau))
+    | None -> Tensor.(div_scalar x (Scalar.f tau))
+    | Some gumbel_noise -> Tensor.(div_scalar (x + gumbel_noise) (Scalar.f tau))
   in
   let reduce_dim_list = all_dims_but_first x in
   let num_classes = List.hd_exn reduce_dim_list in
@@ -290,10 +342,10 @@ let gumbel_softmax (x, dx) ~tau ~with_noise ~discrete =
   let y = Tensor.(exp (logits - logsumexp ~dim:reduce_dim_list ~keepdim:true logits)) in
   let dy =
     with_tangent dx ~f:(fun dx ->
-      let tmp1 = Tensor.(div_scalar (y * dx / x) (Scalar.f tau)) in
+      let tmp1 = Tensor.(div_scalar (y * dx) (Scalar.f tau)) in
       let reduce_dim_list_dx = List.map reduce_dim_list ~f:Int.succ in
       let tmp2 =
-        let logits_diff = Tensor.(div_scalar (exp logits * dx / x) (Scalar.f tau)) in
+        let logits_diff = Tensor.(div_scalar (exp logits * dx) (Scalar.f tau)) in
         let logits_diff_summed =
           Tensor.sum_dim_intlist
             logits_diff
@@ -661,6 +713,12 @@ let concat (x, dx) (y, dy) ~dim =
 let epsilon = 1e-5
 
 let check_grad1 f x =
+  (* wrap f around a rng seed setter so that stochasticity is the same *)
+  let key = Random.int Int.max_value in
+  let f x =
+    Torch_core.Wrapper.manual_seed key;
+    f x
+  in
   (* draw a random direction along which to evaluate derivatives *)
   let sx = Tensor.shape x in
   let v = Tensor.randn ~kind:(Tensor.type_ x) sx in
@@ -683,6 +741,12 @@ let check_grad1 f x =
   Tensor.(norm (dy_pred - dy_finite) / norm dy_finite) |> Tensor.to_float0_exn
 
 let check_grad2 f x y =
+  (* wrap f around a rng seed setter so that stochasticity is the same *)
+  let key = Random.int Int.max_value in
+  let f x y =
+    Torch_core.Wrapper.manual_seed key;
+    f x y
+  in
   (* draw a random direction along which to evaluate derivatives *)
   let sx = Tensor.shape x in
   let vx = Tensor.randn ~kind:(Tensor.type_ x) sx in
