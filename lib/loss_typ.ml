@@ -13,3 +13,9 @@ module type T = sig
     : (labels:labels -> vtgt:Tensor.t -> reduce_dim_list:int list -> Maths.t -> Tensor.t)
         with_args
 end
+
+module type Reward = sig
+  type 'a with_args
+
+  val vtgt_gv : (vtgt:Tensor.t -> Tensor.t) with_args
+end

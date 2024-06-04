@@ -12,3 +12,7 @@ module CE (_ : sig
 module Weighted_MSE (_ : sig
     val scaling_factor : float
   end) : T with type labels = Tensor.t and type 'a with_args = weights:Tensor.t -> 'a
+
+module RL_loss (_ : sig
+    val scaling_factor : float
+  end) : Reward with type 'a with_args = 'a
