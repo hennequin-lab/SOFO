@@ -330,7 +330,7 @@ let gumbel_softmax (x, dx) ~tau ~with_noise ~discrete =
     | Some gumbel_noise -> Tensor.(div_scalar (x + gumbel_noise) (Scalar.f tau))
   in
   let reduce_dim_list = all_dims_but_first x in
-  let num_classes = List.hd_exn reduce_dim_list in
+  let num_classes = List.nth_exn (Tensor.shape x) 1 in
   let summed_exp_logits =
     Tensor.(
       sum_dim_intlist
@@ -362,7 +362,7 @@ let gumbel_softmax (x, dx) ~tau ~with_noise ~discrete =
     if discrete
     then (
       let pos = Tensor.argmax y ~dim:1 ~keepdim:true in
-      Tensor.one_hot pos ~num_classes)
+      Tensor.one_hot pos ~num_classes |> Tensor.squeeze)
     else y
   in
   (y_final, dy) |> assert_right_shape "gumbel_softmax"
