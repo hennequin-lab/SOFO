@@ -23,3 +23,9 @@ module Adam (W : Wrapper.T) :
   with module W = W
    and type ('a, 'b) config = ('a, 'b) Config.Adam.t
    and type ('c, _, _) init_opts = W.P.t -> 'c
+
+module SOFO_a2c (W : Wrapper.A2C) :
+  A2C
+  with module W = W
+   and type ('a, 'b) config = ('a, 'b) Config.SOFO.t
+   and type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SOFO.t -> W.P.t -> 'c

@@ -16,6 +16,28 @@ let update_each_step ((loss, ggn) as accu) info =
     in
     loss, ggn
 
+(* update loss and fisher for policy and loss and ggn for value at each step*)
+let update_each_step_a2c
+  ((policy_loss, policy_fisher, value_loss, value_ggn) as accu)
+  info
+  =
+  match info with
+  | None -> accu
+  | Some (policy_loss_ell, policy_fisher_ell, value_loss_ell, value_ggn_ell) ->
+    let policy_loss = Maths.(policy_loss + policy_loss_ell) in
+    let value_loss = Maths.(value_loss + value_loss_ell) in
+    let policy_fisher =
+      match policy_fisher_ell with
+      | None -> policy_fisher
+      | Some delta_fisher -> Tensor.(policy_fisher + delta_fisher)
+    in
+    let value_ggn =
+      match value_ggn_ell with
+      | None -> value_ggn
+      | Some delta_ggn -> Tensor.(value_ggn + delta_ggn)
+    in
+    policy_loss, policy_fisher, value_loss, value_ggn
+
 (* update loss at each step *)
 let update_loss_each_step accu info =
   match info with
@@ -186,6 +208,163 @@ module SOFO (W : Wrapper.T) = struct
     let natural_g_avg =
       let module M = Momentum (W.P) in
       M.apply ?momentum:config.momentum ~avg:state.g_avg natural_g
+    in
+    let learning_rate =
+      Option.map config.learning_rate ~f:(fun eta ->
+        Option.value_map beta_t ~default:eta ~f:(fun b -> Float.(eta / (1. - b))))
+    in
+    let new_theta = update_theta ?learning_rate ~theta natural_g_avg in
+    loss, { theta = new_theta; g_avg = Some natural_g_avg; beta_t }
+end
+
+(* A2C, where we use the Fisher for the policy and the ggn for the value *)
+module SOFO_a2c (W : Wrapper.A2C) = struct
+  module W = W
+
+  type ('a, 'b) config = ('a, 'b) Config.SOFO.t
+  type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SOFO.t -> W.P.t -> 'c
+
+  type state =
+    { theta : W.P.t
+    ; g_avg : Tensor.t W.P.p option
+    ; beta_t : float option
+    }
+
+  let params state = state.theta
+
+  let init ~(config : ('a, 'b) config) theta =
+    { theta; g_avg = None; beta_t = Option.map config.momentum ~f:(fun _ -> 1.) }
+
+  (* initialise tangents, where each tangent is normalised. *)
+  let init_tangents ~base ~rank_one ~n_tangents theta_ =
+    let vs =
+      W.P.map theta_ ~f:(fun x ->
+        sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
+    in
+    (* normalise each tangent *)
+    let normalize vs =
+      let normalizer =
+        W.P.fold vs ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
+          Tensor.(accu + Convenience.sum_except_dim0 (square v)))
+        |> Tensor.sqrt_
+        |> Tensor.reciprocal_
+      in
+      let normed_vs =
+        W.P.map vs ~f:(fun v ->
+          (* reshape normalizer from [n_tangents] to [n_tangents, 1, ...] with same shape as v. *)
+          let normalizer =
+            Tensor.view
+              normalizer
+              ~size:(List.mapi (Tensor.size v) ~f:(fun i si -> if i = 0 then si else 1))
+          in
+          Maths.Direct Tensor.(v * normalizer))
+      in
+      normed_vs
+    in
+    normalize vs
+
+  (* fold vs over sets of v_i s, multiply with associated weights. *)
+  let weighted_vs_sum vs ~weights =
+    W.P.map vs ~f:(fun v ->
+      let v_i = Maths.tangent' v in
+      let[@warning "-8"] (n_samples :: s) = Tensor.shape v_i in
+      let n_ws = Convenience.first_dim weights in
+      let v_i = Tensor.view v_i ~size:[ n_samples; -1 ] in
+      let s = if n_ws = 1 then s else n_ws :: s in
+      Tensor.(view (matmul weights v_i) ~size:s))
+
+  (* calculate natural gradient = V(VtGtGV)^-1 V^t g *)
+  let natural_g ?damping ~vs ~ggn vtg =
+    let u, s, _ = Tensor.svd ~some:true ~compute_uv:true ggn in
+    (* how each V should be weighted, as a row array *)
+    let weights =
+      let tmp = Convenience.a_trans_b u vtg in
+      let s =
+        match damping with
+        | None -> s
+        | Some gamma ->
+          let offset = Float.(gamma * Tensor.(maximum s |> to_float0_exn)) in
+          Tensor.(s + f offset)
+      in
+      Tensor.(matmul (u / s) tmp) |> Convenience.trans_2d
+    in
+    weighted_vs_sum vs ~weights
+
+  (* gradient descent on theta *)
+  let update_theta ?learning_rate ~theta dtheta =
+    match learning_rate with
+    | Some eta ->
+      let open W.P.Let_syntax in
+      let+ theta = theta
+      and++ g = dtheta in
+      Tensor.(theta - mul_scalar g (Scalar.f eta))
+    | None -> theta
+
+  let step ~(config : ('a, 'b) config) ~state ~data ~args =
+    Stdlib.Gc.major ();
+    let beta_t =
+      Option.map2 state.beta_t config.momentum ~f:(fun b beta -> Float.(b * beta))
+    in
+    (* initialise tangents *)
+    let theta = params state in
+    let theta_ = W.P.value (theta : W.P.t) in
+    let vs =
+      init_tangents
+        ~base:config.base
+        ~rank_one:config.rank_one
+        ~n_tangents:config.n_tangents
+        theta_
+    in
+    let theta_dual = W.P.make_dual theta_ ~t:vs in
+    (* define update function *)
+    let update = `loss_and_ggn_a2c update_each_step_a2c in
+    (* initialise losses and ggn for policy, losses and ggn for value function. *)
+    let init =
+      Maths.const (Tensor.f 0.), Tensor.f 0., Maths.const (Tensor.f 0.), Tensor.f 0.
+    in
+    (* compute the losses and tangents *)
+    let policy_losses, policy_fisher, value_losses, value_ggn =
+      W.f ~update ~data ~init ~args theta_dual
+    in
+    (* compute loss and vtg for policy *)
+    let batch_size = policy_losses |> Maths.primal |> Convenience.first_dim in
+    let loss =
+      Maths.(policy_losses + value_losses)
+      |> Maths.primal
+      |> Tensor.mean
+      |> Tensor.to_float0_exn
+    in
+    (** policy losses and fisher *)
+    (* normalise ggn by batch size *)
+    let policy_fisher = Tensor.div_scalar_ policy_fisher (Scalar.f Float.(of_int batch_size)) in
+    let policy_vtg =
+      Tensor.(
+        mean_dim
+        policy_fisher
+          ~dtype:(type_ policy_fisher)
+          ~dim:(Some [ 1 ])
+          ~keepdim:true)
+    in
+    (* compute natural gradient and update theta *)
+    let policy_natural_g = natural_g ?damping:config.damping ~vs ~ggn:policy_fisher policy_vtg in
+    (** critic (value) losses and ggn *)
+    (* normalise ggn by batch size *)
+    let value_ggn = Tensor.div_scalar_ value_ggn (Scalar.f Float.(of_int batch_size)) in
+    let value_loss_tangents = value_losses |> Maths.tangent |> Option.value_exn in
+    let value_vtg =
+      Tensor.(
+        mean_dim
+        value_loss_tangents
+          ~dtype:(type_ value_loss_tangents)
+          ~dim:(Some [ 1 ])
+          ~keepdim:true)
+    in
+    (* compute natural gradient and update theta *)
+    let value_natural_g = natural_g ?damping:config.damping ~vs ~ggn:value_ggn value_vtg in
+    let total_natural_g = W.P.C.(policy_natural_g + value_natural_g) in 
+    let natural_g_avg =
+      let module M = Momentum (W.P) in
+      M.apply ?momentum:config.momentum ~avg:state.g_avg total_natural_g
     in
     let learning_rate =
       Option.map config.learning_rate ~f:(fun eta ->

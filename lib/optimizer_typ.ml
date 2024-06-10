@@ -20,6 +20,28 @@ module type T = sig
     -> float * state
 end
 
+module type A2C = sig
+  module W : Wrapper.A2C
+
+  type ('a, 'b) config
+  type state
+  type ('a, 'b, 'c) init_opts
+
+  (* extract parameters from state *)
+  val params : state -> W.P.t
+
+  (* initialise state from parameters *)
+  val init : (state, 'a, 'b) init_opts
+
+  (* given current state and data, return loss and updated state *)
+  val step
+    :  config:('a, 'b) config
+    -> state:state
+    -> data:W.data
+    -> args:W.args
+    -> float * state
+end
+
 module Config = struct
   module Base = struct
     type ('a, 'b) t =
