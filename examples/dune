@@ -1,5 +1,5 @@
 (executables
- (names linear_regression)
+ (names linear_regression maze_pg)
  (libraries cmdargs bos sofo owl)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))

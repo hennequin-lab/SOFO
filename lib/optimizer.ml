@@ -221,19 +221,18 @@ end
 module SOFO_a2c (W : Wrapper.A2C) = struct
   module W = W
 
-  type ('a, 'b) config = ('a, 'b) Config.SOFO.t
-  type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SOFO.t -> W.P.t -> 'c
+  type ('a, 'b) config = ('a, 'b) Config.SOFO_a2c.t
+  type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SOFO_a2c.t -> W.P.t -> 'c
 
   type state =
     { theta : W.P.t
-    ; g_avg : Tensor.t W.P.p option
     ; beta_t : float option
     }
 
   let params state = state.theta
 
   let init ~(config : ('a, 'b) config) theta =
-    { theta; g_avg = None; beta_t = Option.map config.momentum ~f:(fun _ -> 1.) }
+    { theta;  beta_t = Option.map config.momentum ~f:(fun _ -> 1.) }
 
   (* initialise tangents, where each tangent is normalised. *)
   let init_tangents ~base ~rank_one ~n_tangents theta_ =
@@ -361,17 +360,22 @@ module SOFO_a2c (W : Wrapper.A2C) = struct
     in
     (* compute natural gradient and update theta *)
     let value_natural_g = natural_g ?damping:config.damping ~vs ~ggn:value_ggn value_vtg in
-    let total_natural_g = W.P.C.(policy_natural_g + value_natural_g) in 
-    let natural_g_avg =
+    (* let total_natural_g = W.P.C.(policy_natural_g + value_natural_g) in  *)
+    (* let natural_g_avg =
       let module M = Momentum (W.P) in
       M.apply ?momentum:config.momentum ~avg:state.g_avg total_natural_g
-    in
-    let learning_rate =
-      Option.map config.learning_rate ~f:(fun eta ->
+    in *)
+    let policy_learning_rate =
+      Option.map config.policy_learning_rate ~f:(fun eta ->
         Option.value_map beta_t ~default:eta ~f:(fun b -> Float.(eta / (1. - b))))
     in
-    let new_theta = update_theta ?learning_rate ~theta natural_g_avg in
-    loss, { theta = new_theta; g_avg = Some natural_g_avg; beta_t }
+    let value_learning_rate =
+      Option.map config.value_learning_rate ~f:(fun eta ->
+        Option.value_map beta_t ~default:eta ~f:(fun b -> Float.(eta / (1. - b))))
+    in
+    let new_theta = update_theta ?learning_rate:policy_learning_rate ~theta policy_natural_g in
+    let new_theta = update_theta ?learning_rate:value_learning_rate ~theta:new_theta value_natural_g in
+    loss, { theta = new_theta; beta_t }
 end
 
 (* forward gradient descent;: g = V V^T g where V^Tg is obtained with forward AD (Kozak 2021) *)

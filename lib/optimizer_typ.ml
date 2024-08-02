@@ -77,6 +77,28 @@ module Config = struct
       }
   end
 
+  module SOFO_a2c = struct
+    type ('a, 'b) t =
+      { base : ('a, 'b) Base.t
+      ; policy_learning_rate : float option
+      ; value_learning_rate : float option
+      ; n_tangents : int
+      ; rank_one : bool
+      ; damping : float option
+      ; momentum : float option
+      }
+
+    let default =
+      { base = Base.default
+      ; policy_learning_rate = None
+      ; value_learning_rate = None
+      ; n_tangents = 10
+      ; rank_one = false
+      ; damping = None
+      ; momentum = None
+      }
+  end
+
   module FGD = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t
