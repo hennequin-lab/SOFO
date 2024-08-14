@@ -7,6 +7,7 @@ include Maths_typ
    the associated tangents have one more dimension, corresponding to tangent batch: [K; n1; n2; ... ]
 *)
 
+(* let print s = Stdio.print_endline (Sexp.to_string_hum s) *)
 let shape (x, _) = Tensor.shape x
 
 (* int list starting from 1 and ending at the last dim of a *)
@@ -69,6 +70,19 @@ let neg (x, dx) =
   let y = Tensor.neg x in
   let dy = with_tangent dx ~f:Tensor.neg in
   (y, dy) |> assert_right_shape "neg"
+
+let trace (x, dx) =
+  assert (
+    match Tensor.shape x with
+    | [ a; b ] when a = b -> true
+    | _ -> false);
+  let y = Tensor.(reshape (trace x) ~shape:[ 1 ]) in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      Tensor.einsum [ dx ] ~equation:"qii->q" ~path:None
+      |> Tensor.reshape ~shape:[ -1; 1 ])
+  in
+  (y, dy) |> assert_right_shape "trace"
 
 (* y = sin(x), dy = cos(x) dx *)
 let sin (x, dx) =

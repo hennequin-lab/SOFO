@@ -99,6 +99,10 @@ let unary_tests =
   let test_list : unary list =
     [ "sqr", [], any_shape Maths.sqr
     ; "neg", [], any_shape Maths.neg
+    ; "trace", [ `specified_unary [ 10; 10 ] ], any_shape Maths.trace
+    ; ( "trace_with_einsum"
+      , [ `specified_unary [ 10; 10 ] ]
+      , any_shape (fun a -> Maths.einsum [ a, "ii" ] "") )
     ; "cos", [], any_shape Maths.cos
     ; "sin", [], any_shape Maths.sin
     ; "sqrt", [ `positive ], any_shape Maths.sqrt
@@ -263,6 +267,11 @@ let test_binary ((name, input_constr, f) : binary) =
         let y = generate_tensor ~shape:(snd shape) ~input_constr_list:input_constr in
         Alcotest.(check @@ rel_tol) name 0.0 (Maths.check_grad2 f x y)) )
 
+let matmul_with_einsum a b = Maths.einsum [ a, "ij"; b, "jk" ] "ik"
+
+let matmul_with_einsum2 a b =
+  Maths.einsum [ a, "ij"; Maths.transpose ~dim0:0 ~dim1:1 b, "kj" ] "ik"
+
 let binary_tests =
   let test_list : binary list =
     [ "plus", [], any_shape Maths.( + )
@@ -270,6 +279,8 @@ let binary_tests =
     ; "mult", [], any_shape Maths.( * )
     ; "div", [ `positive ], any_shape Maths.( / )
     ; "matmul", [ `matmul ], any_shape Maths.( *@ )
+    ; "matmul_with_einsum", [ `matmul ], any_shape matmul_with_einsum
+    ; "matmul_with_einsum2", [ `matmul ], any_shape matmul_with_einsum2
     ; "linsolve", [ `linsolve ], any_shape Maths.linsolve
     ; ( "concat"
       , []

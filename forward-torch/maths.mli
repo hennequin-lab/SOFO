@@ -17,6 +17,7 @@ val tangent : t -> Tensor.t option
 val view : t -> size:int list -> t
 
 val neg : t -> t
+val trace : t -> t
 val sin : t -> t
 val cos : t -> t
 val sqr : t -> t
