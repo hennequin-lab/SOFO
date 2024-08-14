@@ -72,6 +72,9 @@ val ( /$ ) : t -> float -> t
 (* matrix multiplication. *)
 val ( *@ ) : t -> t -> t
 
+(* Einstein summation *)
+val einsum : (t * string) list -> string -> t
+
 (* ax = b, find x*)
 val linsolve : t -> t -> t
 

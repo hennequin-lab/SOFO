@@ -92,14 +92,11 @@ struct
 end
 
 (* negative utility, which has been defined upstream *)
-module RL_loss (X : sig
-    val scaling_factor : float
-  end) =
-struct
+module RL_loss = struct
   type 'a with_args = 'a
 
   let vtgt_gv ~vtgt =
     let n_samples = Convenience.first_dim vtgt in
     let vtgt_mat = Tensor.reshape vtgt ~shape:[ n_samples; -1 ] in
-    Tensor.(Convenience.a_b_trans vtgt_mat vtgt_mat)
+    Convenience.a_b_trans vtgt_mat vtgt_mat
 end

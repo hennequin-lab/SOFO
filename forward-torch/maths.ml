@@ -531,6 +531,37 @@ let ( *@ ) (x, dx) (y, dy) =
   in
   (z, dz) |> assert_right_shape "( *@ )"
 
+let __einsum_primal operands return =
+  let equation = String.concat ~sep:"," (List.map ~f:snd operands) ^ "->" ^ return in
+  Tensor.einsum ~equation (List.map ~f:fst operands) ~path:None
+
+(* einsum [ a, "ij"; b, "jk"; c, "ki" ] "ii" *)
+let einsum (operands : (t * string) list) return =
+  let tangent_id = 'x' in
+  assert (not (String.contains return tangent_id));
+  assert (
+    List.fold operands ~init:true ~f:(fun accu (_, eq) ->
+      accu && not (String.contains eq tangent_id)));
+  let primal =
+    __einsum_primal (List.map operands ~f:(fun ((primal, _), eq) -> primal, eq)) return
+  in
+  let tangent =
+    List.foldi operands ~init:None ~f:(fun i accu (op, eq) ->
+      match tangent op with
+      | None -> accu
+      | Some dop ->
+        let ops =
+          List.mapi operands ~f:(fun j (op', eq') ->
+            if i = j then dop, String.of_char tangent_id ^ eq else fst op', eq')
+        in
+        let return = String.of_char tangent_id ^ return in
+        let tangent_contrib = __einsum_primal ops return in
+        (match accu with
+         | None -> Some tangent_contrib
+         | Some a -> Some Tensor.(a + tangent_contrib)))
+  in
+  primal, Option.map tangent ~f:(fun x -> Direct x)
+
 (* solve for ax=b. *)
 let linsolve (a, da) (b, db) =
   let z = Tensor.linalg_solve ~a ~b ~left:true in
