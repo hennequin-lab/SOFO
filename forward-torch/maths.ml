@@ -65,6 +65,16 @@ let view (x, dx) ~size =
   in
   (y, dy) |> assert_right_shape "view"
 
+let permute (x, dx) ~dims = 
+  let y = Tensor.permute x ~dims in 
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let tensor_dims = 0 :: (List.map dims ~f:(fun i -> i + 1)) in 
+      Tensor.permute dx ~dims:tensor_dims)
+  in
+  (y, dy) |> assert_right_shape "permute"
+
+
 (* y = -x, dy = -dx *)
 let neg (x, dx) =
   let y = Tensor.neg x in

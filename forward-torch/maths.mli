@@ -16,6 +16,7 @@ val tangent : t -> Tensor.t option
 (** Unary operations *)
 val view : t -> size:int list -> t
 
+val permute : t -> dims:int list -> t
 val neg : t -> t
 val trace : t -> t
 val sin : t -> t

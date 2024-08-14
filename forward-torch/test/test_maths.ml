@@ -97,7 +97,10 @@ let test_unary ((name, input_constr, f) : unary) =
 
 let unary_tests =
   let test_list : unary list =
-    [ "sqr", [], any_shape Maths.sqr
+    [ ( "permute"
+      , [ `specified_unary [ 2; 3; 6; 4 ] ]
+      , any_shape (Maths.permute ~dims:[ 0; 2; 3; 1 ]) )
+    ; "sqr", [], any_shape Maths.sqr
     ; "neg", [], any_shape Maths.neg
     ; "trace", [ `specified_unary [ 10; 10 ] ], any_shape Maths.trace
     ; ( "trace_with_einsum"
