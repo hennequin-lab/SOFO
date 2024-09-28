@@ -26,6 +26,8 @@ val sqrt : t -> t
 val log : t -> t
 val exp : t -> t
 val tanh : t -> t
+val inv_sqr : t -> t
+val inv_rectangle : ?rcond:float -> t -> t
 val relu : t -> t
 val sigmoid : t -> t
 val softplus : t -> t

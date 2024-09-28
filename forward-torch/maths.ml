@@ -65,15 +65,14 @@ let view (x, dx) ~size =
   in
   (y, dy) |> assert_right_shape "view"
 
-let permute (x, dx) ~dims = 
-  let y = Tensor.permute x ~dims in 
+let permute (x, dx) ~dims =
+  let y = Tensor.permute x ~dims in
   let dy =
     with_tangent dx ~f:(fun dx ->
-      let tensor_dims = 0 :: (List.map dims ~f:(fun i -> i + 1)) in 
+      let tensor_dims = 0 :: List.map dims ~f:(fun i -> i + 1) in
       Tensor.permute dx ~dims:tensor_dims)
   in
   (y, dy) |> assert_right_shape "permute"
-
 
 (* y = -x, dy = -dx *)
 let neg (x, dx) =
@@ -149,6 +148,34 @@ let tanh (x, dx) =
       Tensor.mul tmp dx)
   in
   (y, dy) |> assert_right_shape "tanh"
+
+(* invert a square matrix; y = x^-1, dy = - x^-1 dx x^-1 *)
+let inv_sqr (x, dx) =
+  assert (List.length (Tensor.shape x) = 2);
+  assert (List.hd_exn (Tensor.shape x) = List.nth_exn (Tensor.shape x) 1);
+  (* let y =
+     let u, s, vt = Tensor.svd ~some:true ~compute_uv:true x in
+     let tran_2d = Tensor.transpose ~dim0:1 ~dim1:0 in
+     Tensor.(matmul (tran_2d vt / s) (tran_2d u))
+     in *)
+  let y = Tensor.inverse x in
+  let dy = with_tangent dx ~f:(fun dx -> Tensor.(neg (matmul y (matmul dx y)))) in
+  (y, dy) |> assert_right_shape "inv_sqr"
+
+(* pseudo-inverse of a matrix of size [m x n] where m != n *)
+let inv_rectangle ?(rcond = 1e-6) (x, dx) =
+  assert (List.length (Tensor.shape x) = 2);
+  let y = Tensor.pinverse x ~rcond in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let tran_2d = Tensor.transpose ~dim0:1 ~dim1:0 in
+      let xTx = Tensor.(matmul (tran_2d x) x) in
+      let tmp1 = Tensor.(matmul (inverse xTx) (Tensor.transpose dx ~dim0:2 ~dim1:1)) in
+      let tmp2 = Tensor.(matmul tmp1 (matmul x y)) in
+      let tmp3 = Tensor.(matmul y (matmul dx y)) in
+      Tensor.(tmp1 - tmp2 - tmp3))
+  in
+  (y, dy) |> assert_right_shape "inv_rectangle"
 
 let relu (x, dx) =
   let y = Tensor.relu x in
