@@ -16,7 +16,7 @@ let _ =
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
-let batch_size = 5
+let batch_size = 256
 let base = Optimizer.Config.Base.default
 let to_device = Tensor.of_bigarray ~device:base.device
 
@@ -41,10 +41,10 @@ let with_given_seed_owl seed f =
 let base = Optimizer.Config.Base.default
 
 module Lds_params_dim_tan = struct
-  let a = 4
-  let b = 1
-  let n_steps = 10
-  let n_tangents = 3
+  let a = 24
+  let b = 10
+  let n_steps = 20
+  let n_tangents = 256
   let kind = base.kind
   let device = base.device
 end
@@ -67,9 +67,10 @@ let q, r = with_given_seed_owl 1985 control_costs
 let sample_data_tan bs =
   let x0, x_u_list = Data_Tan.batch_trajectory bs in
   let targets_list = List.map x_u_list ~f:(fun (x, _) -> Some x) in
-  x0, targets_list
+  let target_controls_list = List.map x_u_list ~f:(fun (_, u) -> Some u) in
+  x0, targets_list, target_controls_list
 
-let x0, targets_list = sample_data_tan batch_size
+let x0, targets_list, target_controls_list = sample_data_tan batch_size
 let lds_params = Data_Tan.lds_params
 
 (* form state params/cost_params/xu_desired *)
@@ -113,4 +114,15 @@ let x_list2, u_list2 = Lqt.sep_primal_tan_lqt ~state_params ~x_u_desired ~cost_p
 
 let _ =
   List.iter2_exn x_list1 x_list2 ~f:(fun x1 x2 ->
-    Tensor.(print (Option.value_exn Maths.(tangent (x1 - x2)))))
+    let per_error_tan =
+      Tensor.(
+        norm (Option.value_exn Maths.(tangent (x2 - x1)))
+        / norm (Option.value_exn (Maths.tangent x1)))
+    in
+    Tensor.print per_error_tan
+    (* let per_error_primal =
+       Tensor.(norm Maths.(primal (x2 - x1)) / norm (Maths.primal x1))
+       in
+       Tensor.print per_error_primal *)
+    (* Tensor.(print (Option.value_exn Maths.(tangent (x1 - x2)))) *)
+    (* Tensor.(print ( Maths.(primal (x1 - x2)))); *))

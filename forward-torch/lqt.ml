@@ -310,6 +310,7 @@ let sep_primal_tan_lqt
   (* control dim *)
   let b_dim = List.nth_exn (Tensor.shape b_eg) 1 in
   let n_tangents = List.hd_exn (Tensor.shape (Option.value_exn (Maths.tangent x_0))) in
+  let m = List.nth_exn (Tensor.shape (Option.value_exn (Maths.tangent x_0))) 1 in
   (* step 1: lqt on the primal *)
   let extract_primal_opt list =
     List.map list ~f:(fun i -> Option.map i ~f:Maths.primal)
@@ -340,6 +341,7 @@ let sep_primal_tan_lqt
       ~x_u_desired:x_u_desired_tensor
       ~cost_params:cost_params_tensor
   in
+  Stdlib.Gc.major ();
   (* step 2: for each tangent, calculate the new targets *)
   let extract_kth_tan ~list k =
     let tan_shape = Tensor.shape (Maths.primal (List.hd_exn list)) in
@@ -406,6 +408,7 @@ let sep_primal_tan_lqt
   (* list of n_tangents, each element a tuple of x_list, u_list, each of length n_steps. *)
   let tangents_lqt =
     List.init n_tangents ~f:(fun k ->
+      Stdlib.Gc.major ();
       (* extract k-th tangent for Q, R, A, B *)
       let q_kth_tan_list = extract_kth_tan ~list:q_list k in
       let r_kth_tan_list = extract_kth_tan ~list:r_list k in
@@ -420,7 +423,7 @@ let sep_primal_tan_lqt
         extract_kth_tan_opt ~list:f_t_list ~tan_shape k
       in
       let u_d_kth_tan_list =
-        let tan_shape = [ b_dim; 1 ] in
+        let tan_shape = [ m; b_dim ] in
         extract_kth_tan_opt ~list:u_d_list ~tan_shape k
       in
       (* iterate to extract new x_targets, which go from 1 to T *)
@@ -510,7 +513,7 @@ let sep_primal_tan_lqt
       let x_u_desired_kth_tan =
         { x_0 = x_0_kth_tan; x_d_list = x_d_kth_tan_list; u_d_list = u_d_kth_tan_list }
       in
-      (* f_t new goes from 0 to T-1;  f_t new = df_t + xt dA^T + u_t dB^T *)
+      (* f_t new goes from 0 to T-1;  f_t new = df_t + x_t dA^T + u_t dB^T *)
       let new_ft_kth_tan_list =
         List.init state_params.n_steps ~f:(fun t ->
           let x = List.nth_exn x_list_primal t in
@@ -544,6 +547,7 @@ let sep_primal_tan_lqt
         ~x_u_desired:x_u_desired_kth_tan
         ~cost_params:cost_params_tensor)
   in
+  Stdlib.Gc.major ();
   (* step 3: merge primal and tangents for x and u. *)
   let merge_primal_tan primal_list tangents_lqt =
     List.map2_exn primal_list tangents_lqt ~f:(fun primal tan_list ->
