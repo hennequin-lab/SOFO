@@ -37,7 +37,7 @@ let lqt
   let eye_b_dim = Tensor.eye ~n:b_dim ~options:(kind, device) |> Maths.const in
   (* iterate the matrix P and the vector p simultaneously *)
   let p_mat_vec_iter ~p_mat_next ~p_vec_next t =
-    let x_d_t = if t = 0 then Some x_0 else extract x_d_list Int.(t - 1) in
+    let x_d_t = extract x_d_list Int.(t - 1) in
     let u_d_t = extract u_d_list t in
     let f_t = extract f_t_list t in
     let q_t = extract q_list Int.(t - 1) in
@@ -60,7 +60,7 @@ let lqt
         | None, Some f_t -> Maths.(p_vec_next - (f_t *@ p_mat_next))
       in
       let tmp2 =
-        Maths.((eye_a_dim - (p_mat_next *@ b_t *@ lambda_inv *@ b_t_trans)) *@ a_t)
+        Maths.((eye_a_dim - (b_t *@ lambda_inv *@ b_t_trans *@ p_mat_next)) *@ a_t)
       in
       match x_d_t with
       | None -> Maths.(tmp1 *@ tmp2)
@@ -68,7 +68,7 @@ let lqt
     in
     p_mat_curr, p_vec_curr
   in
-  (* get a list of P matrices and p vectors form t = 0 to t = T - 1 *)
+  (* get a list of P matrices and p vectors form t = 1 to t = T *)
   let p_mat_list, p_vec_list =
     let q_T = List.last_exn q_list in
     (* if no x_d_T set p_vec_T to zeros *)
@@ -104,11 +104,11 @@ let lqt
       | None -> Maths.(common - p_vec_next)
       | Some f_curr -> Maths.(common + (f_curr *@ p_mat_next) - p_vec_next)
     in
-    let tmp_mult = Maths.(neg tmp1 *@ b_curr *@ r_curr_inv *@ sigma_inv) in
+    let tmp_mult = Maths.(neg tmp1 *@ b_curr *@ r_curr_inv *@ trans_2d sigma_inv) in
     let u_curr =
       match u_d_curr with
       | None -> tmp_mult
-      | Some u_d_curr -> Maths.(tmp_mult + (u_d_curr *@ sigma_inv))
+      | Some u_d_curr -> Maths.(tmp_mult + (u_d_curr *@ trans_2d sigma_inv))
     in
     u_curr
   in
@@ -168,7 +168,7 @@ let lqt_tensor
   let eye_b_dim = Tensor.eye ~n:b_dim ~options:(kind, device) in
   (* iterate the matrix P and the vector p simultaneously *)
   let p_mat_vec_iter ~p_mat_next ~p_vec_next t =
-    let x_d_t = if t = 0 then Some x_0 else extract x_d_list Int.(t - 1) in
+    let x_d_t = extract x_d_list Int.(t - 1) in
     let u_d_t = extract u_d_list t in
     let f_t = extract f_t_list t in
     let q_t = extract q_list Int.(t - 1) in
@@ -192,7 +192,7 @@ let lqt_tensor
         | None, Some f_t -> Tensor.(p_vec_next - matmul f_t p_mat_next)
       in
       let tmp2 =
-        let tmp = Tensor.(matmul p_mat_next (matmul b_t (matmul lambda_inv b_t_trans))) in
+        let tmp = Tensor.(matmul (matmul b_t (matmul lambda_inv b_t_trans)) p_mat_next) in
         Tensor.(matmul (eye_a_dim - tmp) a_t)
       in
       match x_d_t with
@@ -201,7 +201,7 @@ let lqt_tensor
     in
     p_mat_curr, p_vec_curr
   in
-  (* get a list of P matrices and p vectors form t = 0 to t = T - 1 *)
+  (* get a list of P matrices and p vectors from t = 1 to t = T *)
   let p_mat_list, p_vec_list =
     let q_T = List.last_exn q_list in
     (* if no x_d_T set p_vec_T to zeros *)
@@ -242,12 +242,13 @@ let lqt_tensor
       | Some f_curr -> Tensor.(common + matmul f_curr p_mat_next - p_vec_next)
     in
     let tmp_mult =
-      Tensor.(neg (matmul tmp1 (matmul b_curr (matmul r_curr_inv sigma_inv))))
+      Tensor.(
+        neg (matmul tmp1 (matmul b_curr (matmul r_curr_inv (trans_2d_tensor sigma_inv)))))
     in
     let u_curr =
       match u_d_curr with
       | None -> tmp_mult
-      | Some u_d_curr -> Tensor.(tmp_mult + matmul u_d_curr sigma_inv)
+      | Some u_d_curr -> Tensor.(tmp_mult + matmul u_d_curr (trans_2d_tensor sigma_inv))
     in
     u_curr
   in
@@ -306,6 +307,8 @@ let sep_primal_tan_lqt
   let f_t_list = state_params.f_t_list in
   let b_eg = Maths.primal (List.hd_exn b_list) in
   let device = Tensor.device b_eg in
+  (* control dim *)
+  let b_dim = List.nth_exn (Tensor.shape b_eg) 1 in
   let n_tangents = List.hd_exn (Tensor.shape (Option.value_exn (Maths.tangent x_0))) in
   (* step 1: lqt on the primal *)
   let extract_primal_opt list =
@@ -338,7 +341,8 @@ let sep_primal_tan_lqt
       ~cost_params:cost_params_tensor
   in
   (* step 2: for each tangent, calculate the new targets *)
-  let extract_kth_tan ~list ~k tan_shape =
+  let extract_kth_tan ~list k =
+    let tan_shape = Tensor.shape (Maths.primal (List.hd_exn list)) in
     List.map list ~f:(fun x ->
       let tangent = Maths.tangent x in
       let reshaped_tangent =
@@ -350,11 +354,24 @@ let sep_primal_tan_lqt
       in
       Some reshaped_tangent)
   in
-  let extract_and_reshape ~list k =
-    let shape = Tensor.shape (Maths.primal (List.hd_exn list)) in
-    extract_kth_tan ~list ~k shape
+  (* since the list might contain only one element of None, we need to specify the shape *)
+  let extract_kth_tan_opt ~list ~tan_shape k =
+    List.map list ~f:(fun x ->
+      Option.value_map x ~default:(Tensor.zeros tan_shape ~device) ~f:(fun x ->
+        let tangent = Maths.tangent x in
+        let reshaped_tangent =
+          Option.value_map
+            tangent
+            ~default:(Tensor.zeros tan_shape ~device)
+            ~f:(fun tan ->
+              let k_th_tan =
+                Tensor.slice tan ~dim:0 ~start:(Some k) ~end_:(Some Int.(k + 1)) ~step:1
+              in
+              Tensor.reshape k_th_tan ~shape:tan_shape)
+        in
+        reshaped_tangent))
   in
-  (* iterate to extract lambda obtained from the primal lqt *)
+  (* iterate to extract lambda obtained from the primal lqt; lambda goes from 1 to T. *)
   let lambda_list =
     let lambda_final =
       let q_final = List.last_exn q_primal_list in
@@ -368,7 +385,7 @@ let sep_primal_tan_lqt
     in
     let rec lambda_rec t lambda_next lambda_accu =
       if t = 0
-      then List.rev lambda_accu
+      then lambda_accu
       else (
         let a_curr = extract a_primal_list t in
         let q_curr = extract q_primal_list Int.(t - 1) in
@@ -380,22 +397,32 @@ let sep_primal_tan_lqt
             x)
         in
         let lambda =
-          Tensor.(
-            matmul lambda_next a_curr
-            + matmul (x_curr - x_d_curr) (trans_2d_tensor q_curr))
+          Tensor.(matmul lambda_next a_curr + matmul (x_curr - x_d_curr) q_curr)
         in
         lambda_rec Int.(t - 1) lambda (lambda :: lambda_accu))
     in
-    lambda_rec state_params.n_steps lambda_final [ lambda_final ]
+    lambda_rec Int.(state_params.n_steps - 1) lambda_final [ lambda_final ]
   in
   (* list of n_tangents, each element a tuple of x_list, u_list, each of length n_steps. *)
   let tangents_lqt =
     List.init n_tangents ~f:(fun k ->
       (* extract k-th tangent for Q, R, A, B *)
-      let q_kth_tan_list = extract_and_reshape ~list:q_list k in
-      let r_kth_tan_list = extract_and_reshape ~list:r_list k in
-      let a_kth_tan_list = extract_and_reshape ~list:a_list k in
-      let b_kth_tan_list = extract_and_reshape ~list:b_list k in
+      let q_kth_tan_list = extract_kth_tan ~list:q_list k in
+      let r_kth_tan_list = extract_kth_tan ~list:r_list k in
+      let a_kth_tan_list = extract_kth_tan ~list:a_list k in
+      let b_kth_tan_list = extract_kth_tan ~list:b_list k in
+      let x_d_kth_tan_list =
+        let tan_shape = Tensor.shape x_0_primal in
+        extract_kth_tan_opt ~list:x_d_list ~tan_shape k
+      in
+      let f_t_kth_tan =
+        let tan_shape = Tensor.shape x_0_primal in
+        extract_kth_tan_opt ~list:f_t_list ~tan_shape k
+      in
+      let u_d_kth_tan_list =
+        let tan_shape = [ b_dim; 1 ] in
+        extract_kth_tan_opt ~list:u_d_list ~tan_shape k
+      in
       (* iterate to extract new x_targets, which go from 1 to T *)
       let x_d_kth_tan_list =
         List.init state_params.n_steps ~f:(fun i ->
@@ -408,6 +435,8 @@ let sep_primal_tan_lqt
             let x_d_opt = extract x_d_primal_list Int.(t - 1) in
             Option.value_map x_d_opt ~default:(Tensor.zeros_like x) ~f:(fun x -> x)
           in
+          (* tangent of x_d *)
+          let dx_d = extract x_d_kth_tan_list Int.(t - 1) in
           let dq_kth =
             let dq_opt = extract q_kth_tan_list Int.(t - 1) in
             Option.value_map
@@ -425,10 +454,10 @@ let sep_primal_tan_lqt
           let final =
             let common = Tensor.(matmul (x - x_d) (trans_2d_tensor dq_kth)) in
             if t = state_params.n_steps
-            then Tensor.(neg (matmul common q_inv))
+            then Tensor.(neg (matmul common q_inv) + dx_d)
             else (
               let lambda_next = List.nth_exn lambda_list t in
-              Tensor.(neg (matmul (common + matmul lambda_next da_kth) q_inv)))
+              Tensor.(neg (matmul (common + matmul lambda_next da_kth) q_inv) + dx_d))
           in
           Some final)
       in
@@ -444,6 +473,8 @@ let sep_primal_tan_lqt
             let u_d_opt = extract u_d_primal_list i in
             Option.value_map u_d_opt ~default:(Tensor.zeros_like u) ~f:(fun x -> x)
           in
+          (* tangent of x_d *)
+          let du_d = extract u_d_kth_tan_list i in
           let dr_kth =
             let dr_opt = extract r_kth_tan_list i in
             Option.value_map
@@ -463,7 +494,8 @@ let sep_primal_tan_lqt
               neg
                 (matmul
                    (matmul (u - u_d) (trans_2d_tensor dr_kth) + matmul lambda_next db_kth)
-                   r_inv)))
+                   r_inv)
+              + du_d))
       in
       let x_0_kth_tan =
         Option.value_map
@@ -478,8 +510,37 @@ let sep_primal_tan_lqt
       let x_u_desired_kth_tan =
         { x_0 = x_0_kth_tan; x_d_list = x_d_kth_tan_list; u_d_list = u_d_kth_tan_list }
       in
+      (* f_t new goes from 0 to T-1;  f_t new = df_t + xt dA^T + u_t dB^T *)
+      let new_ft_kth_tan_list =
+        List.init state_params.n_steps ~f:(fun t ->
+          let x = List.nth_exn x_list_primal t in
+          let da_kth =
+            let da_opt = extract a_kth_tan_list t in
+            Option.value_map
+              da_opt
+              ~default:(Tensor.zeros_like (List.hd_exn a_primal_list))
+              ~f:(fun x -> x)
+          in
+          let u = List.nth_exn u_list_primal t in
+          let db_kth =
+            let db_opt = extract b_kth_tan_list t in
+            Option.value_map
+              db_opt
+              ~default:(Tensor.zeros_like (List.hd_exn b_primal_list))
+              ~f:(fun x -> x)
+          in
+          let df_t_kth = extract f_t_kth_tan t in
+          Tensor.(
+            df_t_kth
+            + matmul x (trans_2d_tensor da_kth)
+            + matmul u (trans_2d_tensor db_kth)))
+        |> List.map ~f:(fun x -> Some x)
+      in
+      let state_params_tensor_kth_tan =
+        { state_params_tensor with f_t_list = new_ft_kth_tan_list }
+      in
       lqt_tensor
-        ~state_params:state_params_tensor
+        ~state_params:state_params_tensor_kth_tan
         ~x_u_desired:x_u_desired_kth_tan
         ~cost_params:cost_params_tensor)
   in
