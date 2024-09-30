@@ -179,8 +179,7 @@ let lqt_tensor
     let lambda_inv = Tensor.inverse lambda in
     let common = Tensor.(matmul p_mat_next (matmul b_t (matmul lambda_inv b_t_trans))) in
     let p_mat_curr =
-      Tensor.(
-        q_t + matmul a_t_trans (p_mat_next - (matmul (matmul common p_mat_next)) a_t))
+      Tensor.(q_t + matmul a_t_trans (matmul (p_mat_next - matmul common p_mat_next) a_t))
     in
     let p_vec_curr =
       let tmp1 =
@@ -296,6 +295,7 @@ let sep_primal_tan_lqt
   ~(x_u_desired : x_u_desired)
   ~(cost_params : cost_params)
   =
+  (* step 0: extract the parameters *)
   let x_0 = x_u_desired.x_0 in
   let x_d_list = x_u_desired.x_d_list in
   let u_d_list = x_u_desired.u_d_list in
@@ -308,10 +308,6 @@ let sep_primal_tan_lqt
   let device = Tensor.device b_eg in
   let n_tangents = List.hd_exn (Tensor.shape (Option.value_exn (Maths.tangent x_0))) in
   (* step 1: lqt on the primal *)
-  (* let extract_primal_opt list =
-     List.map list ~f:(fun i ->
-     Option.value_map i ~default:None ~f:(fun x -> Some (Maths.primal x)))
-     in *)
   let extract_primal_opt list =
     List.map list ~f:(fun i -> Option.map i ~f:Maths.primal)
   in

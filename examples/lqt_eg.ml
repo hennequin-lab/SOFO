@@ -162,4 +162,7 @@ let x_list1, u_list1 = Lqt.lqt ~state_params ~x_u_desired ~cost_params
 let x_list2, u_list2 = Lqt.sep_primal_tan_lqt ~state_params ~x_u_desired ~cost_params
 
 let _ =
-  List.iter2_exn x_list1 x_list2 ~f:(fun x1 x2 -> Tensor.print Maths.(primal (x1 - x2)))
+  List.iter2_exn x_list1 x_list2 ~f:(fun x1 x2 ->
+    (* Tensor.print (Maths.primal x1);
+       Tensor.print (Maths.primal x2); *)
+    Tensor.(print (Option.value_exn Maths.(tangent (x1 - x2)))))
