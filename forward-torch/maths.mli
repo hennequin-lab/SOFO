@@ -83,6 +83,7 @@ val einsum : (t * string) list -> string -> t
 
 (* ax = b, find x*)
 val linsolve : t -> t -> left:bool -> t
+val linsolve_triangular : t -> t -> left:bool -> upper:bool -> t
 
 val conv2d
   :  ?padding:int * int

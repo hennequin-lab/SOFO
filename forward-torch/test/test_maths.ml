@@ -293,6 +293,7 @@ let matmul_with_einsum a b = Maths.einsum [ a, "ij"; b, "jk" ] "ik"
 let matmul_with_einsum2 a b =
   Maths.einsum [ a, "ij"; Maths.transpose ~dim0:0 ~dim1:1 b, "kj" ] "ik"
 
+
 let binary_tests =
   let test_list : binary list =
     [ "plus", [], any_shape Maths.( + )
