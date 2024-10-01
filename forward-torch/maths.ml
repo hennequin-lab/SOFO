@@ -292,6 +292,70 @@ let transpose (x, dx) ~dim0 ~dim1 =
   let dy = with_tangent dx ~f:(Tensor.transpose_copy ~dim0:(dim0 + 1) ~dim1:(dim1 + 1)) in
   (y, dy) |> assert_right_shape "transpose"
 
+let print s = Stdio.printf "%s\n%!" (Base.Sexp.to_string_hum s)
+
+let last_two_elements lst =
+  let len = List.length lst in
+  if len < 2 then None else Some (List.drop lst (len - 2))
+
+(* y y^T = x, x needs to be positive semi-definite. TODO: tangents wrong! *)
+(* let cholesky (x, dx) =
+  let primal_shape = last_two_elements (Tensor.shape x) |> Option.value_exn in
+  let y = Tensor.linalg_cholesky ~upper:false x in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let a = List.drop_last_exn (Tensor.shape dx) in
+      let b = List.drop_last_exn a in
+      let km =
+        if List.length b = 2
+        then List.fold_left ~init:1 ~f:(fun acc x -> acc * x) b
+        else List.hd_exn b
+      in
+      (* let b_batched = List.init bs ~f:(fun m -> *)
+      let dx_squeezed = Tensor.reshape dx ~shape:(km :: primal_shape) in
+      let y_squeezed = Tensor.reshape y ~shape:(km :: primal_shape) in
+      print [%message (Tensor.shape dx_squeezed : int list)];
+      let tang_list =
+        List.init km ~f:(fun i ->
+          let dx_i =
+            Tensor.slice
+              dx_squeezed
+              ~dim:0
+              ~start:(Some i)
+              ~end_:(Some Int.(i + 1))
+              ~step:1
+            |> Tensor.squeeze
+          in
+          let b_i =
+            let lower = Tensor.tril ~diagonal:(-1) dx_i in
+            let diag_half = Tensor.(div_scalar (diag dx_i ~diagonal:0) (Scalar.f 2.)) in
+            Tensor.(diag ~diagonal:0 diag_half + lower)
+          in
+          let y_i =
+            Tensor.slice
+              y_squeezed
+              ~dim:0
+              ~start:(Some i)
+              ~end_:(Some Int.(i + 1))
+              ~step:1
+            |> Tensor.squeeze
+          in
+          print [%message (Tensor.shape b_i : int list) (Tensor.shape y_i : int list)];
+          (* use linsolve to solve for dy *)
+          let dy_i =
+            Tensor.linalg_solve
+              ~left:false
+              ~a:(Tensor.transpose y_i ~dim0:1 ~dim1:0)
+              ~b:b_i
+          in
+          Tensor.reshape dy_i ~shape:(1 :: Tensor.shape x))
+      in
+      let dx = Tensor.concat tang_list ~dim:0 in
+      let final_dx = Tensor.reshape dx ~shape:(b @ primal_shape) in
+      final_dx)
+  in
+  (y, dy) |> assert_right_shape "cholesky" *)
+
 (* y = log of sum of exp(x_i), dy = sum of exp (x_i - y) dx_i *)
 let logsumexp (x, dx) ~dim ~keepdim =
   let y = Tensor.logsumexp x ~dim ~keepdim in
@@ -313,58 +377,6 @@ let logsumexp (x, dx) ~dim ~keepdim =
       Tensor.(sum_dim_intlist ~dim:(Some dim) ~keepdim ~dtype:(type_ x) tmp))
   in
   (y, dy) |> assert_right_shape "logsumexp"
-
-(* x are the categorical probabilities. *)
-(* let gumbel_softmax (x, dx) ~tau ~with_noise ~discrete =
-   let gumbel_noise =
-   if with_noise
-   then (
-   let uniform_noise = Tensor.uniform x ~from:0. ~to_:1. in
-   Some Tensor.(neg (log (neg (log uniform_noise)))))
-   else None
-   in
-   let logits =
-   match gumbel_noise with
-   | None -> Tensor.(div_scalar (log x) (Scalar.f tau))
-   | Some gumbel_noise -> Tensor.(div_scalar (log x + gumbel_noise) (Scalar.f tau))
-   in
-   let reduce_dim_list = all_dims_but_first x in
-   let num_classes = List.hd_exn reduce_dim_list in
-   let summed_exp_logits =
-   Tensor.(
-   sum_dim_intlist
-   (exp logits)
-   ~dim:(Some reduce_dim_list)
-   ~keepdim:true
-   ~dtype:(Tensor.type_ x))
-   in
-   let y = Tensor.(exp (logits - logsumexp ~dim:reduce_dim_list ~keepdim:true logits)) in
-   let dy =
-   with_tangent dx ~f:(fun dx ->
-   let tmp1 = Tensor.(div_scalar (y * dx / x) (Scalar.f tau)) in
-   let reduce_dim_list_dx = List.map reduce_dim_list ~f:Int.succ in
-   let tmp2 =
-   let logits_diff = Tensor.(div_scalar (exp logits * dx / x) (Scalar.f tau)) in
-   let logits_diff_summed =
-   Tensor.sum_dim_intlist
-   logits_diff
-   ~dim:(Some reduce_dim_list_dx)
-   ~keepdim:true
-   ~dtype:(Tensor.type_ dx)
-   in
-   Tensor.(logits_diff_summed * y / summed_exp_logits)
-   in
-   Tensor.(tmp1 - tmp2))
-   in
-   (* if discrete, return one-hot encoded version *)
-   let y_final =
-   if discrete
-   then (
-   let pos = Tensor.argmax y ~dim:1 ~keepdim:true in
-   Tensor.one_hot pos ~num_classes)
-   else y
-   in
-   (y_final, dy) |> assert_right_shape "gumbel_softmax" *)
 
 (* x are the categorical logits. *)
 let gumbel_softmax (x, dx) ~tau ~with_noise ~discrete =
@@ -613,9 +625,9 @@ let einsum (operands : (t * string) list) return =
   in
   primal, Option.map tangent ~f:(fun x -> Direct x)
 
-(* solve for ax=b. *)
-let linsolve (a, da) (b, db) =
-  let z = Tensor.linalg_solve ~a ~b ~left:true in
+(* solve for ax=b (if left true) abd xa = b (if left false). Note that if left is false, then b must be 3D (i.e. m x p x n) whereas if left is true, b can be 2D (i.e. m x n) *)
+let linsolve (a, da) (b, db) ~left =
+  let z = Tensor.linalg_solve ~a ~b ~left in
   let a_shape = Tensor.shape a in
   let b_shape = Tensor.shape b in
   let dz =
@@ -625,31 +637,64 @@ let linsolve (a, da) (b, db) =
       ~fx:(fun da ->
         let num_tangents_a = List.hd_exn (Tensor.shape da) in
         let a_exp = Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true in
-        let da_z =
-          match List.length b_shape with
-          | 2 -> Tensor.einsum ~equation:"ijkm,jm->ijk" [ da; z ] ~path:None
-          | 1 -> Tensor.einsum ~equation:"ijkm,jmp->ijkp" [ da; z ] ~path:None
-          | _ -> assert false
+        let final =
+          if left
+          then (
+            let da_z =
+              match List.length b_shape with
+              | 2 -> Tensor.einsum ~equation:"ijkm,jm->ijk" [ da; z ] ~path:None
+              | 3 -> Tensor.einsum ~equation:"ijkm,jmp->ijkp" [ da; z ] ~path:None
+              | _ -> assert false
+            in
+            let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(neg da_z) ~left:true in
+            dx)
+          else (
+            let z_da =
+              match List.length b_shape with
+              | 3 -> Tensor.einsum ~equation:"jpk,ijkm->ijpm" [ z; da ] ~path:None
+              | _ -> assert false
+            in
+            let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(neg z_da) ~left:false in
+            dx)
         in
-        let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(neg da_z) ~left:true in
-        dx)
+        final)
       ~fy:(fun db ->
         let num_tangents_b = List.hd_exn (Tensor.shape db) in
         let a_exp = Tensor.expand a ~size:(num_tangents_b :: a_shape) ~implicit:true in
-        Tensor.linalg_solve ~a:a_exp ~b:db ~left:true)
+        if left
+        then Tensor.linalg_solve ~a:a_exp ~b:db ~left:true
+        else Tensor.linalg_solve ~a:a_exp ~b:db ~left:false)
       ~fxy:(fun da db ->
         let num_tangents_a = List.hd_exn (Tensor.shape da) in
         let num_tangents_b = List.hd_exn (Tensor.shape db) in
         assert (num_tangents_a = num_tangents_b);
-        let a_exp = Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true in
-        let da_z =
-          match List.length b_shape with
-          | 2 -> Tensor.einsum ~equation:"ijkm,jm->ijk" [ da; z ] ~path:None
-          | 3 -> Tensor.einsum ~equation:"ijkm,jmp->ijkp" [ da; z ] ~path:None
-          | _ -> assert false
+        let final =
+          if left
+          then (
+            let a_exp =
+              Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true
+            in
+            let da_z =
+              match List.length b_shape with
+              | 2 -> Tensor.einsum ~equation:"ijkm,jm->ijk" [ da; z ] ~path:None
+              | 3 -> Tensor.einsum ~equation:"ijkm,jmp->ijkp" [ da; z ] ~path:None
+              | _ -> assert false
+            in
+            let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(db - da_z) ~left:true in
+            dx)
+          else (
+            let a_exp =
+              Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true
+            in
+            let z_da =
+              match List.length b_shape with
+              | 3 -> Tensor.einsum ~equation:"jpk,ijkm->ijpm" [ z; da ] ~path:None
+              | _ -> assert false
+            in
+            let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(db - z_da) ~left:false in
+            dx)
         in
-        let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(db - da_z) ~left:true in
-        dx)
+        final)
   in
   (z, dz) |> assert_right_shape "linsolve"
 

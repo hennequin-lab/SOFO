@@ -23,7 +23,9 @@ type input_constr =
   | `specified_unary of int list
   | `specified_binary of int list * int list
   | `matmul
-  | `linsolve
+  | `linsolve_left_true
+  | `linsolve_left_false
+  | `pos_def
   ]
 
 (* each unary test test is characterized by a name,
@@ -36,6 +38,11 @@ let any_shape f _ x = f x
 (* generate tensor according to specified shape and any additional constraint. *)
 let generate_tensor ~shape ~input_constr_list =
   let x = Tensor.randn ~kind ~device shape in
+  let x =
+    if List.mem input_constr_list `pos_def ~equal:Poly.( = )
+    then Tensor.(matmul x (transpose x ~dim0:1 ~dim1:0))
+    else x
+  in
   (* if we require tensor to be positive (for log, sqrt functions etc), we take modulus *)
   let x =
     if List.mem input_constr_list `positive ~equal:Poly.( = )
@@ -164,6 +171,7 @@ let unary_tests =
             List.permute (List.init n_dims ~f:Fn.id)
           in
           Maths.transpose ~dim0 ~dim1 )
+      (* ; "cholesky", [ `pos_def; `specified_unary [ 2; 2 ] ], any_shape Maths.cholesky *)
     ; ( "logsumexp"
       , []
       , fun shape ->
@@ -193,6 +201,8 @@ let unary_tests =
    and a binary math function to be tested *)
 type binary = string * input_constr list * (int list -> Maths.t -> Maths.t -> Maths.t)
 
+let print s = Stdio.print_endline (Sexp.to_string_hum s)
+
 (* generate the shape of 2 by 2 matrices where A *@ B is possible. *)
 let random_mult_matrix_shapes () =
   let first_dim = 1 + Random.int 3 in
@@ -200,12 +210,16 @@ let random_mult_matrix_shapes () =
   let third_dim = 1 + Random.int 3 in
   [ first_dim; second_dim ], [ second_dim; third_dim ]
 
-(* generate the shape of A of shape [m x n x n] and B of shape [m x n x p] or B of shape [m x n]. n needs to be at least 2. *)
-let random_linsolve_matrix_shapes () =
+(* generate 1. if left, the shape of A of shape [m x n x n] and B of shape [m x n x p] or B of shape [m x n]. n needs to be at least 2.
+   2. if left is false, the shape of A of shape [m x n x n] and B of shape [m x p x n] or B of shape [m x n]. *)
+
+let random_linsolve_matrix_shapes ~left =
   let m = 1 + Random.int 3 in
   let n = 2 + Random.int 3 in
   let p = 1 + Random.int 3 in
-  if Random.bool () then [ m; n; n ], [ m; n; p ] else [ m; n; n ], [ m; n ]
+  if left
+  then if Random.bool () then [ m; n; n ], [ m; n; p ] else [ m; n; n ], [ m; n ]
+  else [ m; n; n ], [ m; p; n ]
 
 (* this is how we test a binary function *)
 (* for simplicity apply same constraint on both tensors. *)
@@ -249,12 +263,14 @@ let test_binary ((name, input_constr, f) : binary) =
               | Some d -> Some d
               | None ->
                 (match c with
-                 | `linsolve -> Some random_linsolve_matrix_shapes
+                 | `linsolve_left_true -> Some (random_linsolve_matrix_shapes ~left:true)
+                 | `linsolve_left_false ->
+                   Some (random_linsolve_matrix_shapes ~left:false)
                  | _ -> accu))
           in
           match matmul_shape, linsolve_shape, set_order, min_order with
           | Some matmul_shape, None, _, _ -> matmul_shape ()
-          | None, Some linsolve_shape, _, _ -> linsolve_shape ()
+          | None, Some linsolve_shape, _, _ -> linsolve_shape
           | None, None, Some d, _ ->
             let shape = random_shape_set d in
             shape, shape
@@ -286,7 +302,10 @@ let binary_tests =
     ; "matmul", [ `matmul ], any_shape Maths.( *@ )
     ; "matmul_with_einsum", [ `matmul ], any_shape matmul_with_einsum
     ; "matmul_with_einsum2", [ `matmul ], any_shape matmul_with_einsum2
-    ; "linsolve", [ `linsolve ], any_shape Maths.linsolve
+    ; "linsolve_left_true", [ `linsolve_left_true ], any_shape (Maths.linsolve ~left:true)
+    ; ( "linsolve_left_false"
+      , [ `linsolve_left_false ]
+      , any_shape (Maths.linsolve ~left:false) )
     ; ( "concat"
       , []
       , fun shape ->
