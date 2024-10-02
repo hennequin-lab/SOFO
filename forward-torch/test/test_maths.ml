@@ -105,7 +105,15 @@ let test_unary ((name, input_constr, f) : unary) =
         Alcotest.(check @@ rel_tol) name 0.0 (Maths.check_grad1 f x)) )
 
 let cholesky_test x =
-  let x_final = Maths.(x *@ transpose x ~dim0:1 ~dim1:0) in
+  let x_primal = Maths.primal x in
+  let x_device = Tensor.device x_primal in
+  let x_kind = Tensor.type_ x_primal in
+  (* make sure x is positive definite *)
+  let x_sym = Maths.(0.5 $* x + transpose x ~dim0:1 ~dim1:0) in
+  let x_size = List.last_exn (Tensor.shape x_primal) in
+  let x_final =
+    Maths.(x_sym + const (Tensor.eye ~n:x_size ~options:(x_kind, x_device)))
+  in
   Maths.cholesky x_final
 
 let unary_tests =
@@ -177,7 +185,7 @@ let unary_tests =
             List.permute (List.init n_dims ~f:Fn.id)
           in
           Maths.transpose ~dim0 ~dim1 )
-    ; "cholesky", [ `pos_def; `specified_unary [ 2; 2 ] ], any_shape cholesky_test
+    ; "cholesky", [ `pos_def; `specified_unary [ 14; 14 ] ], any_shape cholesky_test
     ; ( "logsumexp"
       , []
       , fun shape ->
@@ -298,9 +306,17 @@ let matmul_with_einsum2 a b =
   Maths.einsum [ a, "ij"; Maths.transpose ~dim0:0 ~dim1:1 b, "kj" ] "ik"
 
 let linsolve_tri ~left ~upper a b =
+  let a_primal = Maths.primal a in
+  let a_size = List.last_exn (Tensor.shape a_primal) in
+  let a_device = Tensor.device a_primal in
+  let a_kind = Tensor.type_ a_primal in
+  (* make sure x is positive definite *)
   let a_batch = if List.length (Tensor.shape (Maths.primal a)) = 3 then 1 else 0 in
   let aaT = Maths.(a *@ transpose a ~dim0:Int.(a_batch + 1) ~dim1:a_batch) in
   let a_lower = Maths.cholesky aaT in
+  let a_lower =
+    Maths.(a_lower + const (Tensor.eye ~n:a_size ~options:(a_kind, a_device)))
+  in
   let a_final =
     if upper
     then Maths.transpose a_lower ~dim0:Int.(a_batch + 1) ~dim1:a_batch
