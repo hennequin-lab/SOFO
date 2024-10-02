@@ -25,6 +25,8 @@ type input_constr =
   | `matmul
   | `linsolve_left_true
   | `linsolve_left_false
+  | `linsolve_tri_left_true
+  | `linsolve_tri_left_false
   | `pos_def
   ]
 
@@ -102,6 +104,10 @@ let test_unary ((name, input_constr, f) : unary) =
         let x = generate_tensor ~shape ~input_constr_list:input_constr in
         Alcotest.(check @@ rel_tol) name 0.0 (Maths.check_grad1 f x)) )
 
+let cholesky_test x =
+  let x_final = Maths.(x *@ transpose x ~dim0:1 ~dim1:0) in
+  Maths.cholesky x_final
+
 let unary_tests =
   let test_list : unary list =
     [ ( "permute"
@@ -171,7 +177,7 @@ let unary_tests =
             List.permute (List.init n_dims ~f:Fn.id)
           in
           Maths.transpose ~dim0 ~dim1 )
-      (* ; "cholesky", [ `pos_def; `specified_unary [ 2; 2 ] ], any_shape Maths.cholesky *)
+    ; "cholesky", [ `pos_def; `specified_unary [ 2; 2 ] ], any_shape cholesky_test
     ; ( "logsumexp"
       , []
       , fun shape ->
@@ -217,9 +223,7 @@ let random_linsolve_matrix_shapes ~left =
   let m = 1 + Random.int 3 in
   let n = 2 + Random.int 3 in
   let p = 1 + Random.int 3 in
-  if left
-  then if Random.bool () then [ m; n; n ], [ m; n; p ] else [ m; n; n ], [ m; n ]
-  else [ m; n; n ], [ m; p; n ]
+  if left then [ m; n; n ], [ m; n; p ] else [ m; n; n ], [ m; p; n ]
 
 (* this is how we test a binary function *)
 (* for simplicity apply same constraint on both tensors. *)
@@ -293,6 +297,16 @@ let matmul_with_einsum a b = Maths.einsum [ a, "ij"; b, "jk" ] "ik"
 let matmul_with_einsum2 a b =
   Maths.einsum [ a, "ij"; Maths.transpose ~dim0:0 ~dim1:1 b, "kj" ] "ik"
 
+let linsolve_tri ~left ~upper a b =
+  let a_batch = if List.length (Tensor.shape (Maths.primal a)) = 3 then 1 else 0 in
+  let aaT = Maths.(a *@ transpose a ~dim0:Int.(a_batch + 1) ~dim1:a_batch) in
+  let a_lower = Maths.cholesky aaT in
+  let a_final =
+    if upper
+    then Maths.transpose a_lower ~dim0:Int.(a_batch + 1) ~dim1:a_batch
+    else a_lower
+  in
+  Maths.linsolve_triangular a_final b ~left ~upper
 
 let binary_tests =
   let test_list : binary list =
@@ -307,6 +321,12 @@ let binary_tests =
     ; ( "linsolve_left_false"
       , [ `linsolve_left_false ]
       , any_shape (Maths.linsolve ~left:false) )
+    ; ( "linsolve_tri_left_true"
+      , [ `linsolve_left_true ]
+      , any_shape (linsolve_tri ~left:true ~upper:false) )
+    ; ( "linsolve_tri_left_false"
+      , [ `linsolve_left_false ]
+      , any_shape (linsolve_tri ~left:false ~upper:true) )
     ; ( "concat"
       , []
       , fun shape ->

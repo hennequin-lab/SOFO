@@ -44,8 +44,7 @@ val max_2d_dim1 : t -> keepdim:bool -> t
 
 (* transpose along two dimensions *)
 val transpose : t -> dim0:int -> dim1:int -> t
-
-(* val cholesky : t -> t *)
+val cholesky : t -> t
 val logsumexp : t -> dim:int list -> keepdim:bool -> t
 val gumbel_softmax : t -> tau:float -> with_noise:bool -> discrete:bool -> t
 

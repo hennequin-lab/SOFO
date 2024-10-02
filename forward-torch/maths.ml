@@ -301,63 +301,72 @@ let last_two_elements lst =
   let len = List.length lst in
   if len < 2 then None else Some (List.drop lst (len - 2))
 
-(* y y^T = x, x needs to be positive semi-definite. TODO: tangents wrong! *)
-(* let cholesky (x, dx) =
+(* y y^T = x, x and dx needs to be symmetric positive semi-definite. *)
+let cholesky (x, dx) =
   let primal_shape = last_two_elements (Tensor.shape x) |> Option.value_exn in
+  let x_size = List.hd_exn primal_shape in
   let y = Tensor.linalg_cholesky ~upper:false x in
   let dy =
     with_tangent dx ~f:(fun dx ->
-      let a = List.drop_last_exn (Tensor.shape dx) in
-      let b = List.drop_last_exn a in
-      let km =
-        if List.length b = 2
-        then List.fold_left ~init:1 ~f:(fun acc x -> acc * x) b
-        else List.hd_exn b
+      let x_device = Tensor.device x in
+      let x_kind = Tensor.type_ x in
+      let batch_size =
+        if List.length (Tensor.shape x) = 2 then 1 else List.hd_exn (Tensor.shape x)
       in
-      (* let b_batched = List.init bs ~f:(fun m -> *)
-      let dx_squeezed = Tensor.reshape dx ~shape:(km :: primal_shape) in
-      let y_squeezed = Tensor.reshape y ~shape:(km :: primal_shape) in
-      print [%message (Tensor.shape dx_squeezed : int list)];
-      let tang_list =
+      let a = List.drop_last_exn (Tensor.shape dx) in
+      (* original shape of km in original tangents *)
+      let km_shape = List.drop_last_exn a in
+      let k = List.hd_exn km_shape in
+      let km = Int.(k * batch_size) in
+      (* y and y inv is of shape [m x n x n] *)
+      let y_reshaped = Tensor.reshape y ~shape:(batch_size :: primal_shape) in
+      let y_id =
+        List.init batch_size ~f:(fun _ ->
+          let id = Tensor.eye ~n:x_size ~options:(x_kind, x_device) in
+          Tensor.reshape id ~shape:[ 1; x_size; x_size ])
+        |> Tensor.concat ~dim:0
+      in
+      let y_inv =
+        Tensor.linalg_solve ~a:y_reshaped ~b:y_id ~left:true
+        |> Tensor.reshape ~shape:(batch_size :: primal_shape)
+      in
+      (* dx_reshaped is of shape [k x m x n x n] *)
+      let dx_reshaped = Tensor.reshape dx ~shape:([ k; batch_size ] @ primal_shape) in
+      let y_inv_trans = Tensor.transpose y_inv ~dim0:2 ~dim1:1 in
+      let tmp =
+        let tmp1 =
+          Tensor.einsum ~equation:"kmij,mjl->kmil" [ dx_reshaped; y_inv_trans ] ~path:None
+        in
+        Tensor.einsum ~equation:"mji,kmil->kmjl" [ y_inv; tmp1 ] ~path:None
+      in
+      let tmp_squeezed = Tensor.reshape tmp ~shape:(km :: primal_shape) in
+      (* phi takes the lower-triangular part of a tmp and halves its diagonal *)
+      let phi =
         List.init km ~f:(fun i ->
-          let dx_i =
+          let tmp_i =
             Tensor.slice
-              dx_squeezed
+              tmp_squeezed
               ~dim:0
               ~start:(Some i)
               ~end_:(Some Int.(i + 1))
               ~step:1
             |> Tensor.squeeze
           in
-          let b_i =
-            let lower = Tensor.tril ~diagonal:(-1) dx_i in
-            let diag_half = Tensor.(div_scalar (diag dx_i ~diagonal:0) (Scalar.f 2.)) in
+          let phi_i =
+            let lower = Tensor.tril ~diagonal:(-1) tmp_i in
+            let diag_half = Tensor.(div_scalar (diag tmp_i ~diagonal:0) (Scalar.f 2.)) in
             Tensor.(diag ~diagonal:0 diag_half + lower)
           in
-          let y_i =
-            Tensor.slice
-              y_squeezed
-              ~dim:0
-              ~start:(Some i)
-              ~end_:(Some Int.(i + 1))
-              ~step:1
-            |> Tensor.squeeze
-          in
-          print [%message (Tensor.shape b_i : int list) (Tensor.shape y_i : int list)];
-          (* use linsolve to solve for dy *)
-          let dy_i =
-            Tensor.linalg_solve
-              ~left:false
-              ~a:(Tensor.transpose y_i ~dim0:1 ~dim1:0)
-              ~b:b_i
-          in
-          Tensor.reshape dy_i ~shape:(1 :: Tensor.shape x))
+          Tensor.reshape phi_i ~shape:(1 :: primal_shape))
+        |> Tensor.concat ~dim:0
       in
-      let dx = Tensor.concat tang_list ~dim:0 in
-      let final_dx = Tensor.reshape dx ~shape:(b @ primal_shape) in
-      final_dx)
+      let phi_reshaped = Tensor.reshape phi ~shape:([ k; batch_size ] @ primal_shape) in
+      let final =
+        Tensor.einsum ~equation:"mij,kmjl->kmil" [ y_reshaped; phi_reshaped ] ~path:None
+      in
+      Tensor.reshape final ~shape:(km_shape @ primal_shape))
   in
-  (y, dy) |> assert_right_shape "cholesky" *)
+  (y, dy) |> assert_right_shape "cholesky"
 
 (* y = log of sum of exp(x_i), dy = sum of exp (x_i - y) dx_i *)
 let logsumexp (x, dx) ~dim ~keepdim =
@@ -701,9 +710,10 @@ let linsolve (a, da) (b, db) ~left =
   in
   (z, dz) |> assert_right_shape "linsolve"
 
-(* solve for ax=b (if left true) abd xa = b (if left false). Note that if left is false, then b must be 3D (i.e. m x p x n) whereas if left is true, b can be 2D (i.e. m x n) a needs to be triangular. TODO: not tested yet because we need cholesky *)
+(* solve for ax=b (if left true) or xa = b (if left false). Note that b must be 3D (i.e. m x p x n) and a needs to be triangular. *)
 let linsolve_triangular (a, da) (b, db) ~left ~upper =
-  let z = Tensor.linalg_solve_triangular a ~b ~upper ~left ~unitriangular:false in
+  let unitriangular = false in
+  let z = Tensor.linalg_solve_triangular a ~b ~upper ~left ~unitriangular in
   let a_shape = Tensor.shape a in
   let b_shape = Tensor.shape b in
   let dz =
@@ -718,7 +728,6 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
           then (
             let da_z =
               match List.length b_shape with
-              | 2 -> Tensor.einsum ~equation:"ijkm,jm->ijk" [ da; z ] ~path:None
               | 3 -> Tensor.einsum ~equation:"ijkm,jmp->ijkp" [ da; z ] ~path:None
               | _ -> assert false
             in
@@ -727,7 +736,7 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
                 a_exp
                 ~b:Tensor.(neg da_z)
                 ~upper
-                ~unitriangular:false
+                ~unitriangular
                 ~left:true
             in
             dx)
@@ -743,7 +752,7 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
                 ~b:Tensor.(neg z_da)
                 ~upper
                 ~left:false
-                ~unitriangular:false
+                ~unitriangular
             in
             dx)
         in
@@ -752,20 +761,8 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
         let num_tangents_b = List.hd_exn (Tensor.shape db) in
         let a_exp = Tensor.expand a ~size:(num_tangents_b :: a_shape) ~implicit:true in
         if left
-        then
-          Tensor.linalg_solve_triangular
-            a_exp
-            ~b:db
-            ~upper
-            ~unitriangular:false
-            ~left:true
-        else
-          Tensor.linalg_solve_triangular
-            a_exp
-            ~b:db
-            ~upper
-            ~unitriangular:false
-            ~left:false)
+        then Tensor.linalg_solve_triangular a_exp ~b:db ~upper ~unitriangular ~left:true
+        else Tensor.linalg_solve_triangular a_exp ~b:db ~upper ~unitriangular ~left:false)
       ~fxy:(fun da db ->
         let num_tangents_a = List.hd_exn (Tensor.shape da) in
         let num_tangents_b = List.hd_exn (Tensor.shape db) in
@@ -778,7 +775,6 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
             in
             let da_z =
               match List.length b_shape with
-              | 2 -> Tensor.einsum ~equation:"ijkm,jm->ijk" [ da; z ] ~path:None
               | 3 -> Tensor.einsum ~equation:"ijkm,jmp->ijkp" [ da; z ] ~path:None
               | _ -> assert false
             in
@@ -787,7 +783,7 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
                 a_exp
                 ~b:Tensor.(db - da_z)
                 ~upper
-                ~unitriangular:false
+                ~unitriangular
                 ~left:true
             in
             dx)
@@ -805,7 +801,7 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
                 a_exp
                 ~b:Tensor.(db - z_da)
                 ~upper
-                ~unitriangular:false
+                ~unitriangular
                 ~left:false
             in
             dx)
