@@ -40,8 +40,8 @@ let base = Optimizer.Config.Base.default
 module Lds_params_dim_tan = struct
   let a = 24
   let b = 10
-  let n_steps = 20
-  let n_tangents = 256
+  let n_steps = 100
+  let n_tangents = 512
   let kind = base.kind
   let device = base.device
 end
@@ -81,14 +81,19 @@ let state_params : Forward_torch.Lqr_type.state_params =
   ; x_0 = x0
   ; f_x_list = [ lds_params.a_tot ]
   ; f_u_list = [ lds_params.b_tot ]
-  ; f_t_list =  None 
+  ; f_t_list = None
   }
 
 let c_x_list =
   let tmp =
     List.map targets_list ~f:(fun target -> Maths.(neg target *@ const (to_device q)))
   in
-  Some (x0 :: tmp)
+  Some
+    (Maths.const
+       (Tensor.zeros
+          [ batch_size; Lds_params_dim_tan.a ]
+          ~device:Lds_params_dim_tan.device)
+     :: tmp)
 
 let c_u_list =
   let tmp =
@@ -116,61 +121,10 @@ let cost_params : Forward_torch.Lqr_type.cost_params =
   ; c_u_list
   }
 
+(* compare directly using Maths operation and using Tensor operation. *)
 let x_list1, u_list1 = Lqr.lqr ~state_params ~cost_params
+(* let x_list3, u_list3 = Lqr.lqr_sep ~state_params ~cost_params *)
 
-(* -----------------------------------------
-   -- Tensor operations (without tangent)  ------
-   ----------------------------------------- *)
-
-(* let x0, targets_list, target_controls_list = sample_data batch_size *)
-let x0 = Maths.primal x0
-let targets_list = List.map targets_list ~f:(fun target -> Maths.primal target)
-
-let target_controls_list =
-  List.map target_controls_list ~f:(fun target -> Maths.primal target)
-
-let lds_params = Data_Tan.lds_params
-
-(* form state params/cost_params/xu_desired *)
-let state_params : Forward_torch.Lqr_type.state_params_tensor =
-  { n_steps = List.length targets_list
-  ; x_0 = x0
-  ; f_x_list = [ Maths.primal lds_params.a_tot ]
-  ; f_u_list = [ Maths.primal lds_params.b_tot ]
-  ; f_t_list =  None 
-  }
-
-let c_x_list =
-  let tmp =
-    let q = to_device q in
-    List.map targets_list ~f:(fun target -> Tensor.(neg (matmul target q)))
-  in
-  Some (x0 :: tmp)
-
-let c_u_list =
-  let tmp =
-    let r = to_device r in
-    List.map target_controls_list ~f:(fun target -> Tensor.(neg (matmul target r)))
-  in
-  Some
-    (tmp
-     @ [ Tensor.zeros
-           [ batch_size; Lds_params_dim_tan.b ]
-           ~device:Lds_params_dim_tan.device
-       ])
-
-(* form cost parameters, which all go from step 0 to T.*)
-let cost_params : Forward_torch.Lqr_type.cost_params_tensor =
-  { c_xx_list = Tensor.zeros_like (to_device q) :: repeat_list [ to_device q ] n_steps
-  ; c_xu_list = None
-  ; c_uu_list = repeat_list [ to_device r ] n_steps @ [ Tensor.zeros_like (to_device r) ]
-  ; c_x_list
-  ; c_u_list
-  }
-
-let x_list2, u_list2 = Lqr.lqr_tensor ~state_params ~cost_params
-
-let _ =
-  List.iter2_exn x_list1 x_list2 ~f:(fun x1 x2 ->
-    let x1 = Maths.primal x1 in
-    Tensor.(print (norm (x1 - x2))))
+(* let _ =
+  List.iter2_exn x_list1 x_list3 ~f:(fun x1 x2 ->
+    Tensor.print (Tensor.norm (Maths.(tangent (x1 - x2)) |> Option.value_exn))) *)
