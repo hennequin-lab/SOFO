@@ -81,7 +81,7 @@ let state_params : Forward_torch.Lqr_type.state_params =
   ; x_0 = x0
   ; f_x_list = [ lds_params.a_tot ]
   ; f_u_list = [ lds_params.b_tot ]
-  ; f_t_list = [ None ]
+  ; f_t_list =  None 
   }
 
 let c_x_list =
@@ -137,7 +137,7 @@ let state_params : Forward_torch.Lqr_type.state_params_tensor =
   ; x_0 = x0
   ; f_x_list = [ Maths.primal lds_params.a_tot ]
   ; f_u_list = [ Maths.primal lds_params.b_tot ]
-  ; f_t_list = [ None ]
+  ; f_t_list =  None 
   }
 
 let c_x_list =
