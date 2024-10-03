@@ -652,18 +652,22 @@ let linsolve (a, da) (b, db) ~left =
         let final =
           if left
           then (
+            (* if non-batched a and b, shape of a is length 2. *)
             let da_z =
-              match List.length b_shape with
-              | 2 -> Tensor.einsum ~equation:"ijkm,jm->ijk" [ da; z ] ~path:None
-              | 3 -> Tensor.einsum ~equation:"ijkm,jmp->ijkp" [ da; z ] ~path:None
+              match List.length a_shape, List.length b_shape with
+              | 2, 1 -> Tensor.einsum ~equation:"kij,j->ki" [ da; z ] ~path:None
+              | 2, 2 -> Tensor.einsum ~equation:"kij,jp->kip" [ da; z ] ~path:None
+              | 3, 2 -> Tensor.einsum ~equation:"kmij,mj->kmi" [ da; z ] ~path:None
+              | 3, 3 -> Tensor.einsum ~equation:"kmij,mjp->kmip" [ da; z ] ~path:None
               | _ -> assert false
             in
             let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(neg da_z) ~left:true in
             dx)
           else (
             let z_da =
-              match List.length b_shape with
-              | 3 -> Tensor.einsum ~equation:"jpk,ijkm->ijpm" [ z; da ] ~path:None
+              match List.length a_shape, List.length b_shape with
+              | 2, 2 -> Tensor.einsum ~equation:"pi,kij->kpj" [ z; da ] ~path:None
+              | 3, 3 -> Tensor.einsum ~equation:"mpi,kmij->kmpj" [ z; da ] ~path:None
               | _ -> assert false
             in
             let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(neg z_da) ~left:false in
@@ -687,9 +691,11 @@ let linsolve (a, da) (b, db) ~left =
               Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true
             in
             let da_z =
-              match List.length b_shape with
-              | 2 -> Tensor.einsum ~equation:"ijkm,jm->ijk" [ da; z ] ~path:None
-              | 3 -> Tensor.einsum ~equation:"ijkm,jmp->ijkp" [ da; z ] ~path:None
+              match List.length a_shape, List.length b_shape with
+              | 2, 1 -> Tensor.einsum ~equation:"kij,j->ki" [ da; z ] ~path:None
+              | 2, 2 -> Tensor.einsum ~equation:"kij,jp->kip" [ da; z ] ~path:None
+              | 3, 2 -> Tensor.einsum ~equation:"kmij,mj->kmi" [ da; z ] ~path:None
+              | 3, 3 -> Tensor.einsum ~equation:"kmij,mjp->kmip" [ da; z ] ~path:None
               | _ -> assert false
             in
             let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(db - da_z) ~left:true in
@@ -699,8 +705,9 @@ let linsolve (a, da) (b, db) ~left =
               Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true
             in
             let z_da =
-              match List.length b_shape with
-              | 3 -> Tensor.einsum ~equation:"jpk,ijkm->ijpm" [ z; da ] ~path:None
+              match List.length a_shape, List.length b_shape with
+              | 2, 2 -> Tensor.einsum ~equation:"pi,kij->kpj" [ z; da ] ~path:None
+              | 3, 3 -> Tensor.einsum ~equation:"mpi,kmij->kmpj" [ z; da ] ~path:None
               | _ -> assert false
             in
             let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(db - z_da) ~left:false in
