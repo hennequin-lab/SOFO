@@ -3,7 +3,6 @@ open Torch
 include Lqr_type
 include Maths
 
-let print s = Stdio.printf "%s\n%!" (Base.Sexp.to_string_hum s)
 
 (* extract t-th element from list; if list is length 1 then use the same element *)
 let extract_list list t =
@@ -19,30 +18,48 @@ let extract_list_opt_tensor t list ~shape ~device =
   | None -> Tensor.zeros shape ~device
   | Some list -> List.nth_exn list t
 
-let trans_2d x = Maths.transpose x ~dim0:1 ~dim1:0
-let trans_2d_tensor x = Tensor.transpose x ~dim0:1 ~dim1:0
-
-(* Transpose a list of lists *)
-let rec list_transpose lst =
-  match lst with
-  | [] -> []
-  | [] :: _ -> []
-  | _ -> List.map ~f:List.hd_exn lst :: list_transpose (List.map ~f:List.tl_exn lst)
 
 (* A B, where a is size [m x i x j] and b is size [m x j x k] in batch mode *)
 let batch_matmul a b = Maths.(einsum [ a, "mij"; b, "mjk" ] "mik")
+let batch_matmul_tensor a b = Tensor.einsum ~equation:"mij,mjk->mik" [ a; b ] ~path:None
 
 (* A B^T *)
 let batch_matmul_trans a b = Maths.(einsum [ a, "mij"; b, "mkj" ] "mik")
 
+let batch_matmul_trans_tensor a b =
+  Tensor.einsum ~equation:"mij,mkj->mik" [ a; b ] ~path:None
+
 (* A^T B *)
 let batch_trans_matmul a b = Maths.(einsum [ a, "mij"; b, "mik" ] "mjk")
 
+let batch_trans_matmul_tensor a b =
+  Tensor.einsum ~equation:"mij,mik->mjk" [ a; b ] ~path:None
+
 (* a B, where a is a vector and B is a matrix *)
 let batch_vecmat a b = Maths.(einsum [ a, "mi"; b, "mij" ] "mj")
+let batch_vecmat_tensor a b = Tensor.einsum ~equation:"mi,mij->mj" [ a; b ] ~path:None
 
-(* a^T B *)
-let batch_trans_vecmat a b = Maths.(einsum [ a, "mi"; b, "mji" ] "mj")
+(* a dB , where a has shape [m x i] and dB has shape [k x m x i x j]*)
+let batch_vec_tanmat_tensor a b =
+  Tensor.einsum ~equation:"mi,kmij->kmj" [ a; b ] ~path:None
+
+(* a B^T *)
+let batch_vecmat_trans a b = Maths.(einsum [ a, "mi"; b, "mji" ] "mj")
+
+let batch_vecmat_trans_tensor a b =
+  Tensor.einsum ~equation:"mi,mji->mj" [ a; b ] ~path:None
+
+(* a dB^T, where a has shape [m x i] and dB has shape [k x m x j x i] *)
+let batch_vec_tanmat_trans_tensor a b =
+  Tensor.einsum ~equation:"mi,kmji->kmj" [ a; b ] ~path:None
+
+(* da B, where a has shape [k x m x i] and B has shape [m x i x j] *)
+let batch_tanvec_mat_tensor a b =
+  Tensor.einsum ~equation:"kmi,mij->kmj" [ a; b ] ~path:None
+(* da B^T, where a has shape [k x m x i] and B has shape [m x i x j] *)
+
+let batch_tanvec_mat_trans_tensor a b =
+  Tensor.einsum ~equation:"kmi,mji->kmj" [ a; b ] ~path:None
 
 (* linear quadratic regulator; everything here is a Maths.t object *)
 let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
@@ -70,7 +87,7 @@ let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
   let backward t v_mat_next v_vec_next =
     let c_uu_curr = extract_list c_uu_list t in
     let c_xx_curr = extract_list c_xx_list t in
-    let c_xu_curr = extract_list_opt t c_xu_list ~shape:[ a_dim; b_dim ] ~device in
+    let c_xu_curr = extract_list_opt t c_xu_list ~shape:[ m; a_dim; b_dim ] ~device in
     let c_x_curr = extract_list_opt t c_x_list ~shape:[ m; a_dim ] ~device in
     let c_u_curr = extract_list_opt t c_u_list ~shape:[ m; b_dim ] ~device in
     let f_x_curr = extract_list f_x_list t in
@@ -134,10 +151,10 @@ let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
     let f_u_curr = extract_list f_u_list t in
     let k_mat_curr = List.nth_exn k_mat_list t in
     let k_vec_curr = List.nth_exn k_vec_list t in
-    let u_curr = Maths.(batch_trans_vecmat x_curr k_mat_curr + k_vec_curr) in
+    let u_curr = Maths.(batch_vecmat_trans x_curr k_mat_curr + k_vec_curr) in
     let x_next =
       let common =
-        Maths.(batch_trans_vecmat x_curr f_x_curr + batch_trans_vecmat u_curr f_u_curr)
+        Maths.(batch_vecmat_trans x_curr f_x_curr + batch_vecmat_trans u_curr f_u_curr)
       in
       match f_t_list with
       | None -> common
@@ -172,12 +189,19 @@ let lqr_tensor ~(state_params : state_params_tensor) ~(cost_params : cost_params
   let c_x_list = cost_params.c_x_list in
   let c_u_list = cost_params.c_u_list in
   let f_u_eg = List.hd_exn f_u_list in
+  (* if use lqr to solve a batch of k tangents of m problems, f_t has size *)
+  let tangent_batched =
+    match c_x_list with
+    | None -> false
+    | Some c_x_list ->
+      if List.length (Tensor.shape (List.hd_exn c_x_list)) = 3 then true else false
+  in
   (* batch size *)
-  let m = List.hd_exn (Tensor.shape x_0) in
+  let m = List.hd_exn (Tensor.shape f_u_eg) in
   (* state dim *)
-  let a_dim = List.hd_exn (Tensor.shape f_u_eg) in
+  let a_dim = List.nth_exn (Tensor.shape f_u_eg) 1 in
   (* control dim *)
-  let b_dim = List.nth_exn (Tensor.shape f_u_eg) 1 in
+  let b_dim = List.nth_exn (Tensor.shape f_u_eg) 2 in
   let device = Tensor.device f_u_eg in
   (* step 1: backward pass to calculate K_t and k_t *)
   let v_mat_final = List.last_exn c_xx_list in
@@ -187,48 +211,84 @@ let lqr_tensor ~(state_params : state_params_tensor) ~(cost_params : cost_params
   let backward t v_mat_next v_vec_next =
     let c_uu_curr = extract_list c_uu_list t in
     let c_xx_curr = extract_list c_xx_list t in
-    let c_xu_curr = extract_list_opt_tensor t c_xu_list ~shape:[ a_dim; b_dim ] ~device in
+    let c_xu_curr =
+      extract_list_opt_tensor t c_xu_list ~shape:[ m; a_dim; b_dim ] ~device
+    in
     let c_x_curr = extract_list_opt_tensor t c_x_list ~shape:[ m; a_dim ] ~device in
     let c_u_curr = extract_list_opt_tensor t c_u_list ~shape:[ m; b_dim ] ~device in
     let f_x_curr = extract_list f_x_list t in
     let f_u_curr = extract_list f_u_list t in
     let f_t_curr = extract_list_opt_tensor t f_t_list ~shape:[ m; a_dim ] ~device in
     let q_uu_curr =
-      Tensor.(c_uu_curr + matmul (matmul (trans_2d_tensor f_u_curr) v_mat_next) f_u_curr)
+      Tensor.(
+        c_uu_curr
+        + batch_trans_matmul_tensor f_u_curr (batch_matmul_tensor v_mat_next f_u_curr))
     in
     let q_xx_curr =
-      Tensor.(c_xx_curr + matmul (matmul (trans_2d_tensor f_x_curr) v_mat_next) f_x_curr)
+      Tensor.(
+        c_xx_curr
+        + batch_trans_matmul_tensor f_x_curr (batch_matmul_tensor v_mat_next f_x_curr))
     in
     let q_xu_curr =
-      Tensor.(c_xu_curr + matmul (matmul (trans_2d_tensor f_x_curr) v_mat_next) f_u_curr)
+      Tensor.(
+        c_xu_curr
+        + batch_trans_matmul_tensor f_x_curr (batch_matmul_tensor v_mat_next f_u_curr))
     in
     let q_u_curr =
-      Tensor.(
-        c_u_curr
-        + matmul v_vec_next f_u_curr
-        + matmul (matmul f_t_curr v_mat_next) f_u_curr)
+      if tangent_batched
+      then
+        Tensor.(
+          c_u_curr
+          + batch_tanvec_mat_tensor v_vec_next f_u_curr
+          + batch_tanvec_mat_tensor f_t_curr (batch_matmul_tensor v_mat_next f_u_curr))
+      else
+        Tensor.(
+          c_u_curr
+          + batch_vecmat_tensor v_vec_next f_u_curr
+          + batch_vecmat_tensor f_t_curr (batch_matmul_tensor v_mat_next f_u_curr))
     in
     let q_x_curr =
-      Tensor.(
-        c_x_curr
-        + matmul v_vec_next f_x_curr
-        + matmul (matmul f_t_curr v_mat_next) f_x_curr)
+      if tangent_batched
+      then
+        Tensor.(
+          c_x_curr
+          + batch_tanvec_mat_tensor v_vec_next f_x_curr
+          + batch_tanvec_mat_tensor f_t_curr (batch_matmul_tensor v_mat_next f_x_curr))
+      else
+        Tensor.(
+          c_x_curr
+          + batch_vecmat_tensor v_vec_next f_x_curr
+          + batch_vecmat_tensor f_t_curr (batch_matmul_tensor v_mat_next f_x_curr))
     in
     let k_mat_curr =
       Tensor.linalg_solve
         ~a:q_uu_curr
-        ~b:(Tensor.neg (trans_2d_tensor q_xu_curr))
+        ~b:Tensor.(neg (transpose q_xu_curr ~dim0:2 ~dim1:1))
         ~left:true
     in
     let k_vec_curr =
-      Tensor.linalg_solve
-        ~a:q_uu_curr
-        ~b:(Tensor.neg (trans_2d_tensor q_u_curr))
-        ~left:true
-      |> trans_2d_tensor
+      let final =
+        let a, b =
+          if tangent_batched
+          then (
+            let k = List.hd_exn (Tensor.shape x_0) in
+            let q_uu_expanded =
+              Tensor.expand q_uu_curr ~size:(k :: Tensor.shape q_uu_curr) ~implicit:true
+            in
+            ( Tensor.reshape q_uu_expanded ~shape:[ -1; b_dim; b_dim ]
+            , Tensor.(neg (reshape q_u_curr ~shape:[ -1; b_dim ])) ))
+          else q_uu_curr, Tensor.neg q_u_curr
+        in
+        Tensor.linalg_solve ~a ~b ~left:true
+      in
+      if tangent_batched then Tensor.reshape final ~shape:[ -1; m; b_dim ] else final
     in
-    let v_mat_curr = Tensor.(q_xx_curr + matmul q_xu_curr k_mat_curr) in
-    let v_vec_curr = Tensor.(q_x_curr + matmul q_u_curr k_mat_curr) in
+    let v_mat_curr = Tensor.(q_xx_curr + batch_matmul_tensor q_xu_curr k_mat_curr) in
+    let v_vec_curr =
+      if tangent_batched
+      then Tensor.(q_x_curr + batch_tanvec_mat_tensor q_u_curr k_mat_curr)
+      else Tensor.(q_x_curr + batch_vecmat_tensor q_u_curr k_mat_curr)
+    in
     v_mat_curr, v_vec_curr, k_mat_curr, k_vec_curr
   in
   (* k_mat and k_vec go from 0 to T-1 *)
@@ -257,12 +317,22 @@ let lqr_tensor ~(state_params : state_params_tensor) ~(cost_params : cost_params
     let f_u_curr = extract_list f_u_list t in
     let k_mat_curr = List.nth_exn k_mat_list t in
     let k_vec_curr = List.nth_exn k_vec_list t in
-    let u_curr = Tensor.(matmul x_curr (trans_2d_tensor k_mat_curr) + k_vec_curr) in
+    let u_curr =
+      if tangent_batched
+      then Tensor.(batch_tanvec_mat_trans_tensor x_curr k_mat_curr + k_vec_curr)
+      else Tensor.(batch_vecmat_trans_tensor x_curr k_mat_curr + k_vec_curr)
+    in
     let x_next =
       let common =
-        Tensor.(
-          matmul x_curr (trans_2d_tensor f_x_curr)
-          + matmul u_curr (trans_2d_tensor f_u_curr))
+        if tangent_batched
+        then
+          Tensor.(
+            batch_tanvec_mat_trans_tensor x_curr f_x_curr
+            + batch_tanvec_mat_trans_tensor u_curr f_u_curr)
+        else
+          Tensor.(
+            batch_vecmat_trans_tensor x_curr f_x_curr
+            + batch_vecmat_trans_tensor u_curr f_u_curr)
       in
       match f_t_list with
       | None -> common
@@ -298,11 +368,11 @@ let lqr_sep ~(state_params : state_params) ~(cost_params : cost_params) =
   let c_u_list = cost_params.c_u_list in
   let f_u_eg = Maths.primal (List.hd_exn f_u_list) in
   (* batch size *)
-  let m = List.hd_exn (Tensor.shape (Maths.primal x_0)) in
+  let m = List.hd_exn (Tensor.shape f_u_eg) in
   (* state dim *)
-  let a_dim = List.hd_exn (Tensor.shape f_u_eg) in
+  let a_dim = List.nth_exn (Tensor.shape f_u_eg) 1 in
   (* control dim *)
-  let b_dim = List.nth_exn (Tensor.shape f_u_eg) 1 in
+  let b_dim = List.nth_exn (Tensor.shape f_u_eg) 2 in
   let n_tangents = List.hd_exn (Tensor.shape (Option.value_exn (Maths.tangent x_0))) in
   let device = Tensor.device f_u_eg in
   (* step 1: lqr on the primal *)
@@ -344,276 +414,187 @@ let lqr_sep ~(state_params : state_params) ~(cost_params : cost_params) =
   in
   Stdlib.Gc.major ();
   (* step 2: lqr on tangents *)
-  let extract_kth_tan list k =
-    let tan_shape = Tensor.shape (Maths.primal (List.hd_exn list)) in
-    List.map list ~f:(fun x ->
-      let tangent = Maths.tangent x in
-      let reshaped_tangent =
-        Option.value_map tangent ~default:(Tensor.zeros tan_shape ~device) ~f:(fun tan ->
-          let k_th_tan =
-            Tensor.slice tan ~dim:0 ~start:(Some k) ~end_:(Some Int.(k + 1)) ~step:1
-          in
-          Tensor.reshape k_th_tan ~shape:tan_shape)
-      in
-      Some reshaped_tangent)
-  in
-  (* extract kth tangent and reshape it to the corresponding primal for the each Maths.t element in a list, the list can be optional. *)
-  let extract_kth_tan_opt list k =
+  let extract_tangent list = List.map list ~f:Maths.tangent in
+  let extract_tangent_list_opt list =
     match list with
     | None -> None
-    | Some list ->
-      let tan_shape = Tensor.shape (Maths.primal (List.hd_exn list)) in
-      Some
-        (List.map list ~f:(fun x ->
-           let tangent = Maths.tangent x in
-           let reshaped_tangent =
-             Option.value_map
-               tangent
-               ~default:(Tensor.zeros tan_shape ~device)
-               ~f:(fun tan ->
-                 let k_th_tan =
-                   Tensor.slice
-                     tan
-                     ~dim:0
-                     ~start:(Some k)
-                     ~end_:(Some Int.(k + 1))
-                     ~step:1
-                 in
-                 Tensor.reshape k_th_tan ~shape:tan_shape)
-           in
-           Some reshaped_tangent))
+    | Some list -> Some (List.map list ~f:Maths.tangent)
   in
-  let tangents_lqr =
-    List.init n_tangents ~f:(fun k ->
+  let x_0_tangent = Maths.tangent x_0 in
+  let f_x_tangent_list = extract_tangent f_x_list in
+  let f_u_tangent_list = extract_tangent f_u_list in
+  let f_t_tangent_list = extract_tangent_list_opt f_t_list in
+  let c_xx_tangent_list = extract_tangent c_xx_list in
+  let c_xu_tangent_list = extract_tangent_list_opt c_xu_list in
+  let c_uu_tangent_list = extract_tangent c_uu_list in
+  let c_x_tangent_list = extract_tangent_list_opt c_x_list in
+  let c_u_tangent_list = extract_tangent_list_opt c_u_list in
+  (* step 3: create new f_t, c_x and c_u lists *)
+  let new_f_t_list =
+    List.init n_steps ~f:(fun t ->
       Stdlib.Gc.major ();
-      let x_0_tangent =
-        Option.value_map
-          (Maths.tangent x_0)
-          ~default:(Tensor.zeros_like x_0_primal)
-          ~f:(fun tan ->
-            let k_th_tan =
-              Tensor.slice tan ~dim:0 ~start:(Some k) ~end_:(Some Int.(k + 1)) ~step:1
-            in
-            Tensor.reshape k_th_tan ~shape:(Tensor.shape x_0_primal))
+      let x = List.nth_exn x_primal_list t in
+      let df_x = List.nth_exn f_x_tangent_list t in
+      let u = List.nth_exn u_primal_list t in
+      let df_u = List.nth_exn f_u_tangent_list t in
+      let tmp1 =
+        match df_x with
+        | None -> Tensor.zeros [ n_tangents; m; a_dim ] ~device
+        | Some df_x -> batch_vec_tanmat_trans_tensor x df_x
       in
-      let f_x_tangent_list = extract_kth_tan f_x_list k in
-      let f_u_tangent_list = extract_kth_tan f_u_list k in
-      let f_t_tangent_list = extract_kth_tan_opt f_t_list k in
-      let c_xx_tangent_list = extract_kth_tan c_xx_list k in
-      let c_xu_tangent_list = extract_kth_tan_opt c_xu_list k in
-      let c_uu_tangent_list = extract_kth_tan c_uu_list k in
-      let c_x_tangent_list = extract_kth_tan_opt c_x_list k in
-      let c_u_tangent_list = extract_kth_tan_opt c_u_list k in
-      (* step 3: form new parameters from tangents *)
-      (* f_t goes from t=0 to t=T-1 *)
-      let new_f_t_list =
-        (* drop x_T so list goes from t=0 to t=T-1. *)
-        let x_primal_list_tmp = List.drop_last_exn x_primal_list in
-        let tmp1 =
-          let x_dfx df_x x =
-            match df_x with
-            | None -> Tensor.zeros_like x_0_primal
-            | Some df_x -> Tensor.(matmul x (trans_2d_tensor df_x))
-          in
-          if List.length f_x_tangent_list > 1
-          then
-            List.map2_exn f_x_tangent_list x_primal_list_tmp ~f:(fun df_x x ->
-              x_dfx df_x x)
+      let tmp2 =
+        match df_u with
+        | None -> Tensor.zeros [ n_tangents; m; a_dim ] ~device
+        | Some df_u -> batch_vec_tanmat_trans_tensor u df_u
+      in
+      let tmp12 = Tensor.(tmp1 + tmp2) in
+      match f_t_tangent_list with
+      | None -> tmp12
+      | Some f_t_tangent_list ->
+        let df_t = List.nth_exn f_t_tangent_list t in
+        (match df_t with
+         | None -> tmp12
+         | Some df_t -> Tensor.(tmp12 + df_t)))
+  in
+  let lambda_T =
+    let common =
+     
+        batch_vecmat_tensor (List.last_exn x_primal_list) (List.last_exn c_xx_primal_list)
+    in
+    match c_x_primal_list with
+    | None -> common
+    | Some c_x_primal_list -> Tensor.(common + List.last_exn c_x_primal_list)
+  in
+  let n_steps_list = List.range 0 (n_steps) in
+  let new_c_u_T = Tensor.zeros [ n_tangents; m; b_dim ] ~device in
+  let new_c_x_T =
+    let tmp2 =
+      let dc_xx_T = List.last_exn c_xx_tangent_list in
+      match dc_xx_T with
+      | None -> Tensor.zeros [ n_tangents; m; a_dim ] ~device
+      | Some dc_xx_T -> batch_vec_tanmat_tensor (List.last_exn x_primal_list) dc_xx_T
+    in
+    match c_x_tangent_list with
+    | None -> tmp2
+    | Some c_x_tangent_list ->
+      let dc_x_T = List.last_exn c_x_tangent_list in
+      (match dc_x_T with
+       | None -> tmp2
+       | Some dc_x_T -> Tensor.(tmp2 + dc_x_T))
+  in
+  let new_c_x_list, new_c_u_list, _ =
+    List.fold_right
+      n_steps_list
+      ~init:([ new_c_x_T ], [ new_c_u_T ], lambda_T)
+      ~f:(fun t (c_x_accu, c_u_accu, lambda_next) ->
+        let u_t, x_t = List.nth_exn u_primal_list t, List.nth_exn x_primal_list t in
+        let c_x =
+          if t = 0
+          then Tensor.zeros [ n_tangents; m; a_dim ] ~device
           else (
-            let df_x = List.hd_exn f_x_tangent_list in
-            List.map x_primal_list_tmp ~f:(fun x -> x_dfx df_x x))
+            let tmp1 =
+              match c_xu_tangent_list with
+              | None -> Tensor.zeros [ n_tangents; m; a_dim ] ~device
+              | Some c_xu_tangent_list ->
+                let dc_xu = List.nth_exn c_xu_tangent_list t in
+                (match dc_xu with
+                 | None -> Tensor.zeros [ n_tangents; m; a_dim ] ~device
+                 | Some dc_xu -> batch_vec_tanmat_trans_tensor u_t dc_xu)
+            in
+            let tmp2 =
+              let dc_xx = List.nth_exn c_xx_tangent_list t in
+              match dc_xx with
+              | None -> tmp1
+              | Some dc_xx -> batch_vec_tanmat_tensor x_t dc_xx
+            in
+            let tmp3 = batch_vecmat_tensor lambda_next (List.nth_exn f_x_primal_list t) in
+            let final =
+              let common = Tensor.(tmp1 + tmp2 + tmp3) in
+              match c_x_tangent_list with
+              | None -> common
+              | Some c_x_tangent_list ->
+                let dc_x = List.nth_exn c_x_tangent_list t in
+                (match dc_x with
+                 | None -> common
+                 | Some dc_x -> Tensor.(common + dc_x))
+            in
+            final)
         in
-        let tmp2 =
-          let u_dfu df_u u =
-            match df_u with
-            | None -> Tensor.zeros_like x_0_primal
-            | Some df_u -> Tensor.(matmul u (trans_2d_tensor df_u))
+        let c_u =
+          let tmp1 =
+            match c_xu_tangent_list with
+            | None -> Tensor.zeros [ n_tangents; m; b_dim ] ~device
+            | Some c_xu_tangent_list ->
+              let dc_xu = List.nth_exn c_xu_tangent_list t in
+              (match dc_xu with
+               | None -> Tensor.zeros [ n_tangents; m; b_dim ] ~device
+               | Some dc_xu -> batch_vec_tanmat_trans_tensor x_t dc_xu)
           in
-          if List.length f_u_tangent_list > 1
-          then
-            List.map2_exn f_u_tangent_list u_primal_list ~f:(fun df_u u -> u_dfu df_u u)
-          else (
-            let df_u = List.hd_exn f_u_tangent_list in
-            List.map u_primal_list ~f:(fun u -> u_dfu df_u u))
+          let tmp2 =
+            let dc_uu = List.nth_exn c_uu_tangent_list t in
+            match dc_uu with
+            | None -> tmp1
+            | Some dc_uu -> batch_vec_tanmat_tensor u_t dc_uu
+          in
+          let tmp3 = batch_vecmat_tensor lambda_next (List.nth_exn f_u_primal_list t) in
+          let final =
+            let common = Tensor.(tmp1 + tmp2 + tmp3) in
+            match c_u_tangent_list with
+            | None -> common
+            | Some c_u_tangent_list ->
+              let dc_u = List.nth_exn c_u_tangent_list t in
+              (match dc_u with
+               | None -> common
+               | Some dc_u -> Tensor.(common + dc_u))
+          in
+          final
         in
-        let tmp12 = List.map2_exn tmp1 tmp2 ~f:(fun tm1 tm2 -> Tensor.(tm1 + tm2)) in
-        let final =
-          match f_t_tangent_list with
-          | None -> tmp12
-          | Some f_t_tangent_list ->
-            List.map2_exn tmp12 f_t_tangent_list ~f:(fun tmp12 df_t ->
-              match df_t with
-              | None -> tmp12
-              | Some df_t -> Tensor.(tmp12 + df_t))
+        let lambda_curr =
+          let tmp1 = batch_vecmat_tensor lambda_next (List.nth_exn f_x_primal_list t) in
+          let tmp2 = batch_vecmat_tensor x_t (List.nth_exn c_xx_primal_list t) in
+          let tmp3 =
+            match c_xu_primal_list with
+            | None -> Tensor.zeros [ m; a_dim ] ~device
+            | Some c_xu_primal_list ->
+              let c_xu = List.nth_exn c_xu_primal_list t in
+              batch_vecmat_trans_tensor u_t c_xu
+          in
+          let tmp4 =
+            match c_x_primal_list with
+            | None -> Tensor.zeros [ m; a_dim ] ~device
+            | Some c_x_primal_list -> List.nth_exn c_x_primal_list t
+          in
+          Tensor.(tmp1 + tmp2 + tmp3 + tmp4)
         in
-        Some final
-      in
-      (* this list goes from 0 to T-1 *)
-      let n_steps_list = List.range 0 Int.(n_steps) in
-      let lambda_T =
-        let common =
-          Tensor.(matmul (List.last_exn x_primal_list) (List.last_exn c_xx_primal_list))
-        in
-        match c_x_primal_list with
-        | None -> common
-        | Some c_x_primal_list -> Tensor.(common + List.last_exn c_x_primal_list)
-      in
-      let c_x_T =
-        let tmp2 =
-          let dc_xx_last = List.last_exn c_xx_tangent_list in
-          match dc_xx_last with
-          | None -> Tensor.zeros_like x_0_primal
-          | Some dc_xx_last -> Tensor.(matmul (List.last_exn x_primal_list) dc_xx_last)
-        in
-        match c_x_tangent_list with
-        | None -> tmp2
-        | Some c_x_tangent_list ->
-          let c_x_tangent_last = List.last_exn c_x_tangent_list in
-          (match c_x_tangent_last with
-           | None -> tmp2
-           | Some c_x_tangent_last -> Tensor.(tmp2 + c_x_tangent_last))
-      in
-      let c_u_T = Tensor.zeros [ m; b_dim ] ~device in
-      let _, new_c_x_list, new_c_u_list =
-        List.fold_right
-          n_steps_list
-          ~init:(lambda_T, [ c_x_T ], [ c_u_T ])
-          ~f:(fun t (lambda_next, c_x_list, c_u_list) ->
-            let lambda_curr =
-              let f_x_curr = extract_list f_x_primal_list t in
-              let x_curr = List.nth_exn x_primal_list t in
-              let c_xx_curr = extract_list c_xx_primal_list t in
-              let u_curr = List.nth_exn u_primal_list t in
-              let c_x_curr =
-                extract_list_opt_tensor t c_x_primal_list ~shape:[ m; a_dim ] ~device
-              in
-              let final =
-                let common =
-                  Tensor.(
-                    matmul lambda_next f_x_curr + matmul x_curr c_xx_curr + c_x_curr)
-                in
-                match c_xu_primal_list with
-                | None -> common
-                | Some c_xu_primal_list ->
-                  let c_xu_curr = extract_list c_xu_primal_list t in
-                  Tensor.(common + matmul u_curr (trans_2d_tensor c_xu_curr))
-              in
-              final
-            in
-            let c_x_t =
-              let tmp1 =
-                match c_xu_tangent_list with
-                | None -> Tensor.zeros_like c_x_T
-                | Some c_xu_tangent_list ->
-                  let c_xu_tangent_curr = List.nth_exn c_xu_tangent_list t in
-                  (match c_xu_tangent_curr with
-                   | None -> Tensor.zeros_like c_x_T
-                   | Some c_xu_tangent_curr ->
-                     Tensor.(
-                       matmul
-                         (List.nth_exn u_primal_list t)
-                         (trans_2d_tensor c_xu_tangent_curr)))
-              in
-              let tmp2 =
-                let dc_xx = List.nth_exn c_xx_tangent_list t in
-                match dc_xx with
-                | None -> Tensor.zeros_like c_x_T
-                | Some dc_xx -> Tensor.(matmul (List.nth_exn x_primal_list t) dc_xx)
-              in
-              let tmp3 =
-                let f_x_primal_curr =
-                  if List.length f_x_primal_list = 1
-                  then List.hd_exn f_x_primal_list
-                  else List.nth_exn f_x_primal_list t
-                in
-                Tensor.matmul lambda_next f_x_primal_curr
-              in
-              let final =
-                let common = Tensor.(tmp1 + tmp2 + tmp3) in
-                match c_x_tangent_list with
-                | None -> common
-                | Some c_x_tangent_list ->
-                  let c_x_tangent_curr = List.nth_exn c_x_tangent_list t in
-                  (match c_x_tangent_curr with
-                   | None -> common
-                   | Some c_x_tangent_curr -> Tensor.(common + c_x_tangent_curr))
-              in
-              final
-            in
-            let c_u_t =
-              let tmp1 =
-                match c_xu_tangent_list with
-                | None -> Tensor.zeros_like c_u_T
-                | Some c_xu_tangent_list ->
-                  let c_xu_tangent_curr = List.nth_exn c_xu_tangent_list t in
-                  (match c_xu_tangent_curr with
-                   | None -> Tensor.zeros_like c_u_T
-                   | Some c_xu_tangent_curr ->
-                     Tensor.(matmul (List.nth_exn x_primal_list t) c_xu_tangent_curr))
-              in
-              let tmp2 =
-                let dc_uu = List.nth_exn c_uu_tangent_list t in
-                match dc_uu with
-                | None -> Tensor.zeros_like c_u_T
-                | Some dc_uu -> Tensor.(matmul (List.nth_exn u_primal_list t) dc_uu)
-              in
-              let tmp3 =
-                let f_u_primal_curr =
-                  if List.length f_u_primal_list = 1
-                  then List.hd_exn f_u_primal_list
-                  else List.nth_exn f_u_primal_list t
-                in
-                Tensor.matmul lambda_next f_u_primal_curr
-              in
-              let final =
-                let common = Tensor.(tmp1 + tmp2 + tmp3) in
-                match c_u_tangent_list with
-                | None -> common
-                | Some c_u_tangent_list ->
-                  let c_u_tangent_curr = List.nth_exn c_u_tangent_list t in
-                  (match c_u_tangent_curr with
-                   | None -> common
-                   | Some c_u_tangent_curr -> Tensor.(common + c_u_tangent_curr))
-              in
-              final
-            in
-            let c_x_t_final = if t = 0 then Tensor.zeros_like x_0_primal else c_x_t in
-            lambda_curr, c_x_t_final :: c_x_list, c_u_t :: c_u_list)
-      in
-      let state_params_tensor_tangent =
-        { n_steps
-        ; x_0 = x_0_tangent
-        ; f_x_list = f_x_primal_list
-        ; f_u_list = f_u_primal_list
-        ; f_t_list = new_f_t_list
-        }
-      in
-      let cost_params_tensor_tangent =
-        { c_xx_list = c_xx_primal_list
-        ; c_xu_list = c_xu_primal_list
-        ; c_uu_list = c_uu_primal_list
-        ; c_x_list = Some new_c_x_list
-        ; c_u_list = Some new_c_u_list
-        }
-      in
-      lqr_tensor
-        ~state_params:state_params_tensor_tangent
-        ~cost_params:cost_params_tensor_tangent)
+        c_x :: c_x_accu, c_u :: c_u_accu, lambda_curr)
+  in
+  let state_params_tensor_tangent =
+    { n_steps
+    ; x_0 = Option.value_exn x_0_tangent
+    ; f_x_list = f_x_primal_list
+    ; f_u_list = f_u_primal_list
+    ; f_t_list = Some new_f_t_list
+    }
+  in
+  let cost_params_tensor_tangent =
+    { c_xx_list = c_xx_primal_list
+    ; c_xu_list = c_xu_primal_list
+    ; c_uu_list = c_uu_primal_list
+    ; c_x_list = Some new_c_x_list
+    ; c_u_list = Some new_c_u_list
+    }
+  in
+  let x_tangent_list, u_tangent_list =
+    lqr_tensor
+      ~state_params:state_params_tensor_tangent
+      ~cost_params:cost_params_tensor_tangent
   in
   Stdlib.Gc.major ();
   (* step 3: merge primal and tangents for x and u. *)
   let merge_primal_tan primal_list tangents_lqr =
-    List.map2_exn primal_list tangents_lqr ~f:(fun primal tan_list ->
-      let tangents =
-        List.map tan_list ~f:(fun tan ->
-          Tensor.reshape tan ~shape:(1 :: Tensor.shape primal))
-      in
-      let tangents_full = Maths.Direct (Tensor.concat tangents ~dim:0) in
-      Maths.make_dual primal ~t:tangents_full)
+    List.map2_exn primal_list tangents_lqr ~f:(fun primal tan ->
+      Maths.make_dual primal ~t:(Maths.Direct tan))
   in
-  (* tangents of timesteps to timesteps of tangents *)
-  let x_tangents_lqr = List.map tangents_lqr ~f:fst |> list_transpose in
-  let u_tangents_lqr = List.map tangents_lqr ~f:snd |> list_transpose in
-  let final_x_list = merge_primal_tan x_primal_list x_tangents_lqr in
-  let final_u_list = merge_primal_tan u_primal_list u_tangents_lqr in
+  let final_x_list = merge_primal_tan x_primal_list x_tangent_list in
+  let final_u_list = merge_primal_tan u_primal_list u_tangent_list in
   final_x_list, final_u_list

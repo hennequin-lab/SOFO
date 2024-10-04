@@ -165,8 +165,12 @@ let t0 = Unix.gettimeofday ()
 
 (* compare directly using Maths operation and using Tensor operation. *)
 let x_list1, u_list1 = Lqr.lqr ~state_params ~cost_params
+let x_list3, u_list3 = Lqr.lqr_sep ~state_params ~cost_params
 
-(* let x_list3, u_list3 = Lqr.lqr_sep ~state_params ~cost_params *)
+(* let _ =
+   List.iter2_exn u_list1 u_list3 ~f:(fun x1 x2 ->
+   Tensor.print (Tensor.norm (Option.value_exn Maths.(tangent (x1 - x2))))) *)
+
 let t1 = Unix.gettimeofday ()
 let time_elapsed = Float.(t1 - t0)
 
