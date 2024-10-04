@@ -129,16 +129,10 @@ module Make_LDS (X : module type of Default) = struct
     minibatch_as_data batched
 end
 
-(* time-invariant lds but with tangents *)
-type lds_params_tan =
-  { a_tot : Maths.t
-  ; b_tot : Maths.t
-  }
-
 type state_tan = { x_curr : Maths.t }
 
 type accu_tan =
-  { lds_params : lds_params_tan
+  { lds_params : Maths.t array * Maths.t array
   ; us : Maths.t array
   ; xs : Maths.t array
   }
@@ -191,43 +185,50 @@ module Make_LDS_Tan (X : module type of Default_Tan) = struct
     Maths.concat a_upper a_lower ~dim:0
 
   (* generate parameters for lds *)
-  let lds_params =
+  let sample_lds_params () =
     (* if coupling layer dynamics *)
-    let a_lower_tri =
-      let a_primal = to_device (sample_a Int.(X.a / 2)) in
-      let a_tangent =
-        Maths.Direct
-          (to_device (Arr.gaussian [| X.n_tangents; Int.(X.a / 2); Int.(X.a / 2) |]))
-      in
-      Maths.make_dual a_primal ~t:a_tangent
-    in
-    let a_tot = a_tot_from_a a_lower_tri in
-    let b_tot =
-      let b_upper =
-        let b_primal =
-          Tensor.(
-            mul_scalar
-              (randn [ Int.(X.a / 2); X.b ] ~device:X.device)
-              (Scalar.f Float.(1. / of_int X.a)))
+    let a_tot_list =
+      Array.init X.n_steps ~f:(fun _ ->
+        let a_lower_tri =
+          let a_primal = to_device (sample_a Int.(X.a / 2)) in
+          let a_tangent =
+            Maths.Direct
+              (to_device (Arr.gaussian [| X.n_tangents; Int.(X.a / 2); Int.(X.a / 2) |]))
+          in
+          Maths.make_dual a_primal ~t:a_tangent
         in
-        let b_tangent =
-          Maths.Direct
+        a_tot_from_a a_lower_tri)
+    in
+    let b_tot_list =
+      Array.init X.n_steps ~f:(fun _ ->
+        let b_upper =
+          let b_primal =
             Tensor.(
               mul_scalar
-                (randn [ X.n_tangents; Int.(X.a / 2); X.b ] ~device:X.device)
+                (randn [ Int.(X.a / 2); X.b ] ~device:X.device)
                 (Scalar.f Float.(1. / of_int X.a)))
+          in
+          let b_tangent =
+            Maths.Direct
+              Tensor.(
+                mul_scalar
+                  (randn [ X.n_tangents; Int.(X.a / 2); X.b ] ~device:X.device)
+                  (Scalar.f Float.(1. / of_int X.a)))
+          in
+          Maths.make_dual b_primal ~t:b_tangent
         in
-        Maths.make_dual b_primal ~t:b_tangent
-      in
-      let b_lower = Tensor.zeros [ Int.(X.a / 2); X.b ] ~device:X.device |> Maths.const in
-      Maths.concat b_upper b_lower ~dim:0
+        let b_lower =
+          Tensor.zeros [ Int.(X.a / 2); X.b ] ~device:X.device |> Maths.const
+        in
+        Maths.concat b_upper b_lower ~dim:0)
     in
     (* let a_tot = sample_a X.a in
        let b_tot = Mat.gaussian ~mu:0. ~sigma:Float.(1. / of_int X.a) X.a X.b in *)
-    { a_tot; b_tot }
+    a_tot_list, b_tot_list
 
   (* u goes from u_0 to u_{T-1}, x goes from x_0 to x_{T} *)
-  let sample_traj lds_params =
+  let sample_traj =
+    let lds_params = sample_lds_params () in
     (* initialise control at each step randomly *)
     let u =
       Array.init X.n_steps ~f:(fun _ ->
@@ -245,12 +246,13 @@ module Make_LDS_Tan (X : module type of Default_Tan) = struct
       in
       Maths.make_dual x0_primal ~t:x0_tangent
     in
+    let a_tot_array, b_tot_array = fst lds_params, snd lds_params in
     let rec iter t state tot_traj =
       if t = X.n_steps
       then List.rev tot_traj
       else (
         let x_next =
-          Maths.((lds_params.a_tot *@ state.x_curr) + (lds_params.b_tot *@ u.(t)))
+          Maths.((a_tot_array.(t) *@ state.x_curr) + (b_tot_array.(t) *@ u.(t)))
         in
         iter (t + 1) { x_curr = x_next } (x_next :: tot_traj))
     in
@@ -284,9 +286,32 @@ module Make_LDS_Tan (X : module type of Default_Tan) = struct
         in
         x, u)
     in
-    x_0, x_u_list
+    (* a time list of (a_tot, b_tot), each a_tot and each b_tot is batched *)
+    let batch_lds_params =
+      List.init X.n_steps ~f:(fun t ->
+        let a_tot =
+          let a_tot_list =
+            List.init bs ~f:(fun i ->
+              Maths.view
+                (fst minibatch.(i).lds_params).(Int.(t))
+                ~size:[ 1; X.a; X.a ])
+          in
+          Maths.concat_list a_tot_list ~dim:0
+        in
+        let b_tot =
+          let b_tot_list =
+            List.init bs ~f:(fun i ->
+              Maths.view
+                (snd minibatch.(i).lds_params).(Int.(t))
+                ~size:[ 1; X.a; X.b ])
+          in
+          Maths.concat_list b_tot_list ~dim:0
+        in
+        a_tot, b_tot)
+    in
+    batch_lds_params, x_0, x_u_list
 
   let batch_trajectory bs =
-    let batched = Array.init bs ~f:(fun _ -> sample_traj lds_params) in
+    let batched = Array.init bs ~f:(fun _ -> sample_traj) in
     minibatch_as_data batched
 end

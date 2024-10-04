@@ -23,11 +23,26 @@ let trans_2d x = Maths.transpose x ~dim0:1 ~dim1:0
 let trans_2d_tensor x = Tensor.transpose x ~dim0:1 ~dim1:0
 
 (* Transpose a list of lists *)
-let rec transpose lst =
+let rec list_transpose lst =
   match lst with
   | [] -> []
   | [] :: _ -> []
-  | _ -> List.map ~f:List.hd_exn lst :: transpose (List.map ~f:List.tl_exn lst)
+  | _ -> List.map ~f:List.hd_exn lst :: list_transpose (List.map ~f:List.tl_exn lst)
+
+(* A B, where a is size [m x i x j] and b is size [m x j x k] in batch mode *)
+let batch_matmul a b = Maths.(einsum [ a, "mij"; b, "mjk" ] "mik")
+
+(* A B^T *)
+let batch_matmul_trans a b = Maths.(einsum [ a, "mij"; b, "mkj" ] "mik")
+
+(* A^T B *)
+let batch_trans_matmul a b = Maths.(einsum [ a, "mij"; b, "mik" ] "mjk")
+
+(* a B, where a is a vector and B is a matrix *)
+let batch_vecmat a b = Maths.(einsum [ a, "mi"; b, "mij" ] "mj")
+
+(* a^T B *)
+let batch_trans_vecmat a b = Maths.(einsum [ a, "mi"; b, "mji" ] "mj")
 
 (* linear quadratic regulator; everything here is a Maths.t object *)
 let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
@@ -45,9 +60,9 @@ let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
   (* batch size *)
   let m = List.hd_exn (Tensor.shape (Maths.primal x_0)) in
   (* state dim *)
-  let a_dim = List.hd_exn (Tensor.shape f_u_eg) in
+  let a_dim = List.nth_exn (Tensor.shape f_u_eg) 1 in
   (* control dim *)
-  let b_dim = List.nth_exn (Tensor.shape f_u_eg) 1 in
+  let b_dim = List.nth_exn (Tensor.shape f_u_eg) 2 in
   let device = Tensor.device f_u_eg in
   (* step 1: backward pass to calculate K_t and k_t *)
   let v_mat_final = List.last_exn c_xx_list in
@@ -61,23 +76,36 @@ let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
     let f_x_curr = extract_list f_x_list t in
     let f_u_curr = extract_list f_u_list t in
     let f_t_curr = extract_list_opt t f_t_list ~shape:[ m; a_dim ] ~device in
-    let q_uu_curr = Maths.(c_uu_curr + (trans_2d f_u_curr *@ v_mat_next *@ f_u_curr)) in
-    let q_xx_curr = Maths.(c_xx_curr + (trans_2d f_x_curr *@ v_mat_next *@ f_x_curr)) in
-    let q_xu_curr = Maths.(c_xu_curr + (trans_2d f_x_curr *@ v_mat_next *@ f_u_curr)) in
+    let q_uu_curr =
+      Maths.(c_uu_curr + batch_trans_matmul f_u_curr (batch_matmul v_mat_next f_u_curr))
+    in
+    let q_xx_curr =
+      Maths.(c_xx_curr + batch_trans_matmul f_x_curr (batch_matmul v_mat_next f_x_curr))
+    in
+    let q_xu_curr =
+      Maths.(c_xu_curr + batch_trans_matmul f_x_curr (batch_matmul v_mat_next f_u_curr))
+    in
     let q_u_curr =
-      Maths.(c_u_curr + (v_vec_next *@ f_u_curr) + (f_t_curr *@ v_mat_next *@ f_u_curr))
+      Maths.(
+        c_u_curr
+        + batch_vecmat v_vec_next f_u_curr
+        + batch_vecmat f_t_curr (batch_matmul v_mat_next f_u_curr))
     in
     let q_x_curr =
-      Maths.(c_x_curr + (v_vec_next *@ f_x_curr) + (f_t_curr *@ v_mat_next *@ f_x_curr))
+      Maths.(
+        c_x_curr
+        + batch_vecmat v_vec_next f_x_curr
+        + batch_vecmat f_t_curr (batch_matmul v_mat_next f_x_curr))
     in
     let k_mat_curr =
-      Maths.linsolve q_uu_curr (Maths.neg (trans_2d q_xu_curr)) ~left:true
+      Maths.linsolve
+        q_uu_curr
+        (Maths.neg (transpose q_xu_curr ~dim0:2 ~dim1:1))
+        ~left:true
     in
-    let k_vec_curr =
-      Maths.linsolve q_uu_curr (Maths.neg (trans_2d q_u_curr)) ~left:true |> trans_2d
-    in
-    let v_mat_curr = Maths.(q_xx_curr + (q_xu_curr *@ k_mat_curr)) in
-    let v_vec_curr = Maths.(q_x_curr + (q_u_curr *@ k_mat_curr)) in
+    let k_vec_curr = Maths.linsolve q_uu_curr (Maths.neg q_u_curr) ~left:true in
+    let v_mat_curr = Maths.(q_xx_curr + batch_matmul q_xu_curr k_mat_curr) in
+    let v_vec_curr = Maths.(q_x_curr + batch_vecmat q_u_curr k_mat_curr) in
     v_mat_curr, v_vec_curr, k_mat_curr, k_vec_curr
   in
   (* k_mat and k_vec go from 0 to T-1 *)
@@ -86,6 +114,7 @@ let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
       if t = -1
       then k_mat_accu, k_vec_accu
       else (
+        Stdlib.Gc.major ();
         let v_mat_curr, v_vec_curr, k_mat_curr, k_vec_curr =
           backward t v_mat_next v_vec_next
         in
@@ -98,16 +127,17 @@ let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
     in
     backward_pass Int.(n_steps - 1) v_mat_final v_vec_final [] []
   in
+  Stdlib.Gc.major ();
   (* step 2: forward pass to obtain controls and states. *)
   let forward t x_curr =
     let f_x_curr = extract_list f_x_list t in
     let f_u_curr = extract_list f_u_list t in
     let k_mat_curr = List.nth_exn k_mat_list t in
     let k_vec_curr = List.nth_exn k_vec_list t in
-    let u_curr = Maths.((x_curr *@ trans_2d k_mat_curr) + k_vec_curr) in
+    let u_curr = Maths.(batch_trans_vecmat x_curr k_mat_curr + k_vec_curr) in
     let x_next =
       let common =
-        Maths.((x_curr *@ trans_2d f_x_curr) + (u_curr *@ trans_2d f_u_curr))
+        Maths.(batch_trans_vecmat x_curr f_x_curr + batch_trans_vecmat u_curr f_u_curr)
       in
       match f_t_list with
       | None -> common
@@ -121,6 +151,7 @@ let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
       if t = n_steps
       then List.rev x_accu, List.rev u_accu
       else (
+        Stdlib.Gc.major ();
         let x_next, u_curr = forward t x_curr in
         forward_pass Int.(t + 1) x_next (x_next :: x_accu) (u_curr :: u_accu))
     in
@@ -206,6 +237,7 @@ let lqr_tensor ~(state_params : state_params_tensor) ~(cost_params : cost_params
       if t = -1
       then k_mat_accu, k_vec_accu
       else (
+        Stdlib.Gc.major ();
         let v_mat_curr, v_vec_curr, k_mat_curr, k_vec_curr =
           backward t v_mat_next v_vec_next
         in
@@ -218,6 +250,7 @@ let lqr_tensor ~(state_params : state_params_tensor) ~(cost_params : cost_params
     in
     backward_pass Int.(n_steps - 1) v_mat_final v_vec_final [] []
   in
+  Stdlib.Gc.major ();
   (* step 2: forward pass to obtain controls and states. *)
   let forward t x_curr =
     let f_x_curr = extract_list f_x_list t in
@@ -243,6 +276,7 @@ let lqr_tensor ~(state_params : state_params_tensor) ~(cost_params : cost_params
       if t = n_steps
       then List.rev x_accu, List.rev u_accu
       else (
+        Stdlib.Gc.major ();
         let x_next, u_curr = forward t x_curr in
         forward_pass Int.(t + 1) x_next (x_next :: x_accu) (u_curr :: u_accu))
     in
@@ -578,8 +612,8 @@ let lqr_sep ~(state_params : state_params) ~(cost_params : cost_params) =
       Maths.make_dual primal ~t:tangents_full)
   in
   (* tangents of timesteps to timesteps of tangents *)
-  let x_tangents_lqr = List.map tangents_lqr ~f:fst |> transpose in
-  let u_tangents_lqr = List.map tangents_lqr ~f:snd |> transpose in
+  let x_tangents_lqr = List.map tangents_lqr ~f:fst |> list_transpose in
+  let u_tangents_lqr = List.map tangents_lqr ~f:snd |> list_transpose in
   let final_x_list = merge_primal_tan x_primal_list x_tangents_lqr in
   let final_u_list = merge_primal_tan u_primal_list u_tangents_lqr in
   final_x_list, final_u_list

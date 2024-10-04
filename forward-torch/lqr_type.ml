@@ -17,7 +17,7 @@ type state_params_tensor =
   ; f_t_list : Tensor.t list option
   }
 
-(* c lists fo from 0 to T. Note that c_xx at and c_x at time 0 need to be 0; c_uu and c_u at time T need to be 0. *)
+(* c lists fo from 0 to T. Note that c_xx at and c_x at time 0 need to be 0; c_uu and c_u at time T need to be 0. The leading dimension is the batch dimension. *)
 type cost_params =
   { c_xx_list : Maths_typ.t list
   ; c_xu_list : Maths_typ.t list option
