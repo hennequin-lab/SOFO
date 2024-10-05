@@ -93,11 +93,14 @@ let r_list =
 (* returns the x0 mat, list of target mat. targets x go from t=1 to t=T and targets u go from t=0 to t=T-1. *)
 let sample_data bs =
   let batch_lds_params, x0, x_u_list = Data_Tan.batch_trajectory bs in
-  let targets_list = List.map x_u_list ~f:fst in
-  let target_controls_list = List.map x_u_list ~f:snd in
-  batch_lds_params, x0, targets_list, target_controls_list
+  let targets_list = List.map x_u_list ~f:(fun (x, _, _) -> x) in
+  let target_controls_list = List.map x_u_list ~f:(fun (_, u, _) -> u) in
+  let f_ts_list = List.map x_u_list ~f:(fun (_, _, f_t) -> f_t) in
+  batch_lds_params, x0, targets_list, target_controls_list, f_ts_list
 
-let batch_lds_params, x0, targets_list, target_controls_list = sample_data batch_size
+let batch_lds_params, x0, targets_list, target_controls_list, f_ts_list =
+  sample_data batch_size
+
 let n_steps = List.length targets_list
 let repeat_list lst n = List.concat (List.init n ~f:(fun _ -> lst))
 
@@ -113,7 +116,7 @@ let state_params : Forward_torch.Lqr_type.state_params =
   ; x_0 = x0
   ; f_x_list = List.map batch_lds_params ~f:fst
   ; f_u_list = List.map batch_lds_params ~f:snd
-  ; f_t_list = None
+  ; f_t_list = Some f_ts_list
   }
 
 let c_x_list =

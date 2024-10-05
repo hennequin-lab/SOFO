@@ -20,6 +20,7 @@ type accu =
   { lds_params : lds_params
   ; us : Mat.mat array
   ; xs : Mat.mat array
+  ; f_ts : Mat.mat array
   }
 
 (* a is the state dimension, b is the control dimension and n_steps is the horizon length. *)
@@ -81,6 +82,8 @@ module Make_LDS (X : module type of Default) = struct
   let sample_traj lds_params =
     (* initialise control at each step randomly *)
     let u = Array.init X.n_steps ~f:(fun _ -> Mat.gaussian X.b 1) in
+    (* initialise constants at each step randomly *)
+    let f_ts = Array.init X.n_steps ~f:(fun _ -> Mat.gaussian X.a 1) in
     (* initialise x0 *)
     let x0 = Mat.gaussian X.a 1 in
     let rec iter t state tot_traj =
@@ -88,12 +91,13 @@ module Make_LDS (X : module type of Default) = struct
       then List.rev tot_traj
       else (
         let x_next =
-          Mat.((lds_params.a_tot *@ state.x_curr) + (lds_params.b_tot *@ u.(t)))
+          Mat.(
+            (lds_params.a_tot *@ state.x_curr) + (lds_params.b_tot *@ u.(t)) + f_ts.(t))
         in
         iter (t + 1) { x_curr = x_next } (x_next :: tot_traj))
     in
     let xs = iter 0 { x_curr = x0 } [ x0 ] in
-    { lds_params; us = u; xs = Array.of_list xs }
+    { lds_params; us = u; xs = Array.of_list xs; f_ts }
 
   (* refactor from batch array of accus to x0 and a time list of x and u. *)
   let minibatch_as_data minibatch =
@@ -120,7 +124,13 @@ module Make_LDS (X : module type of Default) = struct
           in
           Mat.concatenate u_array ~axis:0
         in
-        x, u)
+        let f_t =
+          let f_t_array =
+            Array.init bs ~f:(fun i -> Mat.(reshape minibatch.(i).f_ts.(t) [| 1; -1 |]))
+          in
+          Mat.concatenate f_t_array ~axis:0
+        in
+        x, u, f_t)
     in
     x_0, x_u_list
 
@@ -135,6 +145,7 @@ type accu_tan =
   { lds_params : Maths.t array * Maths.t array
   ; us : Maths.t array
   ; xs : Maths.t array
+  ; f_ts : Maths.t array
   }
 
 (* a is the state dimension, b is the control dimension, n_steps is the horizon length. *)
@@ -238,6 +249,15 @@ module Make_LDS_Tan (X : module type of Default_Tan) = struct
         in
         Maths.make_dual b_primal ~t:b_tangent)
     in
+    (* initialise constant at each step randomly *)
+    let f_t =
+      Array.init X.n_steps ~f:(fun _ ->
+        let f_t_primal = to_device (Arr.gaussian [| X.a; 1 |]) in
+        let f_t_tangent =
+          Maths.Direct (to_device (Arr.gaussian [| X.n_tangents; X.a; 1 |]))
+        in
+        Maths.make_dual f_t_primal ~t:f_t_tangent)
+    in
     (* initialise x0 *)
     let x0 =
       let x0_primal = to_device (Arr.gaussian [| X.a; 1 |]) in
@@ -252,12 +272,12 @@ module Make_LDS_Tan (X : module type of Default_Tan) = struct
       then List.rev tot_traj
       else (
         let x_next =
-          Maths.((a_tot_array.(t) *@ state.x_curr) + (b_tot_array.(t) *@ u.(t)))
+          Maths.((a_tot_array.(t) *@ state.x_curr) + (b_tot_array.(t) *@ u.(t)) + f_t.(t))
         in
         iter (t + 1) { x_curr = x_next } (x_next :: tot_traj))
     in
     let xs = iter 0 { x_curr = x0 } [ x0 ] in
-    { lds_params; us = u; xs = Array.of_list xs }
+    { lds_params; us = u; xs = Array.of_list xs; f_ts = f_t }
 
   (* refactor from batch array of accus to x0 and a time list of x and u. *)
   let minibatch_as_data minibatch =
@@ -284,7 +304,13 @@ module Make_LDS_Tan (X : module type of Default_Tan) = struct
           in
           Maths.concat_list u_list ~dim:0
         in
-        x, u)
+        let f_t =
+          let f_t_list =
+            List.init bs ~f:(fun i -> Maths.(view minibatch.(i).f_ts.(t) ~size:[ 1; -1 ]))
+          in
+          Maths.concat_list f_t_list ~dim:0
+        in
+        x, u, f_t)
     in
     (* a time list of (a_tot, b_tot), each a_tot and each b_tot is batched *)
     let batch_lds_params =
@@ -292,18 +318,14 @@ module Make_LDS_Tan (X : module type of Default_Tan) = struct
         let a_tot =
           let a_tot_list =
             List.init bs ~f:(fun i ->
-              Maths.view
-                (fst minibatch.(i).lds_params).(Int.(t))
-                ~size:[ 1; X.a; X.a ])
+              Maths.view (fst minibatch.(i).lds_params).(Int.(t)) ~size:[ 1; X.a; X.a ])
           in
           Maths.concat_list a_tot_list ~dim:0
         in
         let b_tot =
           let b_tot_list =
             List.init bs ~f:(fun i ->
-              Maths.view
-                (snd minibatch.(i).lds_params).(Int.(t))
-                ~size:[ 1; X.a; X.b ])
+              Maths.view (snd minibatch.(i).lds_params).(Int.(t)) ~size:[ 1; X.a; X.b ])
           in
           Maths.concat_list b_tot_list ~dim:0
         in

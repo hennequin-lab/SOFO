@@ -3,7 +3,6 @@ open Torch
 include Lqr_type
 include Maths
 
-
 (* extract t-th element from list; if list is length 1 then use the same element *)
 let extract_list list t =
   if List.length list = 1 then List.hd_exn list else List.nth_exn list t
@@ -17,7 +16,6 @@ let extract_list_opt_tensor t list ~shape ~device =
   match list with
   | None -> Tensor.zeros shape ~device
   | Some list -> List.nth_exn list t
-
 
 (* A B, where a is size [m x i x j] and b is size [m x j x k] in batch mode *)
 let batch_matmul a b = Maths.(einsum [ a, "mij"; b, "mjk" ] "mik")
@@ -458,14 +456,13 @@ let lqr_sep ~(state_params : state_params) ~(cost_params : cost_params) =
   in
   let lambda_T =
     let common =
-     
-        batch_vecmat_tensor (List.last_exn x_primal_list) (List.last_exn c_xx_primal_list)
+      batch_vecmat_tensor (List.last_exn x_primal_list) (List.last_exn c_xx_primal_list)
     in
     match c_x_primal_list with
     | None -> common
     | Some c_x_primal_list -> Tensor.(common + List.last_exn c_x_primal_list)
   in
-  let n_steps_list = List.range 0 (n_steps) in
+  let n_steps_list = List.range 0 n_steps in
   let new_c_u_T = Tensor.zeros [ n_tangents; m; b_dim ] ~device in
   let new_c_x_T =
     let tmp2 =
