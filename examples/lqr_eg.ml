@@ -48,47 +48,74 @@ end
 
 module Data_Tan = Lds_data.Make_LDS_Tan (Lds_params_dim_tan)
 
+let device_ = Lds_params_dim_tan.device
+let kind_ = Lds_params_dim_tan.kind
+
+(* sample a symmetric positive definite matrix of size n *)
+let create_sym_pos n =
+  let q_1 = Tensor.randn [ n; n ] ~device:device_ in
+  let qqT = Tensor.(matmul q_1 (transpose q_1 ~dim0:1 ~dim1:0)) in
+  Tensor.(qqT + eye ~n ~options:(kind_, device_))
+
 (* different costs for each batch and at each timestep; q goes from 1 to T and r goes from 0 to T-1 *)
 let control_costs () =
-  let q_r_list =
+  let q_list =
     List.init Lds_params_dim_tan.n_steps ~f:(fun _ ->
       let q_batched =
-        let q_array =
-          Array.init batch_size ~f:(fun _ ->
-            let q_1 = Mat.gaussian Lds_params_dim_tan.a Lds_params_dim_tan.a in
-            let qqT = Mat.(q_1 *@ transpose q_1) in
-            let q_tmp = Mat.(qqT + eye Lds_params_dim_tan.a) in
-            Arr.reshape q_tmp [| 1; Lds_params_dim_tan.a; Lds_params_dim_tan.a |])
+        let q_list =
+          List.init batch_size ~f:(fun _ ->
+            let q_primal =
+              let q_tmp = create_sym_pos Lds_params_dim_tan.a in
+              Tensor.reshape
+                q_tmp
+                ~shape:[ 1; Lds_params_dim_tan.a; Lds_params_dim_tan.a ]
+            in
+            let q_tangent =
+              let q_tangent_list =
+                List.init Lds_params_dim_tan.n_tangents ~f:(fun _ ->
+                  let q_tan_tmp = create_sym_pos Lds_params_dim_tan.a in
+                  Tensor.reshape
+                    q_tan_tmp
+                    ~shape:[ 1; 1; Lds_params_dim_tan.a; Lds_params_dim_tan.a ])
+              in
+              Tensor.concat q_tangent_list ~dim:0
+            in
+            Maths.make_dual q_primal ~t:(Maths.Direct q_tangent))
         in
-        Arr.concatenate q_array ~axis:0
+        Maths.concat_list q_list ~dim:0
       in
-      let r_batched =
-        let r_array =
-          Array.init batch_size ~f:(fun _ ->
-            let r_tmp = Mat.(eye Lds_params_dim_tan.b) in
-            Arr.reshape r_tmp [| 1; Lds_params_dim_tan.b; Lds_params_dim_tan.b |])
-        in
-        Arr.concatenate r_array ~axis:0
-      in
-      q_batched, r_batched)
+      q_batched)
   in
-  q_r_list
+  let r_list =
+    List.init Lds_params_dim_tan.n_steps ~f:(fun _ ->
+      let r_batched =
+        let r_list =
+          List.init batch_size ~f:(fun _ ->
+            let r_primal =
+              let r_tmp = create_sym_pos Lds_params_dim_tan.b in
+              Tensor.reshape
+                r_tmp
+                ~shape:[ 1; Lds_params_dim_tan.b; Lds_params_dim_tan.b ]
+            in
+            let r_tangent =
+              let r_tangent_list =
+                List.init Lds_params_dim_tan.n_tangents ~f:(fun _ ->
+                  let r_tan_tmp = create_sym_pos Lds_params_dim_tan.b in
+                  Tensor.reshape
+                    r_tan_tmp
+                    ~shape:[ 1; 1; Lds_params_dim_tan.b; Lds_params_dim_tan.b ])
+              in
+              Tensor.concat r_tangent_list ~dim:0
+            in
+            Maths.make_dual r_primal ~t:(Maths.Direct r_tangent))
+        in
+        Maths.concat_list r_list ~dim:0
+      in
+      r_batched)
+  in
+  q_list, r_list
 
-let q_r_list = with_given_seed_owl 1985 control_costs
-
-let q_list =
-  List.map
-    ~f:(fun q_r ->
-      let q = fst q_r in
-      Maths.const (to_device q))
-    q_r_list
-
-let r_list =
-  List.map
-    ~f:(fun q_r ->
-      let r = snd q_r in
-      Maths.const (to_device r))
-    q_r_list
+let q_list, r_list = with_given_seed_owl 1985 control_costs
 
 (* returns the x0 mat, list of target mat. targets x go from t=1 to t=T and targets u go from t=0 to t=T-1. *)
 let sample_data bs =
@@ -152,7 +179,13 @@ let cost_params : Forward_torch.Lqr_type.cost_params =
            [ batch_size; Lds_params_dim_tan.a; Lds_params_dim_tan.a ]
            ~device:Lds_params_dim_tan.device)
       :: q_list
-  ; c_xu_list = None
+  ; c_xu_list =
+      Some
+        (List.init (Lds_params_dim_tan.n_steps + 1) ~f:(fun _ ->
+           Maths.const
+             (Tensor.zeros
+                [ batch_size; Lds_params_dim_tan.a; Lds_params_dim_tan.b ]
+                ~device:Lds_params_dim_tan.device)))
   ; c_uu_list =
       r_list
       @ [ Maths.const
@@ -170,9 +203,9 @@ let t0 = Unix.gettimeofday ()
 let x_list1, u_list1 = Lqr.lqr ~state_params ~cost_params
 let x_list3, u_list3 = Lqr.lqr_sep ~state_params ~cost_params
 
-(* let _ =
-   List.iter2_exn u_list1 u_list3 ~f:(fun x1 x2 ->
-   Tensor.print (Tensor.norm (Option.value_exn Maths.(tangent (x1 - x2))))) *)
+let _ =
+  List.iter2_exn u_list1 u_list3 ~f:(fun x1 x2 ->
+    Tensor.print (Tensor.norm (Option.value_exn Maths.(tangent (x1 - x2)))))
 
 let t1 = Unix.gettimeofday ()
 let time_elapsed = Float.(t1 - t0)
