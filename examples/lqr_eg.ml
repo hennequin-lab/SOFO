@@ -16,7 +16,7 @@ let _ =
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
-let batch_size = 2
+let batch_size = 256
 let base = Optimizer.Config.Base.default
 let to_device = Tensor.of_bigarray ~device:base.device
 
@@ -38,10 +38,10 @@ let with_given_seed_owl seed f =
 let base = Optimizer.Config.Base.default
 
 module Lds_params_dim_tan = struct
-  let a = 6
-  let b = 1
-  let n_steps = 10
-  let n_tangents = 3
+  let a = 24
+  let b = 10
+  let n_steps = 25
+  let n_tangents = 128
   let kind = base.kind
   let device = base.device
 end
@@ -57,30 +57,31 @@ let create_sym_pos n =
   let qqT = Tensor.(matmul q_1 (transpose q_1 ~dim0:1 ~dim1:0)) in
   Tensor.(qqT + eye ~n ~options:(kind_, device_))
 
-(* different costs for each batch and at each timestep; q goes from 1 to T and r goes from 0 to T-1 *)
-let control_costs () =
+(* maths object where primal has shape 1 by n by n and tangent has shape k by n by n *)
+let create_sym_maths n =
+  let q_primal =
+    let q_tmp = create_sym_pos n in
+    Tensor.reshape q_tmp ~shape:[ 1; n; n ]
+  in
+  let q_tangent =
+    let q_tangent_list =
+      List.init Lds_params_dim_tan.n_tangents ~f:(fun _ ->
+        let q_tan_tmp = create_sym_pos n in
+        Tensor.reshape q_tan_tmp ~shape:[ 1; 1; n; n ])
+    in
+    Tensor.concat q_tangent_list ~dim:0
+  in
+  Maths.make_dual q_primal ~t:(Maths.Direct q_tangent)
+
+(* different costs for each batch and at each timestep; q goes from 1 to T and r goes from 0 to T-1; if invariant then use the same q and r across trials and time *)
+let control_costs ~invariant () =
   let q_list =
     List.init Lds_params_dim_tan.n_steps ~f:(fun _ ->
       let q_batched =
+        let q_inv = create_sym_maths Lds_params_dim_tan.a in
         let q_list =
           List.init batch_size ~f:(fun _ ->
-            let q_primal =
-              let q_tmp = create_sym_pos Lds_params_dim_tan.a in
-              Tensor.reshape
-                q_tmp
-                ~shape:[ 1; Lds_params_dim_tan.a; Lds_params_dim_tan.a ]
-            in
-            let q_tangent =
-              let q_tangent_list =
-                List.init Lds_params_dim_tan.n_tangents ~f:(fun _ ->
-                  let q_tan_tmp = create_sym_pos Lds_params_dim_tan.a in
-                  Tensor.reshape
-                    q_tan_tmp
-                    ~shape:[ 1; 1; Lds_params_dim_tan.a; Lds_params_dim_tan.a ])
-              in
-              Tensor.concat q_tangent_list ~dim:0
-            in
-            Maths.make_dual q_primal ~t:(Maths.Direct q_tangent))
+            if invariant then q_inv else create_sym_maths Lds_params_dim_tan.a)
         in
         Maths.concat_list q_list ~dim:0
       in
@@ -89,25 +90,10 @@ let control_costs () =
   let r_list =
     List.init Lds_params_dim_tan.n_steps ~f:(fun _ ->
       let r_batched =
+        let r_inv = create_sym_maths Lds_params_dim_tan.b in
         let r_list =
           List.init batch_size ~f:(fun _ ->
-            let r_primal =
-              let r_tmp = create_sym_pos Lds_params_dim_tan.b in
-              Tensor.reshape
-                r_tmp
-                ~shape:[ 1; Lds_params_dim_tan.b; Lds_params_dim_tan.b ]
-            in
-            let r_tangent =
-              let r_tangent_list =
-                List.init Lds_params_dim_tan.n_tangents ~f:(fun _ ->
-                  let r_tan_tmp = create_sym_pos Lds_params_dim_tan.b in
-                  Tensor.reshape
-                    r_tan_tmp
-                    ~shape:[ 1; 1; Lds_params_dim_tan.b; Lds_params_dim_tan.b ])
-              in
-              Tensor.concat r_tangent_list ~dim:0
-            in
-            Maths.make_dual r_primal ~t:(Maths.Direct r_tangent))
+            if invariant then r_inv else create_sym_maths Lds_params_dim_tan.b)
         in
         Maths.concat_list r_list ~dim:0
       in
@@ -115,7 +101,7 @@ let control_costs () =
   in
   q_list, r_list
 
-let q_list, r_list = with_given_seed_owl 1985 control_costs
+let q_list, r_list = with_given_seed_owl 1985 (control_costs ~invariant:true)
 
 (* returns the x0 mat, list of target mat. targets x go from t=1 to t=T and targets u go from t=0 to t=T-1. *)
 let sample_data bs =
@@ -182,10 +168,21 @@ let cost_params : Forward_torch.Lqr_type.cost_params =
   ; c_xu_list =
       Some
         (List.init (Lds_params_dim_tan.n_steps + 1) ~f:(fun _ ->
-           Maths.const
-             (Tensor.zeros
-                [ batch_size; Lds_params_dim_tan.a; Lds_params_dim_tan.b ]
-                ~device:Lds_params_dim_tan.device)))
+           let primal =
+             Tensor.zeros
+               [ batch_size; Lds_params_dim_tan.a; Lds_params_dim_tan.b ]
+               ~device:Lds_params_dim_tan.device
+           in
+           let tangent =
+             Tensor.zeros
+               [ Lds_params_dim_tan.n_tangents
+               ; batch_size
+               ; Lds_params_dim_tan.a
+               ; Lds_params_dim_tan.b
+               ]
+               ~device:Lds_params_dim_tan.device
+           in
+           Maths.make_dual primal ~t:(Maths.Direct tangent)))
   ; c_uu_list =
       r_list
       @ [ Maths.const
@@ -200,13 +197,10 @@ let cost_params : Forward_torch.Lqr_type.cost_params =
 let t0 = Unix.gettimeofday ()
 
 (* compare directly using Maths operation and using Tensor operation. *)
-let x_list1, u_list1 = Lqr.lqr ~state_params ~cost_params
+let _ = Convenience.print [%message "start lqr"]
+
+(* let x_list1, u_list1 = Lqr.lqr ~state_params ~cost_params *)
 let x_list3, u_list3 = Lqr.lqr_sep ~state_params ~cost_params
-
-let _ =
-  List.iter2_exn u_list1 u_list3 ~f:(fun x1 x2 ->
-    Tensor.print (Tensor.norm (Option.value_exn Maths.(tangent (x1 - x2)))))
-
 let t1 = Unix.gettimeofday ()
 let time_elapsed = Float.(t1 - t0)
 

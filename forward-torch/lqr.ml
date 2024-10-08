@@ -3,6 +3,8 @@ open Torch
 include Lqr_type
 include Maths
 
+let print s = Stdio.printf "%s\n%!" (Base.Sexp.to_string_hum s)
+
 (* extract t-th element from list; if list is length 1 then use the same element *)
 let extract_list list t =
   if List.length list = 1 then List.hd_exn list else List.nth_exn list t
@@ -142,6 +144,7 @@ let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
     in
     backward_pass Int.(n_steps - 1) v_mat_final v_vec_final [] []
   in
+  print [%message "backward finished"];
   Stdlib.Gc.major ();
   (* step 2: forward pass to obtain controls and states. *)
   let forward t x_curr =
@@ -172,6 +175,7 @@ let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
     in
     forward_pass 0 x_0 [ x_0 ] []
   in
+  print [%message "forward finished"];
   x_list, u_list
 
 (* linear quadratic regulator; everything here is a Tensor object *)
@@ -308,6 +312,7 @@ let lqr_tensor ~(state_params : state_params_tensor) ~(cost_params : cost_params
     in
     backward_pass Int.(n_steps - 1) v_mat_final v_vec_final [] []
   in
+  print [%message "backward finished"];
   Stdlib.Gc.major ();
   (* step 2: forward pass to obtain controls and states. *)
   let forward t x_curr =
@@ -350,6 +355,7 @@ let lqr_tensor ~(state_params : state_params_tensor) ~(cost_params : cost_params
     in
     forward_pass 0 x_0 [ x_0 ] []
   in
+  print [%message "forward finished"];
   x_list, u_list
 
 (* separate primal and tangents and perform a total of (K+1) lqrs *)
@@ -525,7 +531,7 @@ let lqr_sep ~(state_params : state_params) ~(cost_params : cost_params) =
               let dc_xu = List.nth_exn c_xu_tangent_list t in
               (match dc_xu with
                | None -> Tensor.zeros [ n_tangents; m; b_dim ] ~device
-               | Some dc_xu -> batch_vec_tanmat_trans_tensor x_t dc_xu)
+               | Some dc_xu -> batch_vec_tanmat_tensor x_t dc_xu)
           in
           let tmp2 =
             let dc_uu = List.nth_exn c_uu_tangent_list t in
