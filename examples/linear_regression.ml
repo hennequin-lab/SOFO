@@ -19,11 +19,11 @@ module One_layer = struct
 
   type input = Tensor.t
 
-  let f ~(theta : P.t') ~(input : input) = Maths.(theta *@ const input)
+  let f ~(theta : P.t') ~(input : input) = Maths.(const input *@ theta)
 
   let init ~n ~d : P.t =
-    let sigma = Float.(1. / sqrt (of_int n)) in
-    Tensor.(f sigma * randn ~kind:base.kind ~device:base.device [ d; n ]) |> Prms.free
+    let sigma = Float.(1. / sqrt (of_int d)) in
+    Tensor.(f sigma * randn ~kind:base.kind ~device:base.device [ n; d ]) |> Prms.free
 end
 
 (* Feedforward model wrapper with MSE loss *)
@@ -37,22 +37,23 @@ module FF =
 (* Optimiser; here you can switch to Adam to compare. *)
 module O = Optimizer.SOFO (FF)
 
-let config =
+let config ~base_lr ~gamma =
   Optimizer.Config.SOFO.
     { base
-    ; learning_rate = Some 100.
-    ; n_tangents = 10
+    ; learning_rate = Some base_lr
+    ; n_tangents = 100
     ; rank_one = false
-    ; damping = None
+    ; damping = gamma
     ; momentum = None
+    ; adaptive_lr = true
     }
 
 (* -----------------------------------------
    -- Generate linear regression data.
    ----------------------------------------- *)
 
-let n = 100
-let d = 1
+let n = 500
+let d = 50
 
 (* input covariance ( = Fisher information matrix in this case) *)
 let input_cov12 =
@@ -72,12 +73,12 @@ let teacher : One_layer.P.t' =
 
 (* data for mini batch. *)
 let minibatch bs =
-  let x = Tensor.(matmul input_cov12 (randn ~device:base.device [ n; bs ])) in
+  let x = Tensor.(matmul (randn ~device:base.device [ bs; n ]) input_cov12) in
   let y = One_layer.f ~theta:teacher ~input:x |> Maths.primal in
   x, y
 
 (* optimization loop *)
-let rec loop ~t ~out ~state =
+let rec loop ~t ~out ~state ~config =
   Stdlib.Gc.major ();
   let data = minibatch batch_size in
   let loss, new_state = O.step ~config ~state ~data ~args:() in
@@ -85,10 +86,26 @@ let rec loop ~t ~out ~state =
   then (
     Convenience.print [%message (t : int) (loss : float)];
     Owl.Mat.(save_txt ~append:true ~out (of_array [| Float.of_int t; loss |] 1 2)));
-  if t < max_iter then loop ~t:(t + 1) ~out ~state:new_state
+  if t < max_iter then loop ~t:(t + 1) ~out ~state:new_state ~config
 
 (* start the loop *)
+let damping_rates = [ None ]
+let lr_rates = [ 0.5 ]
+
 let _ =
-  let out = in_dir "loss" in
-  Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out ~state:(O.init ~config (One_layer.init ~n ~d))
+  List.iter lr_rates ~f:(fun eta ->
+    List.iter damping_rates ~f:(fun gamma ->
+      let config_f = config ~base_lr:eta ~gamma in
+      let fname =
+        sprintf
+          "regression_lr_%.4f_adaptive_lr_%s"
+          eta
+          (Bool.to_string config_f.adaptive_lr)
+      in
+      let out = in_dir fname in
+      Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
+      loop
+        ~t:0
+        ~out
+        ~state:(O.init ~config:config_f (One_layer.init ~n ~d))
+        ~config:config_f))

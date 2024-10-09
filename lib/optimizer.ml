@@ -118,7 +118,7 @@ module SOFO (W : Wrapper.T) = struct
       let s = if n_ws = 1 then s else n_ws :: s in
       Tensor.(view (matmul weights v_i) ~size:s))
 
-  (* calculate natural gradient = V(VtGtGV)^-1 V^t g *)
+  (* calculate natural gradient = V(ggn + gamma I)^-1 V^t g *)
   let natural_g ?damping ~vs ~ggn vtg =
     let u, s, _ = Tensor.svd ~some:true ~compute_uv:true ggn in
     (* how each V should be weighted, as a row array *)
@@ -169,6 +169,7 @@ module SOFO (W : Wrapper.T) = struct
     let final_losses, final_ggn = W.f ~update ~data ~init ~args theta_dual in
     (* compute loss and vtg *)
     let batch_size = final_losses |> Maths.primal |> Convenience.first_dim in
+    (* average over the batch size *)
     let loss = final_losses |> Maths.primal |> Tensor.mean |> Tensor.to_float0_exn in
     (* normalise ggn by batch size *)
     let final_ggn = Tensor.div_scalar_ final_ggn (Scalar.f Float.(of_int batch_size)) in
@@ -181,6 +182,48 @@ module SOFO (W : Wrapper.T) = struct
           ~dim:(Some [ 1 ])
           ~keepdim:true)
     in
+    (* calculate optimal learning rate *)
+    let rel_lr =
+      if config.adaptive_lr
+      then (
+        (* vanilla = 1/K (V V^T g) *)
+        let vanilla_g =
+          (* div by K to obtain unscaled g *)
+          let weights =
+            Tensor.(
+              div_scalar
+                (transpose ~dim0:1 ~dim1:0 vtg)
+                Scalar.(f Float.(of_int config.n_tangents)))
+          in
+          weighted_vs_sum vs ~weights
+        in
+        (* forward pass again with vanilla_g as the tangent *)
+        let theta_dual_lr =
+          W.P.make_dual
+            theta_
+            ~t:
+              (W.P.map vanilla_g ~f:(fun v ->
+                 Maths.Direct (Tensor.reshape v ~shape:(1 :: Tensor.shape v))))
+        in
+        (* compute the losses and tangents *)
+        let final_losses_lr, final_ggn_lr = W.f ~update ~data ~init ~args theta_dual_lr in
+        (* compute optimal learning rate; average over batch *)
+        let grad_tangent =
+          final_losses_lr
+          |> Maths.tangent
+          |> Option.value_exn
+          |> Tensor.(
+               mean_dim ~dtype:(type_ loss_tangents) ~dim:(Some [ 1 ]) ~keepdim:true)
+          |> Tensor.to_float0_exn
+        in
+        (* divide by batch size *)
+        let ggn_lr =
+          Tensor.div_scalar_ final_ggn_lr (Scalar.f Float.(of_int batch_size))
+          |> Tensor.to_float0_exn
+        in
+        Float.(grad_tangent / ggn_lr))
+      else 1.
+    in
     (* compute natural gradient and update theta *)
     let natural_g = natural_g ?damping:config.damping ~vs ~ggn:final_ggn vtg in
     let natural_g_avg =
@@ -189,7 +232,9 @@ module SOFO (W : Wrapper.T) = struct
     in
     let learning_rate =
       Option.map config.learning_rate ~f:(fun eta ->
-        Option.value_map beta_t ~default:eta ~f:(fun b -> Float.(eta / (1. - b))))
+        let eta_adapt = rel_lr *. eta in
+        Option.value_map beta_t ~default:eta_adapt ~f:(fun b ->
+          Float.(eta_adapt / (1. - b))))
     in
     let new_theta = update_theta ?learning_rate ~theta natural_g_avg in
     loss, { theta = new_theta; g_avg = Some natural_g_avg; beta_t }

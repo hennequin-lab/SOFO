@@ -43,6 +43,7 @@ module Config = struct
       ; rank_one : bool
       ; damping : float option
       ; momentum : float option
+      ; adaptive_lr : bool
       }
 
     let default =
@@ -52,6 +53,7 @@ module Config = struct
       ; rank_one = false
       ; damping = None
       ; momentum = None
+      ; adaptive_lr = false
       }
   end
 
