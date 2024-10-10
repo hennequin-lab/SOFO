@@ -37,13 +37,13 @@ module FF =
 (* Optimiser; here you can switch to Adam to compare. *)
 module O = Optimizer.SOFO (FF)
 
-let config ~base_lr ~gamma =
+let config ~base_lr =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
     ; n_tangents = 100
     ; rank_one = false
-    ; damping = gamma
+    ; damping = None
     ; momentum = None
     ; adaptive_lr = true
     }
@@ -52,7 +52,7 @@ let config ~base_lr ~gamma =
    -- Generate linear regression data.
    ----------------------------------------- *)
 
-let n = 500
+let n = 2000
 let d = 50
 
 (* input covariance ( = Fisher information matrix in this case) *)
@@ -89,23 +89,23 @@ let rec loop ~t ~out ~state ~config =
   if t < max_iter then loop ~t:(t + 1) ~out ~state:new_state ~config
 
 (* start the loop *)
-let damping_rates = [ None ]
-let lr_rates = [ 0.5 ]
+let lr_rates = [ 10.; 5.; 7.]
 
 let _ =
   List.iter lr_rates ~f:(fun eta ->
-    List.iter damping_rates ~f:(fun gamma ->
-      let config_f = config ~base_lr:eta ~gamma in
-      let fname =
-        sprintf
-          "regression_lr_%.4f_adaptive_lr_%s"
-          eta
-          (Bool.to_string config_f.adaptive_lr)
-      in
-      let out = in_dir fname in
-      Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
-      loop
-        ~t:0
-        ~out
-        ~state:(O.init ~config:config_f (One_layer.init ~n ~d))
-        ~config:config_f))
+    let config_f = config ~base_lr:eta in
+    let fname =
+      sprintf
+        "regression_n_%s_d_%s_lr_%.4f_adaptive_lr_%s"
+        (Int.to_string n)
+        (Int.to_string d)
+        eta
+        (Bool.to_string config_f.adaptive_lr)
+    in
+    let out = in_dir fname in
+    Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
+    loop
+      ~t:0
+      ~out
+      ~state:(O.init ~config:config_f (One_layer.init ~n ~d))
+      ~config:config_f)

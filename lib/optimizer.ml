@@ -80,6 +80,16 @@ module SOFO (W : Wrapper.T) = struct
   let init ~(config : ('a, 'b) config) theta =
     { theta; g_avg = None; beta_t = Option.map config.momentum ~f:(fun _ -> 1.) }
 
+  (* fold vs over sets of v_i s, multiply with associated weights. *)
+  let weighted_vs_sum vs ~weights =
+    W.P.map vs ~f:(fun v ->
+      let v_i = Maths.tangent' v in
+      let[@warning "-8"] (n_samples :: s) = Tensor.shape v_i in
+      let n_ws = Convenience.first_dim weights in
+      let v_i = Tensor.view v_i ~size:[ n_samples; -1 ] in
+      let s = if n_ws = 1 then s else n_ws :: s in
+      Tensor.(view (matmul weights v_i) ~size:s))
+
   (* initialise tangents, where each tangent is normalised. *)
   let init_tangents ~base ~rank_one ~n_tangents theta_ =
     let vs =
@@ -106,17 +116,21 @@ module SOFO (W : Wrapper.T) = struct
       in
       normed_vs
     in
-    normalize vs
-
-  (* fold vs over sets of v_i s, multiply with associated weights. *)
-  let weighted_vs_sum vs ~weights =
-    W.P.map vs ~f:(fun v ->
-      let v_i = Maths.tangent' v in
-      let[@warning "-8"] (n_samples :: s) = Tensor.shape v_i in
-      let n_ws = Convenience.first_dim weights in
-      let v_i = Tensor.view v_i ~size:[ n_samples; -1 ] in
-      let s = if n_ws = 1 then s else n_ws :: s in
-      Tensor.(view (matmul weights v_i) ~size:s))
+    (* orthogonalise vs such that elements in vs are orthogonal against each other. *)
+    let orthogonalise_set set =
+      let kT_k =
+        W.P.fold set ~init:(Tensor.f 0.) ~f:(fun accu (k, _) ->
+          let n_set = List.hd_exn (Tensor.shape k) in
+          let k = Tensor.reshape k ~shape:[ n_set; -1 ] in
+          Tensor.(accu + matmul k (Tensor.transpose k ~dim0:1 ~dim1:0)))
+      in
+      let u, s, _ = Tensor.linalg_svd ~full_matrices:false ~driver:"gesvdj" ~a:kT_k in
+      let weights = Tensor.(matmul (u / sqrt s) (Tensor.transpose u ~dim0:1 ~dim1:0)) in
+      let set_tangents = W.P.map set ~f:(fun k -> Maths.Direct k) in
+      weighted_vs_sum set_tangents ~weights
+    in
+    let vs_orth = orthogonalise_set vs in
+    normalize vs_orth
 
   (* calculate natural gradient = V(ggn + gamma I)^-1 V^t g *)
   let natural_g ?damping ~vs ~ggn vtg =
@@ -182,27 +196,22 @@ module SOFO (W : Wrapper.T) = struct
           ~dim:(Some [ 1 ])
           ~keepdim:true)
     in
+    (* compute natural gradient and update theta *)
+    let natural_g = natural_g ?damping:config.damping ~vs ~ggn:final_ggn vtg in
+    let natural_g_avg =
+      let module M = Momentum (W.P) in
+      M.apply ?momentum:config.momentum ~avg:state.g_avg natural_g
+    in
     (* calculate optimal learning rate *)
     let rel_lr =
       if config.adaptive_lr
       then (
-        (* vanilla = 1/K (V V^T g) *)
-        let vanilla_g =
-          (* div by K to obtain unscaled g *)
-          let weights =
-            Tensor.(
-              div_scalar
-                (transpose ~dim0:1 ~dim1:0 vtg)
-                Scalar.(f Float.(of_int config.n_tangents)))
-          in
-          weighted_vs_sum vs ~weights
-        in
-        (* forward pass again with vanilla_g as the tangent *)
+        (* forward pass again with natural_g_avg as the tangent *)
         let theta_dual_lr =
           W.P.make_dual
             theta_
             ~t:
-              (W.P.map vanilla_g ~f:(fun v ->
+              (W.P.map natural_g_avg ~f:(fun v ->
                  Maths.Direct (Tensor.reshape v ~shape:(1 :: Tensor.shape v))))
         in
         (* compute the losses and tangents *)
@@ -221,14 +230,9 @@ module SOFO (W : Wrapper.T) = struct
           Tensor.div_scalar_ final_ggn_lr (Scalar.f Float.(of_int batch_size))
           |> Tensor.to_float0_exn
         in
-        Float.(grad_tangent / ggn_lr))
+        let a = Float.(grad_tangent / ggn_lr) in
+        a)
       else 1.
-    in
-    (* compute natural gradient and update theta *)
-    let natural_g = natural_g ?damping:config.damping ~vs ~ggn:final_ggn vtg in
-    let natural_g_avg =
-      let module M = Momentum (W.P) in
-      M.apply ?momentum:config.momentum ~avg:state.g_avg natural_g
     in
     let learning_rate =
       Option.map config.learning_rate ~f:(fun eta ->
