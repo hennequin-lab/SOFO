@@ -1,9 +1,6 @@
-open Printf
 open Base
-open Owl
 open Torch
 open Forward_torch
-open Sofo
 module Mat = Owl.Dense.Matrix.S
 module Arr = Owl.Dense.Ndarray.S
 module C = Owl.Dense.Matrix.C
@@ -318,14 +315,14 @@ module Make_LDS_Tan (X : module type of Default_Tan) = struct
         let a_tot =
           let a_tot_list =
             List.init bs ~f:(fun i ->
-              Maths.view (fst minibatch.(i).lds_params).(Int.(t)) ~size:[ 1; X.a; X.a ])
+              Maths.view (fst minibatch.(i).lds_params).(t) ~size:[ 1; X.a; X.a ])
           in
           Maths.concat_list a_tot_list ~dim:0
         in
         let b_tot =
           let b_tot_list =
             List.init bs ~f:(fun i ->
-              Maths.view (snd minibatch.(i).lds_params).(Int.(t)) ~size:[ 1; X.a; X.b ])
+              Maths.view (snd minibatch.(i).lds_params).(t) ~size:[ 1; X.a; X.b ])
           in
           Maths.concat_list b_tot_list ~dim:0
         in

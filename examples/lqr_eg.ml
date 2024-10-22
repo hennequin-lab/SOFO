@@ -1,14 +1,12 @@
-(* directly parameterise control matrices for affine dynamics *)
-open Printf
+(* propagate tangents either naively together with primals or separately to form (K+1) lqr problems. *)
 open Base
-open Owl
 open Torch
 open Forward_torch
 open Sofo
 module Mat = Owl.Dense.Matrix.S
 module Arr = Owl.Dense.Ndarray.S
 
-let in_dir = Cmdargs.in_dir "-d"
+(* let in_dir = Cmdargs.in_dir "-d" *)
 
 let _ =
   (* Random.init 1999; *)
@@ -17,8 +15,8 @@ let _ =
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
 let batch_size = 256
-let base = Optimizer.Config.Base.default
-let to_device = Tensor.of_bigarray ~device:base.device
+(* let base = Optimizer.Config.Base.default *)
+(* let to_device = Tensor.of_bigarray ~device:base.device *)
 
 (* -----------------------------------------
    -- Define Control Problem          ------
@@ -114,8 +112,6 @@ let sample_data bs =
 let batch_lds_params, x0, targets_list, target_controls_list, f_ts_list =
   sample_data batch_size
 
-let n_steps = List.length targets_list
-let repeat_list lst n = List.concat (List.init n ~f:(fun _ -> lst))
 
 (* -----------------------------------------
    -- Maths operations (with tangent)  ------

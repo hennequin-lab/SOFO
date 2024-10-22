@@ -215,7 +215,6 @@ let unary_tests =
    and a binary math function to be tested *)
 type binary = string * input_constr list * (int list -> Maths.t -> Maths.t -> Maths.t)
 
-let print s = Stdio.print_endline (Sexp.to_string_hum s)
 
 (* generate the shape of 2 by 2 matrices where A *@ B is possible. *)
 let random_mult_matrix_shapes () =

@@ -295,8 +295,6 @@ let transpose (x, dx) ~dim0 ~dim1 =
   let dy = with_tangent dx ~f:(Tensor.transpose_copy ~dim0:(dim0 + 1) ~dim1:(dim1 + 1)) in
   (y, dy) |> assert_right_shape "transpose"
 
-let print s = Stdio.printf "%s\n%!" (Base.Sexp.to_string_hum s)
-
 let last_two_elements lst =
   let len = List.length lst in
   if len < 2 then None else Some (List.drop lst (len - 2))

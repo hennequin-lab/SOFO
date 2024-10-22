@@ -1,4 +1,3 @@
-open Printf
 open Base
 open Torch
 open Forward_torch

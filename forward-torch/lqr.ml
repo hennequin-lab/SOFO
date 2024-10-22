@@ -24,10 +24,10 @@ let batch_matmul a b = Maths.(einsum [ a, "mij"; b, "mjk" ] "mik")
 let batch_matmul_tensor a b = Tensor.einsum ~equation:"mij,mjk->mik" [ a; b ] ~path:None
 
 (* A B^T *)
-let batch_matmul_trans a b = Maths.(einsum [ a, "mij"; b, "mkj" ] "mik")
+(* let batch_matmul_trans a b = Maths.(einsum [ a, "mij"; b, "mkj" ] "mik") *)
 
-let batch_matmul_trans_tensor a b =
-  Tensor.einsum ~equation:"mij,mkj->mik" [ a; b ] ~path:None
+(* let batch_matmul_trans_tensor a b =
+  Tensor.einsum ~equation:"mij,mkj->mik" [ a; b ] ~path:None *)
 
 (* A^T B *)
 let batch_trans_matmul a b = Maths.(einsum [ a, "mij"; b, "mik" ] "mjk")
