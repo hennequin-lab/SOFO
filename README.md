@@ -14,9 +14,21 @@ Training recurrent neural networks (RNNs) to perform neuroscience tasks can be c
 
 ## To run examples
 
-- compile the example by running e.g. `dune build src/example.exe`. If linking issues arise, please get in touch.
-- run `dune exec _build/default/src/example.exe -d [results_directory]` (where `[results_directory]` is where you want your results to be saved). Depending on the example file you are trying to execute, there might be additional command line arguments.
+- compile the example by running e.g. `dune build examples/example.exe`. If linking issues arise, please get in touch.
+- run `dune exec _build/default/examples/example.exe -d [results_directory]` (where `[results_directory]` is where you want your results to be saved). Depending on the example file you are trying to execute, there might be additional command line arguments.
+
  
 ## OpenBLAS installation
 
 - on certain operating systems linking errors to OpenBLAS can arise when installing owl. One solution to circumvent them is to install OpenBLAS from source (https://github.com/xianyi/OpenBLAS.git), and to then manually include the path to the OpenBLAS installation in LD_LIBRARY_PATH and PKG_CONFIG_PATH.
+  
+## Citation
+```
+@inproceedings{yusecond,
+  title={Second-order forward-mode optimization of recurrent neural networks for neuroscience},
+  author={Yu, Youjing and Xia, Rui and Ma, Qingxi and Lengyel, M{\'a}t{\'e} and Hennequin, Guillaume},
+  booktitle={The Thirty-eighth Annual Conference on Neural Information Processing Systems},
+  year={2024},
+  url={https://github.com/hennequin-lab/SOFO}
+}
+```
