@@ -1,6 +1,7 @@
 open Base
 open Torch
 include Maths_typ
+include Lqr_typ
 
 (*
    We will systematically work with the assumption that for a primal value of shape [n1; n2; ... ],
@@ -1016,3 +1017,120 @@ let check_grad2 f x y =
     Tensor.(div_scalar (zplusplus - zminusminus) Scalar.(f Float.(2. * epsilon)))
   in
   Tensor.(norm (dz_pred - dz_finite) / norm dz_finite) |> Tensor.to_float0_exn
+
+let check_grad_lqr f ~state_params ~cost_params =
+  (* wrap f around a rng seed setter so that stochasticity is the same *)
+  let key = Random.int Int.max_value in
+  let f ~state_params:x ~cost_params:y =
+    Torch_core.Wrapper.manual_seed key;
+    f ~state_params:x ~cost_params:y
+  in
+  (* extract params from the original params sets*)
+  let n_steps = state_params.n_steps in
+  let x_0 = state_params.x_0 in
+  let f_u_list = state_params.f_u_list |> List.map ~f:const in
+  let f_t_list = state_params.f_t_list |> Option.map ~f:(List.map ~f:const) in
+  let c_xu_list = cost_params.c_xu_list |> Option.map ~f:(List.map ~f:const) in
+  let c_uu_list = cost_params.c_uu_list |> List.map ~f:const in
+  let c_x_list = cost_params.c_x_list |> Option.map ~f:(List.map ~f:const) in
+  let c_u_list = cost_params.c_u_list |> Option.map ~f:(List.map ~f:const) in
+  (* only add tangents on f_x and c_xx *)
+  (* draw a random direction along which to evaluate derivatives *)
+  (* let v_x0 =
+     let sx = Tensor.shape state_params.x_0 in
+     Tensor.rand ~kind:(Tensor.type_ state_params.x_0) sx
+     in
+     let x_0_tan =
+     make_dual
+     state_params.x_0
+     ~t:(Direct (Tensor.view_copy v_x0 ~size:(1 :: Tensor.shape state_params.x_0)))
+     in *)
+  let vx_list =
+    List.map state_params.f_x_list ~f:(fun f_x ->
+      let sx = Tensor.shape f_x in
+      Tensor.randn ~kind:(Tensor.type_ f_x) sx)
+  in
+  let f_x_list_tan =
+    List.map2_exn state_params.f_x_list vx_list ~f:(fun f_x vx ->
+      (* draw a random direction along which to evaluate derivatives *)
+      let sx = Tensor.shape f_x in
+      make_dual f_x ~t:(Direct (Tensor.view_copy vx ~size:(1 :: sx))))
+  in
+  let vc_xx_list =
+    List.map cost_params.c_xx_list ~f:(fun c_xx ->
+      let sx = Tensor.shape c_xx in
+      Tensor.randn ~kind:(Tensor.type_ c_xx) sx)
+  in
+  let c_xx_list_tan =
+    List.map2_exn cost_params.c_xx_list vc_xx_list ~f:(fun c_xx vc_xx ->
+      let sy = Tensor.shape c_xx in
+      make_dual c_xx ~t:(Direct (Tensor.view_copy vc_xx ~size:(1 :: sy))))
+  in
+  (* compute directional derivative as automatically computed by our maths module *)
+  let dz_pred =
+    let state_params_tan =
+      { n_steps; x_0 = const x_0; f_x_list = f_x_list_tan; f_u_list; f_t_list }
+    in
+    let cost_params_tan =
+      { c_xx_list = c_xx_list_tan; c_xu_list; c_uu_list; c_x_list; c_u_list }
+    in
+    let x_list, _ = f ~state_params:state_params_tan ~cost_params:cost_params_tan in
+    List.map (List.tl_exn x_list) ~f:(fun x ->
+      let s = Tensor.shape (primal x) in
+      tangent x |> Option.value_exn |> Tensor.view_copy ~size:s)
+  in
+  (* compare with finite-differences *)
+  let dz_fd =
+    (* let x_0_plus, x_0_minus =
+      ( make_dual
+          Tensor.(state_params.x_0)
+          ~t:(Direct (Tensor.zeros (1 :: Tensor.shape state_params.x_0)))
+      , make_dual
+          Tensor.(state_params.x_0)
+          ~t:(Direct (Tensor.zeros (1 :: Tensor.shape state_params.x_0))) )
+    in *)
+
+    let f_x_total_list =
+      List.map2_exn state_params.f_x_list vx_list ~f:(fun f_x vx ->
+        ( const Tensor.(f_x + mul_scalar vx Scalar.(f epsilon))
+        , const Tensor.(f_x - mul_scalar vx Scalar.(f epsilon)) ))
+    in
+    let f_x_plus_list = List.map f_x_total_list ~f:fst in
+    let f_x_minus_list = List.map f_x_total_list ~f:snd in
+    let c_xx_total_list =
+      List.map2_exn cost_params.c_xx_list vc_xx_list ~f:(fun c_xx vy ->
+        ( const Tensor.(c_xx + mul_scalar vy Scalar.(f epsilon))
+        , const Tensor.(c_xx - mul_scalar vy Scalar.(f epsilon)) ))
+    in
+    let c_xx_plus_list = List.map c_xx_total_list ~f:fst in
+    let c_xx_minus_list = List.map c_xx_total_list ~f:snd in
+    let state_params_tan_plus =
+      { n_steps; x_0 = const x_0; f_x_list = f_x_plus_list; f_u_list; f_t_list }
+    in
+    let cost_params_tan_plus =
+      { c_xx_list = c_xx_plus_list; c_xu_list; c_uu_list; c_x_list; c_u_list }
+    in
+    let zplusplus_list =
+      let x_list, _ =
+        f ~state_params:state_params_tan_plus ~cost_params:cost_params_tan_plus
+      in
+      List.map x_list ~f:primal
+    in
+    let state_params_tan_minus =
+      { n_steps; x_0 = const x_0; f_x_list = f_x_minus_list; f_u_list; f_t_list }
+    in
+    let cost_params_tan_minus =
+      { c_xx_list = c_xx_minus_list; c_xu_list; c_uu_list; c_x_list; c_u_list }
+    in
+    let zminusminus_list =
+      let x_list, _ =
+        f ~state_params:state_params_tan_minus ~cost_params:cost_params_tan_minus
+      in
+      List.map x_list ~f:primal
+    in
+    List.map2_exn (List.tl_exn zplusplus_list) (List.tl_exn zminusminus_list) ~f:(fun zplusplus zminusminus ->
+      Tensor.(div_scalar (zplusplus - zminusminus) Scalar.(f Float.(2. * epsilon))))
+  in
+  List.map2_exn dz_pred dz_fd ~f:(fun pred fd -> Tensor.(norm (pred - fd) / norm fd))
+  |> List.fold ~init:Tensor.(f 0.) ~f:Tensor.( + )
+  |> Tensor.to_float0_exn

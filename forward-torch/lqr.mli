@@ -1,5 +1,5 @@
 open Torch
-include module type of Lqr_type
+include module type of Lqr_typ
 
 val lqr
   :  state_params:Maths.t state_params

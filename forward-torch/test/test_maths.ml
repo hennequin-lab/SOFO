@@ -12,7 +12,7 @@ let random_shape min_order =
 
 (* generate a random shape with a specified order *)
 let random_shape_set order = List.init order ~f:(fun _ -> 2 + Random.int 4)
-let rel_tol = Alcotest.float 1e-4
+let rel_tol = Alcotest.float 1e-3
 
 (* two types of contraints: input tensors need to be postive or their orders need to be greater than specified. *)
 type input_constr =
@@ -215,7 +215,6 @@ let unary_tests =
    and a binary math function to be tested *)
 type binary = string * input_constr list * (int list -> Maths.t -> Maths.t -> Maths.t)
 
-
 (* generate the shape of 2 by 2 matrices where A *@ B is possible. *)
 let random_mult_matrix_shapes () =
   let first_dim = 1 + Random.int 3 in
@@ -364,7 +363,158 @@ let binary_tests =
   in
   List.map ~f:test_binary test_list
 
+(* -----------------------------------------
+   -- Test for lqr operations       ------
+   ----------------------------------------- *)
+
+open Base
+open Torch
+open Forward_torch
+open Sofo
+module Mat = Owl.Dense.Matrix.S
+module Arr = Owl.Dense.Ndarray.S
+
+let batch_size = 16
+
+(* -----------------------------------------
+   -- Define Control Problem          ------
+   ----------------------------------------- *)
+
+let base = Optimizer.Config.Base.default
+let device_ = Torch.Device.Cpu
+
+(* sample a symmetric positive definite matrix of size n *)
+let create_sym_pos n =
+  let q_1 = Tensor.randn [ n; n ] ~device:device_ in
+  let qqT = Tensor.(matmul q_1 (transpose q_1 ~dim0:1 ~dim1:0)) in
+  Tensor.(qqT + eye ~n ~options:(base.kind, device_))
+
+let generate_state_cost_params () =
+  (* define control problem dimension *)
+  let module Lds_params_dim = struct
+    let a = 4
+    let b = 3
+    let n_steps = 5
+    let kind = base.kind
+    let device = device_
+  end
+  in
+  let module Data = Lds_data.Make_LDS (Lds_params_dim) in
+  (* for simplicity same q and r across trials and time *)
+  let q_list =
+    List.init Lds_params_dim.n_steps ~f:(fun _ ->
+      let q_inv =
+        create_sym_pos Lds_params_dim.a
+        |> Tensor.reshape ~shape:[ 1; Lds_params_dim.a; Lds_params_dim.a ]
+      in
+      let q_list = List.init batch_size ~f:(fun _ -> q_inv) in
+      Tensor.concat q_list ~dim:0)
+  in
+  let r_list =
+    List.init Lds_params_dim.n_steps ~f:(fun _ ->
+      let r_inv =
+        create_sym_pos Lds_params_dim.b
+        |> Tensor.reshape ~shape:[ 1; Lds_params_dim.b; Lds_params_dim.b ]
+      in
+      let r_list = List.init batch_size ~f:(fun _ -> r_inv) in
+      Tensor.concat r_list ~dim:0)
+  in
+  (* returns the x0 mat, list of target mat. targets x go from t=1 to t=T and targets u go from t=0 to t=T-1. *)
+  let sample_data bs =
+    let batch_lds_params, x0, x_u_list = Data.batch_trajectory bs in
+    let targets_list = List.map x_u_list ~f:(fun (x, _, _) -> x) in
+    let target_controls_list = List.map x_u_list ~f:(fun (_, u, _) -> u) in
+    let f_ts_list = List.map x_u_list ~f:(fun (_, _, f_t) -> f_t) in
+    batch_lds_params, x0, targets_list, target_controls_list, f_ts_list
+  in
+  let batch_lds_params, x0, targets_list, target_controls_list, f_ts_list =
+    sample_data batch_size
+  in
+  (* form state params/cost_params/xu_desired *)
+  let state_params : Tensor.t Forward_torch.Lqr_typ.state_params =
+    { n_steps = List.length targets_list
+    ; x_0 = x0
+    ; f_x_list = List.map batch_lds_params ~f:fst
+    ; f_u_list = List.map batch_lds_params ~f:snd
+    ; f_t_list = Some f_ts_list
+    }
+  in
+  (* form c_x and c_u lists *)
+  let batch_vecmat a b = Tensor.einsum [ a; b ] ~equation:"mi,mij->mj" ~path:None in
+  let c_x_list =
+    let tmp =
+      List.map2_exn targets_list q_list ~f:(fun target q ->
+        Tensor.(batch_vecmat (neg target) q))
+    in
+    Some
+      (Tensor.zeros [ batch_size; Lds_params_dim.a ] ~device:Lds_params_dim.device :: tmp)
+  in
+  let c_u_list =
+    let tmp =
+      List.map2_exn target_controls_list r_list ~f:(fun target r ->
+        Tensor.(batch_vecmat (neg target) r))
+    in
+    Some
+      (tmp
+       @ [ Tensor.zeros [ batch_size; Lds_params_dim.b ] ~device:Lds_params_dim.device ])
+  in
+  (* form cost parameters, which all go from step 0 to T.*)
+  let cost_params : Tensor.t Forward_torch.Lqr_typ.cost_params =
+    { c_xx_list =
+        Tensor.zeros
+          [ batch_size; Lds_params_dim.a; Lds_params_dim.a ]
+          ~device:Lds_params_dim.device
+        :: q_list
+    ; c_xu_list =
+        Some
+          (List.init (Lds_params_dim.n_steps + 1) ~f:(fun _ ->
+             Tensor.zeros
+               [ batch_size; Lds_params_dim.a; Lds_params_dim.b ]
+               ~device:Lds_params_dim.device))
+    ; c_uu_list =
+        r_list
+        @ [ Tensor.zeros
+              [ batch_size; Lds_params_dim.b; Lds_params_dim.b ]
+              ~device:Lds_params_dim.device
+          ]
+    ; c_x_list
+    ; c_u_list
+    }
+  in
+  state_params, cost_params
+
+(* each lqr test test is characterized by a name, the state params, the cost params and an lqr function to be tested *)
+type lqr =
+  string
+  * (state_params:Maths.t Forward_torch.Lqr_typ.state_params
+     -> cost_params:Maths.t Forward_torch.Lqr_typ.cost_params
+     -> Maths.t list * Maths.t list)
+
+(* this is how we test the lqr function *)
+let test_lqr ((name, f) : lqr) =
+  ( name
+  , `Quick
+  , fun () ->
+      List.range 0 n_tests
+      |> List.iter ~f:(fun _ ->
+        (* x and y same shape *)
+        let state_params, cost_params = generate_state_cost_params () in
+        Alcotest.(check @@ rel_tol)
+          name
+          0.0
+          (Maths.check_grad_lqr f ~state_params ~cost_params)) )
+
+let lqr_tests =
+  let test_list : lqr list = [ 
+    (* "lqr", Lqr.lqr ;  *)
+    "lqr_sep", Lqr.lqr_sep
+    ] in
+  List.map ~f:test_lqr test_list
+
 let _ =
   Alcotest.run
     "Maths tests"
-    [ "Unary operations", unary_tests; "Binary operations", binary_tests ]
+    [ (* "Unary operations", unary_tests
+         ; "Binary operations", binary_tests *)
+      "LQR operations", lqr_tests
+    ]

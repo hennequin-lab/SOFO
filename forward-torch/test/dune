@@ -1,6 +1,6 @@
 (tests
  (names test_maths)
- (libraries forward-torch alcotest)
+ (libraries forward-torch alcotest sofo owl)
  (preprocess
   (pps ppx_sexp_message)))
 
