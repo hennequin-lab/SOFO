@@ -112,7 +112,6 @@ let sample_data bs =
 let batch_lds_params, x0, targets_list, target_controls_list, f_ts_list =
   sample_data batch_size
 
-
 (* -----------------------------------------
    -- Maths operations (with tangent)  ------
    ----------------------------------------- *)
@@ -120,7 +119,7 @@ let batch_lds_params, x0, targets_list, target_controls_list, f_ts_list =
 let batch_vecmat a b = Maths.(einsum [ a, "mi"; b, "mij" ] "mj")
 
 (* form state params/cost_params/xu_desired *)
-let state_params : Forward_torch.Lqr_type.state_params =
+let state_params : Maths.t Lqr_type.state_params =
   { n_steps = List.length targets_list
   ; x_0 = x0
   ; f_x_list = List.map batch_lds_params ~f:fst
@@ -154,7 +153,7 @@ let c_u_list =
        ])
 
 (* form cost parameters, which all go from step 0 to T.*)
-let cost_params : Forward_torch.Lqr_type.cost_params =
+let cost_params : Maths.t Lqr_type.cost_params =
   { c_xx_list =
       Maths.const
         (Tensor.zeros

@@ -27,7 +27,7 @@ let batch_matmul_tensor a b = Tensor.einsum ~equation:"mij,mjk->mik" [ a; b ] ~p
 (* let batch_matmul_trans a b = Maths.(einsum [ a, "mij"; b, "mkj" ] "mik") *)
 
 (* let batch_matmul_trans_tensor a b =
-  Tensor.einsum ~equation:"mij,mkj->mik" [ a; b ] ~path:None *)
+   Tensor.einsum ~equation:"mij,mkj->mik" [ a; b ] ~path:None *)
 
 (* A^T B *)
 let batch_trans_matmul a b = Maths.(einsum [ a, "mij"; b, "mik" ] "mjk")
@@ -62,7 +62,7 @@ let batch_tanvec_mat_trans_tensor a b =
   Tensor.einsum ~equation:"kmi,mji->kmj" [ a; b ] ~path:None
 
 (* linear quadratic regulator; everything here is a Maths.t object *)
-let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
+let lqr ~state_params ~cost_params =
   let n_steps = state_params.n_steps in
   let x_0 = state_params.x_0 in
   let f_x_list = state_params.f_x_list in
@@ -179,7 +179,7 @@ let lqr ~(state_params : state_params) ~(cost_params : cost_params) =
   x_list, u_list
 
 (* linear quadratic regulator; everything here is a Tensor object *)
-let lqr_tensor ~(state_params : state_params_tensor) ~(cost_params : cost_params_tensor) =
+let lqr_tensor ~state_params ~cost_params =
   let n_steps = state_params.n_steps in
   let x_0 = state_params.x_0 in
   let f_x_list = state_params.f_x_list in
@@ -359,7 +359,7 @@ let lqr_tensor ~(state_params : state_params_tensor) ~(cost_params : cost_params
   x_list, u_list
 
 (* separate primal and tangents and perform a total of (K+1) lqrs *)
-let lqr_sep ~(state_params : state_params) ~(cost_params : cost_params) =
+let lqr_sep ~state_params ~cost_params =
   let n_steps = state_params.n_steps in
   let x_0 = state_params.x_0 in
   let f_x_list = state_params.f_x_list in
