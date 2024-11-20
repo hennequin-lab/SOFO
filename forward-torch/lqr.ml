@@ -61,18 +61,6 @@ let batch_tanvec_mat_tensor a b =
 let batch_tanvec_mat_trans_tensor a b =
   Tensor.einsum ~equation:"kmi,mji->kmj" [ a; b ] ~path:None
 
-let extract_params state_params cost_params =
-  ( state_params.n_steps
-  , state_params.x_0
-  , state_params.f_x_list
-  , state_params.f_u_list
-  , state_params.f_t_list
-  , cost_params.c_xx_list
-  , cost_params.c_xu_list
-  , cost_params.c_uu_list
-  , cost_params.c_x_list
-  , cost_params.c_u_list )
-
 let extract_dims f_u_eg =
   (* batch size *)
   let m = List.hd_exn (Tensor.shape f_u_eg) in
@@ -85,19 +73,8 @@ let extract_dims f_u_eg =
 
 (* linear quadratic regulator; everything here is a Maths.t object *)
 let lqr ~state_params ~cost_params =
-  let ( n_steps
-      , x_0
-      , f_x_list
-      , f_u_list
-      , f_t_list
-      , c_xx_list
-      , c_xu_list
-      , c_uu_list
-      , c_x_list
-      , c_u_list )
-    =
-    extract_params state_params cost_params
-  in
+  let { n_steps; x_0; f_x_list; f_u_list; f_t_list } = state_params in
+  let { c_xx_list; c_xu_list; c_uu_list; c_x_list; c_u_list } = cost_params in
   let f_u_eg = Maths.primal (List.hd_exn f_u_list) in
   let m, a_dim, b_dim, device = extract_dims f_u_eg in
   (* step 1: backward pass to calculate K_t and k_t *)
@@ -199,19 +176,8 @@ let lqr ~state_params ~cost_params =
 
 (* linear quadratic regulator; everything here is a Tensor object *)
 let lqr_tensor ~state_params ~cost_params =
-  let ( n_steps
-      , x_0
-      , f_x_list
-      , f_u_list
-      , f_t_list
-      , c_xx_list
-      , c_xu_list
-      , c_uu_list
-      , c_x_list
-      , c_u_list )
-    =
-    extract_params state_params cost_params
-  in
+  let { n_steps; x_0; f_x_list; f_u_list; f_t_list } = state_params in
+  let { c_xx_list; c_xu_list; c_uu_list; c_x_list; c_u_list } = cost_params in
   let f_u_eg = List.hd_exn f_u_list in
   let m, a_dim, b_dim, device = extract_dims f_u_eg in
   (* if use lqr to solve a batch of k tangents of m problems, f_t has size [k x m x a]. if only solving primals f_t has size [m x a] *)
@@ -376,19 +342,8 @@ let lqr_tensor ~state_params ~cost_params =
 
 (* separate primal and tangents and perform a total of (K+1) lqrs *)
 let lqr_sep ~state_params ~cost_params =
-  let ( n_steps
-      , x_0
-      , f_x_list
-      , f_u_list
-      , f_t_list
-      , c_xx_list
-      , c_xu_list
-      , c_uu_list
-      , c_x_list
-      , c_u_list )
-    =
-    extract_params state_params cost_params
-  in
+  let { n_steps; x_0; f_x_list; f_u_list; f_t_list } = state_params in
+  let { c_xx_list; c_xu_list; c_uu_list; c_x_list; c_u_list } = cost_params in
   let f_u_eg = Maths.primal (List.hd_exn f_u_list) in
   let m, a_dim, b_dim, device = extract_dims f_u_eg in
   (* step 1: lqr on the primal *)
