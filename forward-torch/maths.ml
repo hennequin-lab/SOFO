@@ -152,8 +152,6 @@ let tanh (x, dx) =
 
 (* invert a square matrix; y = x^-1, dy = - x^-1 dx x^-1 *)
 let inv_sqr (x, dx) =
-  assert (List.length (Tensor.shape x) = 2);
-  assert (List.hd_exn (Tensor.shape x) = List.nth_exn (Tensor.shape x) 1);
   let x_size = List.last_exn (Tensor.shape x) in
   let x_device = Tensor.device x in
   let x_kind = Tensor.type_ x in
@@ -642,8 +640,6 @@ let cal_cond a =
 
 (* solve for ax=b (if left true) abd xa = b (if left false). Note that if left is false, then b must be 3D (i.e. m x p x n) whereas if left is true, b can be 2D (i.e. m x n) *)
 let linsolve (a, da) (b, db) ~left =
-  let cond = cal_cond a in
-  let _ = print [%message (cond : float)] in
   let z = Tensor.linalg_solve ~a ~b ~left in
   let a_shape = Tensor.shape a in
   let b_shape = Tensor.shape b in
@@ -724,8 +720,6 @@ let linsolve (a, da) (b, db) ~left =
 
 (* solve for ax=b (if left true) or xa = b (if left false). Note that b must be 3D (i.e. m x p x n) and a needs to be triangular. *)
 let linsolve_triangular (a, da) (b, db) ~left ~upper =
-  let cond = cal_cond a in
-  let _ = print [%message (cond : float)] in
   let unitriangular = false in
   let z = Tensor.linalg_solve_triangular a ~b ~upper ~left ~unitriangular in
   let a_shape = Tensor.shape a in
@@ -742,7 +736,7 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
           then (
             let da_z =
               match List.length b_shape with
-              | 3 -> Tensor.einsum ~equation:"ijkm,jmp->ijkp" [ da; z ] ~path:None
+              | 3 -> Tensor.einsum ~equation:"kmij,mjp->kmip" [ da; z ] ~path:None
               | _ -> assert false
             in
             let dx =
@@ -757,7 +751,7 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
           else (
             let z_da =
               match List.length b_shape with
-              | 3 -> Tensor.einsum ~equation:"jpk,ijkm->ijpm" [ z; da ] ~path:None
+              | 3 -> Tensor.einsum ~equation:"mpi,kmij->kmpj" [ z; da ] ~path:None
               | _ -> assert false
             in
             let dx =
@@ -789,7 +783,7 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
             in
             let da_z =
               match List.length b_shape with
-              | 3 -> Tensor.einsum ~equation:"ijkm,jmp->ijkp" [ da; z ] ~path:None
+              | 3 -> Tensor.einsum ~equation:"kmij,mjp->kmip" [ da; z ] ~path:None
               | _ -> assert false
             in
             let dx =
@@ -807,7 +801,7 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
             in
             let z_da =
               match List.length b_shape with
-              | 3 -> Tensor.einsum ~equation:"jpk,ijkm->ijpm" [ z; da ] ~path:None
+              | 3 -> Tensor.einsum ~equation:"mpi,kmij->kmpj" [ z; da ] ~path:None
               | _ -> assert false
             in
             let dx =
@@ -1024,7 +1018,11 @@ let check_grad2 f x y =
     and zminusminus = f (const Tensor.(x - vx)) (const Tensor.(y - vy)) |> primal in
     Tensor.(div_scalar (zplusplus - zminusminus) Scalar.(f Float.(2. * epsilon)))
   in
-  Tensor.(norm (dz_pred - dz_finite) / norm dz_finite) |> Tensor.to_float0_exn
+  let final =
+    Tensor.(norm (dz_pred - dz_finite) / norm dz_finite) |> Tensor.to_float0_exn
+  in
+  let _ = print [%message (final : float)] in
+  final
 
 let check_grad_lqr f ~state_params ~cost_params =
   (* wrap f around a rng seed setter so that stochasticity is the same *)
@@ -1050,15 +1048,15 @@ let check_grad_lqr f ~state_params ~cost_params =
     Tensor.randn ~kind:(Tensor.type_ x) sx
   in
   (* only add tangents on f_x and c_xx *)
-  let vx_list = List.map state_params.f_x_list ~f:rand_like in
+  let vf_x_list = List.map state_params.f_x_list ~f:rand_like in
   let f_x_list_tan =
-    List.map2_exn state_params.f_x_list vx_list ~f:(fun f_x vx ->
+    List.map2_exn state_params.f_x_list vf_x_list ~f:(fun f_x vx ->
       make_dual f_x ~t:(Direct (Tensor.view_copy vx ~size:(1 :: Tensor.shape f_x))))
   in
   let vc_xx_list = List.map cost_params.c_xx_list ~f:rand_like in
   let c_xx_list_tan =
-    List.map2_exn cost_params.c_xx_list vc_xx_list ~f:(fun c_xx vc_xx ->
-      make_dual c_xx ~t:(Direct (Tensor.view_copy vc_xx ~size:(1 :: Tensor.shape c_xx))))
+    List.map2_exn cost_params.c_xx_list vc_xx_list ~f:(fun c_xx vx ->
+      make_dual c_xx ~t:(Direct (Tensor.view_copy vx ~size:(1 :: Tensor.shape c_xx))))
   in
   (* directional derivative as automatically computed by our maths module *)
   let dz_pred =
@@ -1076,7 +1074,7 @@ let check_grad_lqr f ~state_params ~cost_params =
   (* compare with finite-differences *)
   let dz_fd =
     let f_x_total_list =
-      List.map2_exn state_params.f_x_list vx_list ~f:(fun f_x vx ->
+      List.map2_exn state_params.f_x_list vf_x_list ~f:(fun f_x vx ->
         ( const Tensor.(f_x + mul_scalar vx Scalar.(f epsilon))
         , const Tensor.(f_x - mul_scalar vx Scalar.(f epsilon)) ))
     in
@@ -1126,11 +1124,12 @@ let check_grad_lqr f ~state_params ~cost_params =
   let final =
     List.map2_exn dz_pred dz_fd ~f:(fun pred fd ->
       let e = Tensor.(norm (pred - fd) / norm fd) in
-      (* let _ = print [%message (Tensor.to_float0_exn e : float)] in *)
+      let _ = print [%message (Tensor.to_float0_exn e : float)] in
       e)
     |> List.fold ~init:Tensor.(f 0.) ~f:Tensor.( + )
     |> Tensor.to_float0_exn
   in
-  (* TODO: print relative error *)
-  (* let _ = print [%message (Float.(final / of_int n_steps) : float)] in *)
+  let _ = print [%message (Float.(final / of_int n_steps) : float)] in
   Float.(final / of_int n_steps)
+(* TODO: print relative error *)
+(* let _ = print [%message (Float.(final / of_int n_steps) : float)] in *)

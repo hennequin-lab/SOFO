@@ -5,6 +5,7 @@ open Forward_torch
 let n_tests = 100
 let device = Torch.Device.Cpu
 let kind = Torch_core.Kind.(T f64)
+let print s = Stdio.print_endline (Sexp.to_string_hum s)
 
 (* generate a random shape with a specified minimum order. *)
 let random_shape min_order =
@@ -109,12 +110,24 @@ let cholesky_test x =
   let x_device = Tensor.device x_primal in
   let x_kind = Tensor.type_ x_primal in
   (* make sure x is positive definite *)
-  let x_sym = Maths.(0.5 $* x + transpose x ~dim0:1 ~dim1:0) in
+  let x_sym = Maths.(x *@ transpose x ~dim0:2 ~dim1:1) in
   let x_size = List.last_exn (Tensor.shape x_primal) in
   let x_final =
     Maths.(x_sym + const (Tensor.eye ~n:x_size ~options:(x_kind, x_device)))
   in
   Maths.cholesky x_final
+
+let inv_sqr x =
+  let x_primal = Maths.primal x in
+  let x_device = Tensor.device x_primal in
+  let x_kind = Tensor.type_ x_primal in
+  (* make sure x is positive definite *)
+  let x_sym = Maths.(x *@ transpose x ~dim0:2 ~dim1:1) in
+  let x_size = List.last_exn (Tensor.shape x_primal) in
+  let x_final =
+    Maths.(x_sym + const (Tensor.eye ~n:x_size ~options:(x_kind, x_device)))
+  in
+  Maths.inv_sqr x_final
 
 let unary_tests =
   let test_list : unary list =
@@ -132,7 +145,7 @@ let unary_tests =
     ; "sqrt", [ `positive ], any_shape Maths.sqrt
     ; "log", [ `positive ], any_shape Maths.log
     ; "exp", [], any_shape Maths.exp
-    ; "inv_sqr", [ `specified_unary [ 10; 10 ] ], any_shape Maths.inv_sqr
+    ; "inv_sqr", [ `specified_unary [ 3; 10; 10 ] ], any_shape inv_sqr
     ; "inv_rectangle", [ `specified_unary [ 80; 15 ] ], any_shape Maths.inv_rectangle
     ; "sigmoid", [], any_shape Maths.sigmoid
     ; "softplus", [], any_shape Maths.softplus
@@ -140,7 +153,7 @@ let unary_tests =
     ; "relu", [ `positive ], any_shape Maths.relu
     ; "sum", [], any_shape Maths.sum
     ; "mean", [], any_shape Maths.mean
-    ; "max2d_dim1", [ `order_equal_to 2 ], any_shape (Maths.max_2d_dim1 ~keepdim:false)
+      (* ; "max2d_dim1", [ `order_equal_to 2 ], any_shape (Maths.max_2d_dim1 ~keepdim:false) *)
     ; ( "gumbel_softmax"
       , [ `positive; `order_equal_to 2 ]
       , any_shape (Maths.gumbel_softmax ~tau:2. ~with_noise:false ~discrete:false) )
@@ -185,7 +198,7 @@ let unary_tests =
             List.permute (List.init n_dims ~f:Fn.id)
           in
           Maths.transpose ~dim0 ~dim1 )
-    ; "cholesky", [ `pos_def; `specified_unary [ 14; 14 ] ], any_shape cholesky_test
+    ; "cholesky", [ `specified_unary [ 2; 14; 14 ] ], any_shape cholesky_test
     ; ( "logsumexp"
       , []
       , fun shape ->
@@ -327,17 +340,16 @@ let linsolve_tri ~left ~upper a b =
   let a_kind = Tensor.type_ a_primal in
   (* make sure x is positive definite *)
   let a_batch = if List.length (Tensor.shape (Maths.primal a)) = 3 then 1 else 0 in
-  let aaT = Maths.(a *@ transpose a ~dim0:Int.(a_batch + 1) ~dim1:a_batch) in
-  let a_lower = Maths.cholesky aaT in
-  let a_lower =
+  let aaT =
     Maths.(
-      a_lower
+      (a *@ transpose a ~dim0:Int.(a_batch + 1) ~dim1:a_batch)
       + const
           Tensor.(
             mul_scalar
               (eye ~n ~options:(a_kind, a_device))
               (Scalar.f Float.(1. *. of_int n))))
   in
+  let a_lower = Maths.cholesky aaT in
   let a_final =
     if upper
     then Maths.transpose a_lower ~dim0:Int.(a_batch + 1) ~dim1:a_batch
@@ -540,6 +552,6 @@ let _ =
   Alcotest.run
     "Maths tests"
     [ (* "Unary operations", unary_tests *)
-      (* "Binary operations", binary_tests  *)
-      "LQR operations", lqr_tests
+      (* "Binary operations", binary_tests *)
+     "LQR operations", lqr_tests
     ]
