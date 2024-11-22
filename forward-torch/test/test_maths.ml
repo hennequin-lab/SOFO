@@ -226,9 +226,9 @@ let random_mult_matrix_shapes () =
    2. if left is false, the shape of A of shape [m x n x n] and B of shape [m x p x n] or B of shape [m x n]. *)
 
 let random_linsolve_matrix_shapes ~left =
-  let m = 1 + Random.int 3 in
-  let n = 2 + Random.int 3 in
-  let p = 1 + Random.int 3 in
+  let m = 3 + Random.int 50 in
+  let n = 3 + Random.int 50 in
+  let p = n - 1 in
   if left then [ m; n; n ], [ m; n; p ] else [ m; n; n ], [ m; p; n ]
 
 (* this is how we test a binary function *)
@@ -303,9 +303,26 @@ let matmul_with_einsum a b = Maths.einsum [ a, "ij"; b, "jk" ] "ik"
 let matmul_with_einsum2 a b =
   Maths.einsum [ a, "ij"; Maths.transpose ~dim0:0 ~dim1:1 b, "kj" ] "ik"
 
+let linsolve ~left a b =
+  let a_primal = Maths.primal a in
+  let a_device = Tensor.device a_primal in
+  let a_kind = Tensor.type_ a_primal in
+  let n = List.last_exn (Tensor.shape a_primal) in
+  (* improve condition number of a *)
+  let a =
+    Maths.(
+      a
+      + const
+          Tensor.(
+            mul_scalar
+              (eye ~n ~options:(a_kind, a_device))
+              (Scalar.f Float.(1. *. of_int n))))
+  in
+  Maths.linsolve ~left a b
+
 let linsolve_tri ~left ~upper a b =
   let a_primal = Maths.primal a in
-  let a_size = List.last_exn (Tensor.shape a_primal) in
+  let n = List.last_exn (Tensor.shape a_primal) in
   let a_device = Tensor.device a_primal in
   let a_kind = Tensor.type_ a_primal in
   (* make sure x is positive definite *)
@@ -313,7 +330,13 @@ let linsolve_tri ~left ~upper a b =
   let aaT = Maths.(a *@ transpose a ~dim0:Int.(a_batch + 1) ~dim1:a_batch) in
   let a_lower = Maths.cholesky aaT in
   let a_lower =
-    Maths.(a_lower + const (Tensor.eye ~n:a_size ~options:(a_kind, a_device)))
+    Maths.(
+      a_lower
+      + const
+          Tensor.(
+            mul_scalar
+              (eye ~n ~options:(a_kind, a_device))
+              (Scalar.f Float.(1. *. of_int n))))
   in
   let a_final =
     if upper
@@ -331,16 +354,20 @@ let binary_tests =
     ; "matmul", [ `matmul ], any_shape Maths.( *@ )
     ; "matmul_with_einsum", [ `matmul ], any_shape matmul_with_einsum
     ; "matmul_with_einsum2", [ `matmul ], any_shape matmul_with_einsum2
-    ; "linsolve_left_true", [ `linsolve_left_true ], any_shape (Maths.linsolve ~left:true)
-    ; ( "linsolve_left_false"
-      , [ `linsolve_left_false ]
-      , any_shape (Maths.linsolve ~left:false) )
-    ; ( "linsolve_tri_left_true"
+    ; "linsolve_left_true", [ `linsolve_left_true ], any_shape (linsolve ~left:true)
+    ; "linsolve_left_false", [ `linsolve_left_false ], any_shape (linsolve ~left:false)
+    ; ( "linsolve_tri_left_true_upper_true"
+      , [ `linsolve_left_true ]
+      , any_shape (linsolve_tri ~left:true ~upper:true) )
+    ; ( "linsolve_tri_left_true_upper_false"
       , [ `linsolve_left_true ]
       , any_shape (linsolve_tri ~left:true ~upper:false) )
-    ; ( "linsolve_tri_left_false"
+    ; ( "linsolve_tri_left_false_upper_true"
       , [ `linsolve_left_false ]
       , any_shape (linsolve_tri ~left:false ~upper:true) )
+    ; ( "linsolve_tri_left_false_upper_false"
+      , [ `linsolve_left_false ]
+      , any_shape (linsolve_tri ~left:false ~upper:false) )
     ; ( "concat"
       , []
       , fun shape ->
@@ -387,14 +414,15 @@ let device_ = Torch.Device.Cpu
 let create_sym_pos n =
   let q_1 = Tensor.randn [ n; n ] ~device:device_ in
   let qqT = Tensor.(matmul q_1 (transpose q_1 ~dim0:1 ~dim1:0)) in
-  Tensor.(qqT + eye ~n ~options:(base.kind, device_))
+  Tensor.(qqT + mul_scalar (eye ~n ~options:(base.kind, device_)) (Scalar.f 10.))
+(* Tensor.eye ~n ~options:(base.kind, device_) *)
 
 let generate_state_cost_params () =
   (* define control problem dimension *)
   let module Lds_params_dim = struct
-    let a = 4
-    let b = 3
-    let n_steps = 5
+    let a = 100
+    let b = 50
+    let n_steps = 100
     let kind = base.kind
     let device = device_
   end
@@ -505,16 +533,13 @@ let test_lqr ((name, f) : lqr) =
           (Maths.check_grad_lqr f ~state_params ~cost_params)) )
 
 let lqr_tests =
-  let test_list : lqr list = [ 
-    (* "lqr", Lqr.lqr ;  *)
-    "lqr_sep", Lqr.lqr_sep
-    ] in
+  let test_list : lqr list = [ "lqr", Lqr.lqr (* "lqr_sep", Lqr.lqr_sep *) ] in
   List.map ~f:test_lqr test_list
 
 let _ =
   Alcotest.run
     "Maths tests"
-    [ (* "Unary operations", unary_tests
-         ; "Binary operations", binary_tests *)
+    [ (* "Unary operations", unary_tests *)
+      (* "Binary operations", binary_tests  *)
       "LQR operations", lqr_tests
     ]

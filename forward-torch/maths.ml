@@ -8,7 +8,7 @@ include Lqr_typ
    the associated tangents have one more dimension, corresponding to tangent batch: [K; n1; n2; ... ]
 *)
 
-(* let print s = Stdio.print_endline (Sexp.to_string_hum s) *)
+let print s = Stdio.print_endline (Sexp.to_string_hum s)
 let shape (x, _) = Tensor.shape x
 
 (* int list starting from 1 and ending at the last dim of a *)
@@ -255,8 +255,6 @@ let mean_dim (x, dx) ~dim ~keepdim =
       Tensor.(mean_dim ~dim:(Some dim) ~keepdim ~dtype:(type_ dx) dx))
   in
   (y, dy) |> assert_right_shape "mean_dim"
-
-(* let print s = Stdio.printf "%s\n%!" (Base.Sexp.to_string_hum s) *)
 
 let max_2d_dim1 (x, dx) ~keepdim =
   let y, y_indices = Tensor.(max_dim x ~dim:1 ~keepdim) in
@@ -636,8 +634,16 @@ let einsum (operands : (t * string) list) return =
   in
   primal, Option.map tangent ~f:(fun x -> Direct x)
 
+let cal_cond a =
+  let _, svals, _ = Tensor.svd ~some:true ~compute_uv:true a in
+  let upper = Tensor.maximum svals |> Tensor.to_float0_exn in
+  let lower = Tensor.minimum svals |> Tensor.to_float0_exn in
+  upper /. lower
+
 (* solve for ax=b (if left true) abd xa = b (if left false). Note that if left is false, then b must be 3D (i.e. m x p x n) whereas if left is true, b can be 2D (i.e. m x n) *)
 let linsolve (a, da) (b, db) ~left =
+  let cond = cal_cond a in
+  let _ = print [%message (cond : float)] in
   let z = Tensor.linalg_solve ~a ~b ~left in
   let a_shape = Tensor.shape a in
   let b_shape = Tensor.shape b in
@@ -718,6 +724,8 @@ let linsolve (a, da) (b, db) ~left =
 
 (* solve for ax=b (if left true) or xa = b (if left false). Note that b must be 3D (i.e. m x p x n) and a needs to be triangular. *)
 let linsolve_triangular (a, da) (b, db) ~left ~upper =
+  let cond = cal_cond a in
+  let _ = print [%message (cond : float)] in
   let unitriangular = false in
   let z = Tensor.linalg_solve_triangular a ~b ~upper ~left ~unitriangular in
   let a_shape = Tensor.shape a in
@@ -955,7 +963,7 @@ let concat (x, dx) (y, dy) ~dim =
   in
   (z, dz) |> assert_right_shape "concat"
 
-let epsilon = 1e-5
+let epsilon = 1e-4
 
 let check_grad1 f x =
   (* wrap f around a rng seed setter so that stochasticity is the same *)
@@ -1025,48 +1033,34 @@ let check_grad_lqr f ~state_params ~cost_params =
     Torch_core.Wrapper.manual_seed key;
     f ~state_params:x ~cost_params:y
   in
-  (* extract params from the original params sets*)
+  (* extract params from the original params sets *)
   let n_steps = state_params.n_steps in
   let x_0 = state_params.x_0 in
-  let f_u_list = state_params.f_u_list |> List.map ~f:const in
-  let f_t_list = state_params.f_t_list |> Option.map ~f:(List.map ~f:const) in
-  let c_xu_list = cost_params.c_xu_list |> Option.map ~f:(List.map ~f:const) in
-  let c_uu_list = cost_params.c_uu_list |> List.map ~f:const in
-  let c_x_list = cost_params.c_x_list |> Option.map ~f:(List.map ~f:const) in
-  let c_u_list = cost_params.c_u_list |> Option.map ~f:(List.map ~f:const) in
-  (* only add tangents on f_x and c_xx *)
+  let map_const = List.map ~f:const in
+  let map_opt_const = Option.map ~f:(List.map ~f:const) in
+  let f_u_list = map_const state_params.f_u_list in
+  let f_t_list = map_opt_const state_params.f_t_list in
+  let c_xu_list = map_opt_const cost_params.c_xu_list in
+  let c_uu_list = map_const cost_params.c_uu_list in
+  let c_x_list = map_opt_const cost_params.c_x_list in
+  let c_u_list = map_opt_const cost_params.c_u_list in
   (* draw a random direction along which to evaluate derivatives *)
-  (* let v_x0 =
-     let sx = Tensor.shape state_params.x_0 in
-     Tensor.rand ~kind:(Tensor.type_ state_params.x_0) sx
-     in
-     let x_0_tan =
-     make_dual
-     state_params.x_0
-     ~t:(Direct (Tensor.view_copy v_x0 ~size:(1 :: Tensor.shape state_params.x_0)))
-     in *)
-  let vx_list =
-    List.map state_params.f_x_list ~f:(fun f_x ->
-      let sx = Tensor.shape f_x in
-      Tensor.randn ~kind:(Tensor.type_ f_x) sx)
+  let rand_like x =
+    let sx = Tensor.shape x in
+    Tensor.randn ~kind:(Tensor.type_ x) sx
   in
+  (* only add tangents on f_x and c_xx *)
+  let vx_list = List.map state_params.f_x_list ~f:rand_like in
   let f_x_list_tan =
     List.map2_exn state_params.f_x_list vx_list ~f:(fun f_x vx ->
-      (* draw a random direction along which to evaluate derivatives *)
-      let sx = Tensor.shape f_x in
-      make_dual f_x ~t:(Direct (Tensor.view_copy vx ~size:(1 :: sx))))
+      make_dual f_x ~t:(Direct (Tensor.view_copy vx ~size:(1 :: Tensor.shape f_x))))
   in
-  let vc_xx_list =
-    List.map cost_params.c_xx_list ~f:(fun c_xx ->
-      let sx = Tensor.shape c_xx in
-      Tensor.randn ~kind:(Tensor.type_ c_xx) sx)
-  in
+  let vc_xx_list = List.map cost_params.c_xx_list ~f:rand_like in
   let c_xx_list_tan =
     List.map2_exn cost_params.c_xx_list vc_xx_list ~f:(fun c_xx vc_xx ->
-      let sy = Tensor.shape c_xx in
-      make_dual c_xx ~t:(Direct (Tensor.view_copy vc_xx ~size:(1 :: sy))))
+      make_dual c_xx ~t:(Direct (Tensor.view_copy vc_xx ~size:(1 :: Tensor.shape c_xx))))
   in
-  (* compute directional derivative as automatically computed by our maths module *)
+  (* directional derivative as automatically computed by our maths module *)
   let dz_pred =
     let state_params_tan =
       { n_steps; x_0 = const x_0; f_x_list = f_x_list_tan; f_u_list; f_t_list }
@@ -1081,29 +1075,23 @@ let check_grad_lqr f ~state_params ~cost_params =
   in
   (* compare with finite-differences *)
   let dz_fd =
-    (* let x_0_plus, x_0_minus =
-      ( make_dual
-          Tensor.(state_params.x_0)
-          ~t:(Direct (Tensor.zeros (1 :: Tensor.shape state_params.x_0)))
-      , make_dual
-          Tensor.(state_params.x_0)
-          ~t:(Direct (Tensor.zeros (1 :: Tensor.shape state_params.x_0))) )
-    in *)
-
     let f_x_total_list =
       List.map2_exn state_params.f_x_list vx_list ~f:(fun f_x vx ->
         ( const Tensor.(f_x + mul_scalar vx Scalar.(f epsilon))
         , const Tensor.(f_x - mul_scalar vx Scalar.(f epsilon)) ))
     in
-    let f_x_plus_list = List.map f_x_total_list ~f:fst in
-    let f_x_minus_list = List.map f_x_total_list ~f:snd in
+    let f_x_plus_list, f_x_minus_list =
+      List.map f_x_total_list ~f:fst, List.map f_x_total_list ~f:snd
+    in
     let c_xx_total_list =
       List.map2_exn cost_params.c_xx_list vc_xx_list ~f:(fun c_xx vy ->
         ( const Tensor.(c_xx + mul_scalar vy Scalar.(f epsilon))
         , const Tensor.(c_xx - mul_scalar vy Scalar.(f epsilon)) ))
     in
-    let c_xx_plus_list = List.map c_xx_total_list ~f:fst in
-    let c_xx_minus_list = List.map c_xx_total_list ~f:snd in
+    let c_xx_plus_list, c_xx_minus_list =
+      List.map c_xx_total_list ~f:fst, List.map c_xx_total_list ~f:snd
+    in
+    (* forward run with x plus *)
     let state_params_tan_plus =
       { n_steps; x_0 = const x_0; f_x_list = f_x_plus_list; f_u_list; f_t_list }
     in
@@ -1116,6 +1104,7 @@ let check_grad_lqr f ~state_params ~cost_params =
       in
       List.map x_list ~f:primal
     in
+    (* forward run with x minus *)
     let state_params_tan_minus =
       { n_steps; x_0 = const x_0; f_x_list = f_x_minus_list; f_u_list; f_t_list }
     in
@@ -1128,9 +1117,20 @@ let check_grad_lqr f ~state_params ~cost_params =
       in
       List.map x_list ~f:primal
     in
-    List.map2_exn (List.tl_exn zplusplus_list) (List.tl_exn zminusminus_list) ~f:(fun zplusplus zminusminus ->
-      Tensor.(div_scalar (zplusplus - zminusminus) Scalar.(f Float.(2. * epsilon))))
+    List.map2_exn
+      (List.tl_exn zplusplus_list)
+      (List.tl_exn zminusminus_list)
+      ~f:(fun zplusplus zminusminus ->
+        Tensor.(div_scalar (zplusplus - zminusminus) Scalar.(f Float.(2. * epsilon))))
   in
-  List.map2_exn dz_pred dz_fd ~f:(fun pred fd -> Tensor.(norm (pred - fd) / norm fd))
-  |> List.fold ~init:Tensor.(f 0.) ~f:Tensor.( + )
-  |> Tensor.to_float0_exn
+  let final =
+    List.map2_exn dz_pred dz_fd ~f:(fun pred fd ->
+      let e = Tensor.(norm (pred - fd) / norm fd) in
+      (* let _ = print [%message (Tensor.to_float0_exn e : float)] in *)
+      e)
+    |> List.fold ~init:Tensor.(f 0.) ~f:Tensor.( + )
+    |> Tensor.to_float0_exn
+  in
+  (* TODO: print relative error *)
+  (* let _ = print [%message (Float.(final / of_int n_steps) : float)] in *)
+  Float.(final / of_int n_steps)
