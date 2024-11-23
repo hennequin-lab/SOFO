@@ -1024,7 +1024,7 @@ let check_grad2 f x y =
   let _ = print [%message (final : float)] in
   final
 
-let check_grad_lqr f ~state_params ~cost_params =
+let check_grad_lqr f ~state_params ~cost_params ~attach_tangents =
   (* wrap f around a rng seed setter so that stochasticity is the same *)
   let key = Random.int Int.max_value in
   let f ~state_params:x ~cost_params:y =
@@ -1035,66 +1035,146 @@ let check_grad_lqr f ~state_params ~cost_params =
   let n_steps = state_params.n_steps in
   let x_0 = state_params.x_0 in
   let map_const = List.map ~f:const in
-  let map_opt_const = Option.map ~f:(List.map ~f:const) in
-  let f_u_list = map_const state_params.f_u_list in
-  let f_t_list = map_opt_const state_params.f_t_list in
-  let c_xu_list = map_opt_const cost_params.c_xu_list in
-  let c_uu_list = map_const cost_params.c_uu_list in
-  let c_x_list = map_opt_const cost_params.c_x_list in
-  let c_u_list = map_opt_const cost_params.c_u_list in
   (* draw a random direction along which to evaluate derivatives *)
   let rand_like x =
     let sx = Tensor.shape x in
     Tensor.randn ~kind:(Tensor.type_ x) sx
   in
-  (* only add tangents on f_x and c_xx *)
-  let vf_x_list = List.map state_params.f_x_list ~f:rand_like in
-  let f_x_list_tan =
-    List.map2_exn state_params.f_x_list vf_x_list ~f:(fun f_x vx ->
-      make_dual f_x ~t:(Direct (Tensor.view_copy vx ~size:(1 :: Tensor.shape f_x))))
+  let { f_x_tan; f_u_tan; f_t_tan; c_xx_tan; c_xu_tan; c_uu_tan; c_x_tan; c_u_tan } =
+    attach_tangents
   in
-  let vc_xx_list = List.map cost_params.c_xx_list ~f:rand_like in
-  let c_xx_list_tan =
-    List.map2_exn cost_params.c_xx_list vc_xx_list ~f:(fun c_xx vx ->
-      make_dual c_xx ~t:(Direct (Tensor.view_copy vx ~size:(1 :: Tensor.shape c_xx))))
+  let add_tangents ~tan lst =
+    (* sample tangents if tan is true *)
+    let tangents = if tan then Some (List.map lst ~f:rand_like) else None in
+    (* add tangents to the original primals *)
+    let lst_tan =
+      match tangents with
+      | None -> map_const lst
+      | Some tan_lst ->
+        List.map2_exn lst tan_lst ~f:(fun f_x vx ->
+          make_dual f_x ~t:(Direct (Tensor.view_copy vx ~size:(1 :: Tensor.shape f_x))))
+    in
+    tangents, lst_tan
   in
-  (* directional derivative as automatically computed by our maths module *)
+  let add_tangents_opt ~tan lst =
+    let tangents_lst_tan = Option.map lst ~f:(fun lst -> add_tangents ~tan lst) in
+    match tangents_lst_tan with
+    | None -> None, None
+    | Some (tangents, lst_tan) -> Some tangents, Some lst_tan
+  in
+  let vf_x_list, f_x_list_tan = add_tangents ~tan:f_x_tan state_params.f_x_list in
+  let vf_u_list, f_u_list_tan = add_tangents ~tan:f_u_tan state_params.f_u_list in
+  let vf_t_list, f_t_list_tan = add_tangents_opt ~tan:f_t_tan state_params.f_t_list in
+  let vc_xx_list, c_xx_list_tan = add_tangents ~tan:c_xx_tan cost_params.c_xx_list in
+  let vc_xu_list, c_xu_list_tan = add_tangents_opt ~tan:c_xu_tan cost_params.c_xu_list in
+  let vc_uu_list, c_uu_list_tan = add_tangents ~tan:c_uu_tan cost_params.c_uu_list in
+  let vc_x_list, c_x_list_tan = add_tangents_opt ~tan:c_x_tan cost_params.c_x_list in
+  let vc_u_list, c_u_list_tan = add_tangents_opt ~tan:c_u_tan cost_params.c_u_list in
+  (* Step 1: directional derivative as automatically computed by our maths module *)
   let dz_pred =
     let state_params_tan =
-      { n_steps; x_0 = const x_0; f_x_list = f_x_list_tan; f_u_list; f_t_list }
+      { n_steps
+      ; x_0 = const x_0
+      ; f_x_list = f_x_list_tan
+      ; f_u_list = f_u_list_tan
+      ; f_t_list = f_t_list_tan
+      }
     in
     let cost_params_tan =
-      { c_xx_list = c_xx_list_tan; c_xu_list; c_uu_list; c_x_list; c_u_list }
+      { c_xx_list = c_xx_list_tan
+      ; c_xu_list = c_xu_list_tan
+      ; c_uu_list = c_uu_list_tan
+      ; c_x_list = c_x_list_tan
+      ; c_u_list = c_u_list_tan
+      }
     in
     let x_list, _ = f ~state_params:state_params_tan ~cost_params:cost_params_tan in
     List.map (List.tl_exn x_list) ~f:(fun x ->
       let s = Tensor.shape (primal x) in
       tangent x |> Option.value_exn |> Tensor.view_copy ~size:s)
   in
-  (* compare with finite-differences *)
+  (* step 2: finite-differences *)
   let dz_fd =
-    let f_x_total_list =
-      List.map2_exn state_params.f_x_list vf_x_list ~f:(fun f_x vx ->
-        ( const Tensor.(f_x + mul_scalar vx Scalar.(f epsilon))
-        , const Tensor.(f_x - mul_scalar vx Scalar.(f epsilon)) ))
+    (* create plus and minus disturbed parameters *)
+    let plus_minus ~tangents lst =
+      match tangents with
+      | None -> map_const lst, map_const lst
+      | Some tangents ->
+        let plus_minus =
+          List.map2_exn lst tangents ~f:(fun f_x vx ->
+            ( const Tensor.(f_x + mul_scalar vx Scalar.(f epsilon))
+            , const Tensor.(f_x - mul_scalar vx Scalar.(f epsilon)) ))
+        in
+        List.map plus_minus ~f:fst, List.map plus_minus ~f:snd
+    in
+    let plus_minus_opt ~tangents lst =
+      match tangents, lst with
+      | None, None -> None, None
+      | Some tangents, Some lst ->
+        let plus, minus = plus_minus ~tangents lst in
+        Some plus, Some minus
+      | _ -> assert false
     in
     let f_x_plus_list, f_x_minus_list =
-      List.map f_x_total_list ~f:fst, List.map f_x_total_list ~f:snd
+      plus_minus ~tangents:vf_x_list state_params.f_x_list
     in
-    let c_xx_total_list =
-      List.map2_exn cost_params.c_xx_list vc_xx_list ~f:(fun c_xx vy ->
-        ( const Tensor.(c_xx + mul_scalar vy Scalar.(f epsilon))
-        , const Tensor.(c_xx - mul_scalar vy Scalar.(f epsilon)) ))
+    let f_u_plus_list, f_u_minus_list =
+      plus_minus ~tangents:vf_u_list state_params.f_u_list
+    in
+    let f_t_plus_list, f_t_minus_list =
+      plus_minus_opt ~tangents:vf_t_list state_params.f_t_list
     in
     let c_xx_plus_list, c_xx_minus_list =
-      List.map c_xx_total_list ~f:fst, List.map c_xx_total_list ~f:snd
+      plus_minus ~tangents:vc_xx_list cost_params.c_xx_list
     in
+    let c_xu_plus_list, c_xu_minus_list =
+      plus_minus_opt ~tangents:vc_xu_list cost_params.c_xu_list
+    in
+    let c_uu_plus_list, c_uu_minus_list =
+      plus_minus ~tangents:vc_uu_list cost_params.c_uu_list
+    in
+    let c_x_plus_list, c_x_minus_list =
+      plus_minus_opt ~tangents:vc_x_list cost_params.c_x_list
+    in
+    let c_u_plus_list, c_u_minus_list =
+      plus_minus_opt ~tangents:vc_u_list cost_params.c_u_list
+    in
+    (* TODO:remove these later *)
+    (* let calc_diff a b =
+      let a_first = List.hd_exn a in
+      let b_first = List.hd_exn b in
+      let diff = a_first - b_first |> primal in
+      Tensor.print diff
+    in
+    let calc_diff_opt a b =
+      match a, b with
+      | None, None -> print [%message "not existing"]
+      | Some a, Some b -> calc_diff a b
+      | _ -> assert false
+    in
+    let _ = calc_diff f_x_plus_list f_x_minus_list in
+    let _ = calc_diff f_u_plus_list f_u_minus_list in
+    let _ = calc_diff c_xx_plus_list c_xx_minus_list in
+    let _ = calc_diff_opt c_xu_plus_list c_xu_minus_list in 
+    let _ = calc_diff c_uu_plus_list c_uu_minus_list in
+    let _ = calc_diff_opt c_x_plus_list c_x_minus_list in  *)
+
     (* forward run with x plus *)
     let state_params_tan_plus =
-      { n_steps; x_0 = const x_0; f_x_list = f_x_plus_list; f_u_list; f_t_list }
+      { n_steps
+      ; x_0 = const x_0
+      ; f_x_list = f_x_plus_list
+      ; f_u_list = f_u_plus_list
+      ; f_t_list = f_t_plus_list
+      }
     in
     let cost_params_tan_plus =
-      { c_xx_list = c_xx_plus_list; c_xu_list; c_uu_list; c_x_list; c_u_list }
+      { c_xx_list = c_xx_plus_list
+      ; c_xu_list = c_xu_plus_list
+      ; c_uu_list = c_uu_plus_list
+      ; c_x_list = c_x_plus_list
+      ; c_u_list = c_u_plus_list
+      }
     in
     let zplusplus_list =
       let x_list, _ =
@@ -1104,10 +1184,20 @@ let check_grad_lqr f ~state_params ~cost_params =
     in
     (* forward run with x minus *)
     let state_params_tan_minus =
-      { n_steps; x_0 = const x_0; f_x_list = f_x_minus_list; f_u_list; f_t_list }
+      { n_steps
+      ; x_0 = const x_0
+      ; f_x_list = f_x_minus_list
+      ; f_u_list = f_u_minus_list
+      ; f_t_list = f_t_minus_list
+      }
     in
     let cost_params_tan_minus =
-      { c_xx_list = c_xx_minus_list; c_xu_list; c_uu_list; c_x_list; c_u_list }
+      { c_xx_list = c_xx_minus_list
+      ; c_xu_list = c_xu_minus_list
+      ; c_uu_list = c_uu_minus_list
+      ; c_x_list = c_x_minus_list
+      ; c_u_list = c_u_minus_list
+      }
     in
     let zminusminus_list =
       let x_list, _ =
@@ -1131,5 +1221,3 @@ let check_grad_lqr f ~state_params ~cost_params =
   in
   let _ = print [%message (Float.(final / of_int n_steps) : float)] in
   Float.(final / of_int n_steps)
-(* TODO: print relative error *)
-(* let _ = print [%message (Float.(final / of_int n_steps) : float)] in *)

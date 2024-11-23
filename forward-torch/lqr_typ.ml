@@ -1,4 +1,3 @@
-
 (* f_x, f_u and f_t goes from 0 to T-1; f_t list is optional. if f_x/f_u/f_t list contains only one entry then it means the system is time-varying. if f_t_list is optional the dynamics does not have a constant term. x_0 is the starting state *)
 type 'a state_params =
   { n_steps : int
@@ -15,4 +14,15 @@ type 'a cost_params =
   ; c_uu_list : 'a list
   ; c_x_list : 'a list option
   ; c_u_list : 'a list option
+  }
+
+type attach_tangents =
+  { f_x_tan : bool
+  ; f_u_tan : bool
+  ; f_t_tan : bool
+  ; c_xx_tan : bool
+  ; c_xu_tan : bool
+  ; c_uu_tan : bool
+  ; c_x_tan : bool
+  ; c_u_tan : bool
   }

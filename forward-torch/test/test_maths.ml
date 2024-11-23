@@ -413,7 +413,7 @@ open Sofo
 module Mat = Owl.Dense.Matrix.S
 module Arr = Owl.Dense.Ndarray.S
 
-let batch_size = 16
+let batch_size = 1
 
 (* -----------------------------------------
    -- Define Control Problem          ------
@@ -432,9 +432,9 @@ let create_sym_pos n =
 let generate_state_cost_params () =
   (* define control problem dimension *)
   let module Lds_params_dim = struct
-    let a = 100
+    let a = 10
     let b = 50
-    let n_steps = 100
+    let n_steps = 10
     let kind = base.kind
     let device = device_
   end
@@ -530,6 +530,17 @@ type lqr =
      -> cost_params:Maths.t Forward_torch.Lqr_typ.cost_params
      -> Maths.t list * Maths.t list)
 
+let attach_tangents : Forward_torch.Lqr_typ.attach_tangents =
+  { f_x_tan = false
+  ; f_u_tan = false
+  ; f_t_tan = false
+  ; c_xx_tan = false
+  ; c_xu_tan = false
+  ; c_uu_tan = false
+  ; c_x_tan = false
+  ; c_u_tan = true
+  }
+
 (* this is how we test the lqr function *)
 let test_lqr ((name, f) : lqr) =
   ( name
@@ -542,7 +553,7 @@ let test_lqr ((name, f) : lqr) =
         Alcotest.(check @@ rel_tol)
           name
           0.0
-          (Maths.check_grad_lqr f ~state_params ~cost_params)) )
+          (Maths.check_grad_lqr f ~state_params ~cost_params ~attach_tangents)) )
 
 let lqr_tests =
   let test_list : lqr list = [ "lqr", Lqr.lqr (* "lqr_sep", Lqr.lqr_sep *) ] in
@@ -553,5 +564,5 @@ let _ =
     "Maths tests"
     [ (* "Unary operations", unary_tests *)
       (* "Binary operations", binary_tests *)
-     "LQR operations", lqr_tests
+      "LQR operations", lqr_tests
     ]

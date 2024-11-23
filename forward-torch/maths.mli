@@ -111,4 +111,5 @@ val check_grad_lqr
       -> (Tensor.t * tangent option) list * 'a)
   -> state_params:Tensor.t state_params
   -> cost_params:Tensor.t cost_params
+  -> attach_tangents:attach_tangents
   -> float
