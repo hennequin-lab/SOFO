@@ -110,13 +110,84 @@ let lqr ~state_params ~cost_params =
         + batch_vecmat v_vec_next f_x_curr
         + batch_vecmat f_t_curr (batch_matmul v_mat_next f_x_curr))
     in
-    let k_mat_curr =
-      Maths.linsolve
-        q_uu_curr
-        (Maths.neg (transpose q_xu_curr ~dim0:2 ~dim1:1))
-        ~left:true
+    (* M1: directly invert q_uu*)
+    (* let k_mat1 q_uu q_xu =
+      let q_uu_inv = Maths.inv_sqr q_uu in
+      Maths.(neg q_uu_inv *@ transpose q_xu ~dim0:2 ~dim1:1)
     in
-    let k_vec_curr = Maths.linsolve q_uu_curr (Maths.neg q_u_curr) ~left:true in
+    let k_vec1 q_uu q_u =
+      let q_uu_inv = Maths.inv_sqr q_uu in
+      Maths.(neg (einsum [ q_uu_inv, "mij"; q_u, "mi" ] "mj"))
+    in
+    (* M2: linsolve *)
+    let k_mat2 q_uu q_xu =
+      Maths.linsolve q_uu (Maths.neg (transpose q_xu ~dim0:2 ~dim1:1)) ~left:true
+    in
+    let k_vec2 q_uu q_u = Maths.linsolve q_uu (Maths.neg q_u) ~left:true in
+    (* M3: linsolve triangular*)
+    let k_mat3 q_uu q_xu =
+      let q_uu_l = Maths.cholesky q_uu in
+      let k_mat =
+        let y =
+          Maths.linsolve_triangular
+            q_uu_l
+            Maths.(neg (transpose q_xu ~dim0:2 ~dim1:1))
+            ~left:true
+            ~upper:false
+        in
+        Maths.linsolve_triangular
+          (Maths.transpose q_uu_l ~dim0:2 ~dim1:1)
+          y
+          ~left:true
+          ~upper:true
+      in
+      k_mat
+    in
+    let k_vec3 q_uu q_u =
+      let q_u_ = Maths.view q_u ~size:(Maths.shape q_u @ [ 1 ]) in
+      let q_uu_l = Maths.cholesky q_uu in
+      let k_vec =
+        let y =
+          Maths.linsolve_triangular q_uu_l Maths.(neg q_u_) ~left:true ~upper:false
+        in
+        Maths.linsolve_triangular
+          (Maths.transpose q_uu_l ~dim0:2 ~dim1:1)
+          y
+          ~left:true
+          ~upper:true
+      in
+      Maths.view k_vec ~size:(Maths.shape q_u)
+    in *)
+    let k_mat_vec q_uu (q_xu, q_u) =
+      let q_u_ = Maths.view q_u ~size:(Maths.shape q_u @ [ 1 ]) in
+      let q_uu_l = Maths.cholesky q_uu in
+      let k_mat =
+        let y =
+          Maths.linsolve_triangular
+            q_uu_l
+            Maths.(neg (transpose q_xu ~dim0:2 ~dim1:1))
+            ~left:true
+            ~upper:false
+        in
+        Maths.linsolve_triangular
+          (Maths.transpose q_uu_l ~dim0:2 ~dim1:1)
+          y
+          ~left:true
+          ~upper:true
+      in
+      let k_vec =
+        let y =
+          Maths.linsolve_triangular q_uu_l Maths.(neg q_u_) ~left:true ~upper:false
+        in
+        Maths.linsolve_triangular
+          (Maths.transpose q_uu_l ~dim0:2 ~dim1:1)
+          y
+          ~left:true
+          ~upper:true
+      in
+      k_mat, Maths.view k_vec ~size:(Maths.shape q_u)
+    in
+    let k_mat_curr, k_vec_curr = k_mat_vec q_uu_curr (q_xu_curr, q_u_curr) in
     let v_mat_curr = Maths.(q_xx_curr + batch_matmul q_xu_curr k_mat_curr) in
     let v_vec_curr = Maths.(q_x_curr + batch_vecmat q_u_curr k_mat_curr) in
     v_mat_curr, v_vec_curr, k_mat_curr, k_vec_curr

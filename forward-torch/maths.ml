@@ -1036,16 +1036,20 @@ let check_grad_lqr f ~state_params ~cost_params ~attach_tangents =
   let x_0 = state_params.x_0 in
   let map_const = List.map ~f:const in
   (* draw a random direction along which to evaluate derivatives *)
-  let rand_like x =
+  let rand_like x ?(sym = false) =
     let sx = Tensor.shape x in
-    Tensor.randn ~kind:(Tensor.type_ x) sx
+    if not sym
+    then Tensor.randn ~kind:(Tensor.type_ x) sx
+    else (
+      let tmp = Tensor.randn ~kind:(Tensor.type_ x) sx in
+      Tensor.(matmul tmp (transpose tmp ~dim0:2 ~dim1:1)))
   in
   let { f_x_tan; f_u_tan; f_t_tan; c_xx_tan; c_xu_tan; c_uu_tan; c_x_tan; c_u_tan } =
     attach_tangents
   in
-  let add_tangents ~tan lst =
+  let add_tangents ~tan ?sym lst =
     (* sample tangents if tan is true *)
-    let tangents = if tan then Some (List.map lst ~f:rand_like) else None in
+    let tangents = if tan then Some (List.map lst ~f:(rand_like ?sym)) else None in
     (* add tangents to the original primals *)
     let lst_tan =
       match tangents with
@@ -1056,8 +1060,8 @@ let check_grad_lqr f ~state_params ~cost_params ~attach_tangents =
     in
     tangents, lst_tan
   in
-  let add_tangents_opt ~tan lst =
-    let tangents_lst_tan = Option.map lst ~f:(fun lst -> add_tangents ~tan lst) in
+  let add_tangents_opt ~tan ?sym lst =
+    let tangents_lst_tan = Option.map lst ~f:(fun lst -> add_tangents ~tan ?sym lst) in
     match tangents_lst_tan with
     | None -> None, None
     | Some (tangents, lst_tan) -> Some tangents, Some lst_tan
@@ -1065,9 +1069,13 @@ let check_grad_lqr f ~state_params ~cost_params ~attach_tangents =
   let vf_x_list, f_x_list_tan = add_tangents ~tan:f_x_tan state_params.f_x_list in
   let vf_u_list, f_u_list_tan = add_tangents ~tan:f_u_tan state_params.f_u_list in
   let vf_t_list, f_t_list_tan = add_tangents_opt ~tan:f_t_tan state_params.f_t_list in
-  let vc_xx_list, c_xx_list_tan = add_tangents ~tan:c_xx_tan cost_params.c_xx_list in
+  let vc_xx_list, c_xx_list_tan =
+    add_tangents ~tan:c_xx_tan ~sym:true cost_params.c_xx_list
+  in
   let vc_xu_list, c_xu_list_tan = add_tangents_opt ~tan:c_xu_tan cost_params.c_xu_list in
-  let vc_uu_list, c_uu_list_tan = add_tangents ~tan:c_uu_tan cost_params.c_uu_list in
+  let vc_uu_list, c_uu_list_tan =
+    add_tangents ~tan:c_uu_tan ~sym:true cost_params.c_uu_list
+  in
   let vc_x_list, c_x_list_tan = add_tangents_opt ~tan:c_x_tan cost_params.c_x_list in
   let vc_u_list, c_u_list_tan = add_tangents_opt ~tan:c_u_tan cost_params.c_u_list in
   (* Step 1: directional derivative as automatically computed by our maths module *)
@@ -1195,8 +1203,8 @@ let check_grad_lqr f ~state_params ~cost_params ~attach_tangents =
     List.map2_exn dz_pred dz_fd ~f:(fun pred fd ->
       (* let e = Tensor.(norm (pred - fd) / norm fd) in *)
       let tmp = Tensor.(abs ((pred - fd) / fd)) in
-      Tensor.print fd;
       let e = Tensor.(maximum tmp) in
+      (* Tensor.print tmp; *)
       let _ = print [%message (Tensor.to_float0_exn e : float)] in
       e)
     |> List.fold ~init:Tensor.(f 0.) ~f:Tensor.( + )
