@@ -1141,23 +1141,23 @@ let check_grad_lqr f ~state_params ~cost_params ~attach_tangents =
     in
     (* TODO:remove these later *)
     (* let calc_diff a b =
-      let a_first = List.hd_exn a in
-      let b_first = List.hd_exn b in
-      let diff = a_first - b_first |> primal in
-      Tensor.print diff
-    in
-    let calc_diff_opt a b =
-      match a, b with
-      | None, None -> print [%message "not existing"]
-      | Some a, Some b -> calc_diff a b
-      | _ -> assert false
-    in
-    let _ = calc_diff f_x_plus_list f_x_minus_list in
-    let _ = calc_diff f_u_plus_list f_u_minus_list in
-    let _ = calc_diff c_xx_plus_list c_xx_minus_list in
-    let _ = calc_diff_opt c_xu_plus_list c_xu_minus_list in 
-    let _ = calc_diff c_uu_plus_list c_uu_minus_list in
-    let _ = calc_diff_opt c_x_plus_list c_x_minus_list in  *)
+       let a_first = List.hd_exn a in
+       let b_first = List.hd_exn b in
+       let diff = a_first - b_first |> primal in
+       Tensor.print diff
+       in
+       let calc_diff_opt a b =
+       match a, b with
+       | None, None -> print [%message "not existing"]
+       | Some a, Some b -> calc_diff a b
+       | _ -> assert false
+       in
+       let _ = calc_diff f_x_plus_list f_x_minus_list in
+       let _ = calc_diff f_u_plus_list f_u_minus_list in
+       let _ = calc_diff c_xx_plus_list c_xx_minus_list in
+       let _ = calc_diff_opt c_xu_plus_list c_xu_minus_list in
+       let _ = calc_diff c_uu_plus_list c_uu_minus_list in
+       let _ = calc_diff_opt c_x_plus_list c_x_minus_list in *)
 
     (* forward run with x plus *)
     let state_params_tan_plus =

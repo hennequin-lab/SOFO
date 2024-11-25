@@ -24,6 +24,7 @@ type input_constr =
   | `specified_unary of int list
   | `specified_binary of int list * int list
   | `matmul
+  | `linsolve_2d_left_true
   | `linsolve_left_true
   | `linsolve_left_false
   | `linsolve_tri_left_true
@@ -223,7 +224,7 @@ let unary_tests =
   in
   List.map ~f:test_unary test_list
 
-(* each binary test test is characterized by a name,
+(* each binary test is characterized by a name,
    a (potentially empty) list of constraints on the input,
    and a binary math function to be tested *)
 type binary = string * input_constr list * (int list -> Maths.t -> Maths.t -> Maths.t)
@@ -243,6 +244,11 @@ let random_linsolve_matrix_shapes ~left =
   let n = 3 + Random.int 50 in
   let p = n - 1 in
   if left then [ m; n; n ], [ m; n; p ] else [ m; n; n ], [ m; p; n ]
+
+let random_linsolve_2d_matrix_shapes () =
+  let m = 3 + Random.int 50 in
+  let n = 3 + Random.int 50 in
+  [ m; n; n ], [ m; n ]
 
 (* this is how we test a binary function *)
 (* for simplicity apply same constraint on both tensors. *)
@@ -271,6 +277,15 @@ let test_binary ((name, input_constr, f) : binary) =
                  | `order_equal_to d -> Some d
                  | _ -> accu))
           in
+          let specified_shape =
+            List.fold input_constr ~init:None ~f:(fun accu c ->
+              match accu with
+              | Some d -> Some d
+              | None ->
+                (match c with
+                 | `specified_binary shape -> Some shape
+                 | _ -> accu))
+          in
           let matmul_shape =
             List.fold input_constr ~init:None ~f:(fun accu c ->
               match accu with
@@ -286,21 +301,23 @@ let test_binary ((name, input_constr, f) : binary) =
               | Some d -> Some d
               | None ->
                 (match c with
+                 | `linsolve_2d_left_true -> Some (random_linsolve_2d_matrix_shapes ())
                  | `linsolve_left_true -> Some (random_linsolve_matrix_shapes ~left:true)
                  | `linsolve_left_false ->
                    Some (random_linsolve_matrix_shapes ~left:false)
                  | _ -> accu))
           in
-          match matmul_shape, linsolve_shape, set_order, min_order with
-          | Some matmul_shape, None, _, _ -> matmul_shape ()
-          | None, Some linsolve_shape, _, _ -> linsolve_shape
-          | None, None, Some d, _ ->
+          match specified_shape, matmul_shape, linsolve_shape, set_order, min_order with
+          | Some specified_shape, None, None, None, None -> specified_shape
+          | None, Some matmul_shape, None, _, _ -> matmul_shape ()
+          | None, None, Some linsolve_shape, _, _ -> linsolve_shape
+          | None, None, None, Some d, _ ->
             let shape = random_shape_set d in
             shape, shape
-          | None, None, None, Some d ->
+          | None, None, None, None, Some d ->
             let shape = random_shape d in
             shape, shape
-          | None, None, None, None ->
+          | None, None, None, None, None ->
             let shape = random_shape 1 in
             shape, shape
           | _ -> assert false
@@ -312,15 +329,18 @@ let test_binary ((name, input_constr, f) : binary) =
         Alcotest.(check @@ rel_tol) name 0.0 (Maths.check_grad2 f x y)) )
 
 let matmul_with_einsum a b = Maths.einsum [ a, "ij"; b, "jk" ] "ik"
-
-let matmul_with_einsum2 a b =
-  Maths.einsum [ a, "ij"; Maths.transpose ~dim0:0 ~dim1:1 b, "kj" ] "ik"
+let batch_matmul_with_einsum a b = Maths.einsum [ a, "mij"; b, "mjk" ] "mik"
+let batch_trans_matmul_with_einsum a b = Maths.(einsum [ a, "mij"; b, "mik" ] "mjk")
+let batch_vecmat_with_einsum a b = Maths.(einsum [ a, "mi"; b, "mij" ] "mj")
+let batch_vecmat_trans_with_einsum a b = Maths.(einsum [ a, "mi"; b, "mji" ] "mj")
 
 let linsolve ~left a b =
   let a_primal = Maths.primal a in
   let a_device = Tensor.device a_primal in
   let a_kind = Tensor.type_ a_primal in
   let n = List.last_exn (Tensor.shape a_primal) in
+  (* TODO: tangents only on b *)
+  let a = Maths.primal a |> Maths.const in
   (* improve condition number of a *)
   let a =
     Maths.(
@@ -365,7 +385,19 @@ let binary_tests =
     ; "div", [ `positive ], any_shape Maths.( / )
     ; "matmul", [ `matmul ], any_shape Maths.( *@ )
     ; "matmul_with_einsum", [ `matmul ], any_shape matmul_with_einsum
-    ; "matmul_with_einsum2", [ `matmul ], any_shape matmul_with_einsum2
+    ; ( "batch_matmul_with_einsum"
+      , [ `specified_binary ([ 30; 40; 50 ], [ 30; 50; 70 ]) ]
+      , any_shape batch_matmul_with_einsum )
+    ; ( "batch_trans_matmul_with_einsum"
+      , [ `specified_binary ([ 30; 40; 50 ], [ 30; 40; 70 ]) ]
+      , any_shape batch_trans_matmul_with_einsum )
+    ; ( "batch_vecmat_with_einsum"
+      , [ `specified_binary ([ 30; 40 ], [ 30; 40; 70 ]) ]
+      , any_shape batch_vecmat_with_einsum )
+    ; ( "batch_vecmat_trans_with_einsum"
+      , [ `specified_binary ([ 30; 40 ], [ 30; 80; 40 ]) ]
+      , any_shape batch_vecmat_trans_with_einsum )
+    ; "linsolve_2d_left_true", [ `linsolve_2d_left_true ], any_shape (linsolve ~left:true)
     ; "linsolve_left_true", [ `linsolve_left_true ], any_shape (linsolve ~left:true)
     ; "linsolve_left_false", [ `linsolve_left_false ], any_shape (linsolve ~left:false)
     ; ( "linsolve_tri_left_true_upper_true"
@@ -563,6 +595,6 @@ let _ =
   Alcotest.run
     "Maths tests"
     [ (* "Unary operations", unary_tests *)
-      (* "Binary operations", binary_tests *)
-      "LQR operations", lqr_tests
+      "Binary operations", binary_tests 
+      (* "LQR operations", lqr_tests *)
     ]
