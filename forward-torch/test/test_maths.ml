@@ -339,8 +339,6 @@ let linsolve ~left a b =
   let a_device = Tensor.device a_primal in
   let a_kind = Tensor.type_ a_primal in
   let n = List.last_exn (Tensor.shape a_primal) in
-  (* TODO: tangents only on b *)
-  let a = Maths.primal a |> Maths.const in
   (* improve condition number of a *)
   let a =
     Maths.(
