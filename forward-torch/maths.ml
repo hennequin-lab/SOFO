@@ -957,7 +957,7 @@ let concat (x, dx) (y, dy) ~dim =
   in
   (z, dz) |> assert_right_shape "concat"
 
-let epsilon = 1e-4
+let epsilon = 1e-5
 
 let check_grad1 f x =
   (* wrap f around a rng seed setter so that stochasticity is the same *)
@@ -1019,7 +1019,7 @@ let check_grad2 f x y =
     Tensor.(div_scalar (zplusplus - zminusminus) Scalar.(f Float.(2. * epsilon)))
   in
   let final =
-    Tensor.(norm (dz_pred - dz_finite) / norm dz_finite) |> Tensor.to_float0_exn
+    Tensor.(maximum (abs ((dz_pred - dz_finite) / dz_finite))) |> Tensor.to_float0_exn
   in
   let _ = print [%message (final : float)] in
   final
@@ -1139,26 +1139,6 @@ let check_grad_lqr f ~state_params ~cost_params ~attach_tangents =
     let c_u_plus_list, c_u_minus_list =
       plus_minus_opt ~tangents:vc_u_list cost_params.c_u_list
     in
-    (* TODO:remove these later *)
-    (* let calc_diff a b =
-       let a_first = List.hd_exn a in
-       let b_first = List.hd_exn b in
-       let diff = a_first - b_first |> primal in
-       Tensor.print diff
-       in
-       let calc_diff_opt a b =
-       match a, b with
-       | None, None -> print [%message "not existing"]
-       | Some a, Some b -> calc_diff a b
-       | _ -> assert false
-       in
-       let _ = calc_diff f_x_plus_list f_x_minus_list in
-       let _ = calc_diff f_u_plus_list f_u_minus_list in
-       let _ = calc_diff c_xx_plus_list c_xx_minus_list in
-       let _ = calc_diff_opt c_xu_plus_list c_xu_minus_list in
-       let _ = calc_diff c_uu_plus_list c_uu_minus_list in
-       let _ = calc_diff_opt c_x_plus_list c_x_minus_list in *)
-
     (* forward run with x plus *)
     let state_params_tan_plus =
       { n_steps
@@ -1213,7 +1193,10 @@ let check_grad_lqr f ~state_params ~cost_params ~attach_tangents =
   in
   let final =
     List.map2_exn dz_pred dz_fd ~f:(fun pred fd ->
-      let e = Tensor.(norm (pred - fd) / norm fd) in
+      (* let e = Tensor.(norm (pred - fd) / norm fd) in *)
+      let tmp = Tensor.(abs ((pred - fd) / fd)) in
+      Tensor.print fd;
+      let e = Tensor.(maximum tmp) in
       let _ = print [%message (Tensor.to_float0_exn e : float)] in
       e)
     |> List.fold ~init:Tensor.(f 0.) ~f:Tensor.( + )

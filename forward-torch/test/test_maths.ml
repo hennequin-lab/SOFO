@@ -242,7 +242,7 @@ let random_mult_matrix_shapes () =
 let random_linsolve_matrix_shapes ~left =
   let m = 3 + Random.int 50 in
   let n = 3 + Random.int 50 in
-  let p = n - 1 in
+  let p = 3 + Random.int 50 in
   if left then [ m; n; n ], [ m; n; p ] else [ m; n; n ], [ m; p; n ]
 
 let random_linsolve_2d_matrix_shapes () =
@@ -463,7 +463,7 @@ let generate_state_cost_params () =
   (* define control problem dimension *)
   let module Lds_params_dim = struct
     let a = 10
-    let b = 50
+    let b = 5
     let n_steps = 10
     let kind = base.kind
     let device = device_
@@ -567,8 +567,8 @@ let attach_tangents : Forward_torch.Lqr_typ.attach_tangents =
   ; c_xx_tan = false
   ; c_xu_tan = false
   ; c_uu_tan = false
-  ; c_x_tan = false
-  ; c_u_tan = true
+  ; c_x_tan = true
+  ; c_u_tan = false
   }
 
 (* this is how we test the lqr function *)
@@ -592,7 +592,7 @@ let lqr_tests =
 let _ =
   Alcotest.run
     "Maths tests"
-    [ (* "Unary operations", unary_tests *)
-      "Binary operations", binary_tests 
-      (* "LQR operations", lqr_tests *)
+    [ "Unary operations", unary_tests
+    ; "Binary operations", binary_tests
+    ; "LQR operations", lqr_tests
     ]
