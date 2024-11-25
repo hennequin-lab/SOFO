@@ -104,6 +104,7 @@ val check_grad1 : (t -> t) -> Tensor.t -> float
 (* check gradient against finite difference for binary operations. *)
 val check_grad2 : (t -> t -> t) -> Tensor.t -> Tensor.t -> float
 
+(*
 (* check gradient against finite difference for lqr operations. *)
 val check_grad_lqr
   :  (state_params:(Tensor.t * tangent option) state_params
@@ -111,5 +112,5 @@ val check_grad_lqr
       -> (Tensor.t * tangent option) list * 'a)
   -> state_params:Tensor.t state_params
   -> cost_params:Tensor.t cost_params
-  -> attach_tangents:attach_tangents
   -> float
+*)

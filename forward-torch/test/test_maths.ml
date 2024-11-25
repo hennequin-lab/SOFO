@@ -432,6 +432,7 @@ let binary_tests =
   in
   List.map ~f:test_binary test_list
 
+  (*
 (* -----------------------------------------
    -- Test for lqr operations       ------
    ----------------------------------------- *)
@@ -596,3 +597,4 @@ let _ =
     ; "Binary operations", binary_tests
     ; "LQR operations", lqr_tests
     ]
+*)

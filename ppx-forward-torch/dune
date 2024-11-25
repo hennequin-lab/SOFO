@@ -1,7 +1,7 @@
 (library
  (name ppx_forward_torch)
  (public_name ppx-forward-torch)
- (libraries ppxlib base forward-torch)
+ (libraries ppxlib base)
  (preprocess
   (pps ppxlib.metaquot))
  (kind ppx_deriver))

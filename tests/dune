@@ -1,0 +1,10 @@
+(executable
+ (name maths)
+ (libraries framework)
+ (preprocess
+  (pps ppx-forward-torch)))
+
+(env
+ (dev
+  (flags
+   (:standard -warn-error -A))))

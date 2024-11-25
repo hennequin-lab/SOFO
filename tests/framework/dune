@@ -1,0 +1,8 @@
+(library
+ (name framework)
+ (libraries forward-torch))
+
+(env
+ (dev
+  (flags
+   (:standard -warn-error -A))))

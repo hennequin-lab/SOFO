@@ -1024,6 +1024,7 @@ let check_grad2 f x y =
   let _ = print [%message (final : float)] in
   final
 
+  (*
 let check_grad_lqr f ~state_params ~cost_params ~attach_tangents =
   (* wrap f around a rng seed setter so that stochasticity is the same *)
   let key = Random.int Int.max_value in
@@ -1204,3 +1205,4 @@ let check_grad_lqr f ~state_params ~cost_params ~attach_tangents =
   in
   let _ = print [%message (Float.(final / of_int n_steps) : float)] in
   Float.(final / of_int n_steps)
+*)

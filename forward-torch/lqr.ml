@@ -1,11 +1,95 @@
 open Base
 open Torch
 include Lqr_typ
-include Maths
 
 let print s = Stdio.printf "%s\n%!" (Base.Sexp.to_string_hum s)
 
-(* extract t-th element from list; if list is length 1 then use the same element *)
+module Make (O : Ops) = struct
+  type t = O.t
+
+  open O
+
+  (* batch transposition *)
+  let btr x = einsum [ x, "aij" ] "aji"
+  let ( *@ ) a b = einsum [ a, "aij"; b, "ajk" ] "aik"
+
+  let maybe_add a b =
+    match a with
+    | None -> b
+    | Some a -> a + b
+
+  let maybe_force a m b =
+    match b with
+    | None -> a
+    | Some b -> a + (m *@ b)
+
+  type backward_info =
+    { _K : t
+    ; _k : t
+    }
+
+  let neg_inv_symm (_B, _b) a =
+    let _b = reshape _b ~shape:(shape _b @ [ 1 ]) in
+    let ell = cholesky a in
+    let ell_T = btr ell in
+    (* solve L y = b *)
+    let _y = linsolve_triangular ~left:false ~upper:true ell_T _b in
+    let _Y = linsolve_triangular ~left:false ~upper:true ell_T _B in
+    (* then solve L^T a = y *)
+    let _sol = linsolve_triangular ~left:false ~upper:false ell _y in
+    let _SOL = linsolve_triangular ~left:false ~upper:false ell _Y in
+    neg (reshape _sol ~shape:(List.take (shape _sol) 2)), neg _SOL
+
+  (* backward recursion *)
+  let backward (params : t params) =
+    let _v, _V =
+      match List.last params.params with
+      | None -> failwith "LQR needs a time horizon >= 1"
+      | Some z ->
+        ( (match z._cx with
+           | None -> zero
+           | Some c -> c)
+        , z._Cxx )
+    in
+    let _, _, info =
+      List.fold_right params.params ~init:(_v, _V, []) ~f:(fun p (_v, _V, info_list) ->
+        let _Quu, _Qxx, _Qxu =
+          let tmp = btr (p._Fu_prod _V) in
+          ( p._Cuu + p._Fu_prod tmp
+          , p._Cxx + p._Fx_prod (btr (p._Fx_prod _V))
+          , p._Cxu + p._Fx_prod tmp )
+        in
+        let _qu, _qx =
+          let tmp = maybe_force _v _V p._f in
+          maybe_add p._cu (p._Fu_prod tmp), maybe_add p._cx (p._Fx_prod tmp)
+        in
+        (* compute LQR gain parameters to be used in the subsequent fwd pass *)
+        let _k, _K = neg_inv_symm (_Qxu, _qu) _Quu in
+        (* update the value function *)
+        let _V = _Qxx + einsum [ _K, "axu"; _Qxu, "ayu" ] "axy" in
+        let _v = _qx + einsum [ _K, "axu"; _qu, "au" ] "ax" in
+        _v, _V, { _k; _K } :: info_list)
+    in
+    info
+
+  let forward (params : t params) (backward_info : backward_info list) =
+    let _, solution =
+      List.fold2_exn
+        params.params
+        backward_info
+        ~init:(params.x0, [])
+        ~f:(fun (x, accu) p b ->
+          let u = b._k + einsum [ x, "ax"; b._K, "axu" ] "au" in
+          let x = maybe_add p._f (p._Fx_prod2 x + p._Fu_prod2 u) in
+          x, { u; x } :: accu)
+    in
+    List.rev solution
+
+  let solve (p : t params) = p |> backward |> forward p
+end
+
+(*
+   (* extract t-th element from list; if list is length 1 then use the same element *)
 let extract_list list t =
   if List.length list = 1 then List.hd_exn list else List.nth_exn list t
 
@@ -597,3 +681,4 @@ let lqr_sep ~state_params ~cost_params =
     | _ -> assert false
   in
   final_x_list, final_u_list
+*)
