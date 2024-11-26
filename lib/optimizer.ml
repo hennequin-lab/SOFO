@@ -58,19 +58,18 @@ module Momentum (P : Prms.T) = struct
     | None -> g
     | Some beta ->
       (match avg with
-       | None -> P.(primal (Float.(1. - beta) $* P.const g))
-       | Some g_avg ->
-         P.(primal ((beta $* P.const g_avg) + (Float.(1. - beta) $* P.const g))))
+       | None -> P.T.(Float.(1. - beta) $* g)
+       | Some g_avg -> P.T.((beta $* g_avg) + (Float.(1. - beta) $* g)))
 end
 
 module SOFO (W : Wrapper.T) = struct
   module W = W
 
   type ('a, 'b) config = ('a, 'b) Config.SOFO.t
-  type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SOFO.t -> W.P.t -> 'c
+  type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SOFO.t -> W.P.tagged -> 'c
 
   type state =
-    { theta : W.P.t
+    { theta : W.P.tagged
     ; g_avg : Tensor.t W.P.p option
     ; beta_t : float option
     }
@@ -152,7 +151,7 @@ module SOFO (W : Wrapper.T) = struct
     in
     (* initialise tangents *)
     let theta = params state in
-    let theta_ = W.P.value (theta : W.P.t) in
+    let theta_ = W.P.value (theta : W.P.tagged) in
     let vs =
       init_tangents
         ~base:config.base
@@ -200,10 +199,10 @@ module FGD (W : Wrapper.T) = struct
   module W = W
 
   type ('a, 'b) config = ('a, 'b) Config.FGD.t
-  type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.FGD.t -> W.P.t -> 'c
+  type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.FGD.t -> W.P.tagged -> 'c
 
   type state =
-    { theta : W.P.t
+    { theta : W.P.tagged
     ; g_avg : Tensor.t W.P.p option
     ; beta_t : float option
     }
@@ -268,7 +267,7 @@ module FGD (W : Wrapper.T) = struct
     in
     (* initialise tangents *)
     let theta = params state in
-    let theta_ = W.P.value (theta : W.P.t) in
+    let theta_ = W.P.value (theta : W.P.tagged) in
     let vs =
       init_tangents
         ~base:config.base
@@ -295,7 +294,7 @@ module FGD (W : Wrapper.T) = struct
           ~keepdim:true)
       (* calculate vanilla g *)
     in
-    let num_params = Float.(of_int (W.P.numel theta_)) in
+    let num_params = Float.(of_int (W.P.T.numel theta_)) in
     let vanilla_g =
       let weights =
         Tensor.(
@@ -321,10 +320,10 @@ module SGD (W : Wrapper.T) = struct
   module W = W
 
   type ('a, 'b) config = ('a, 'b) Config.SGD.t
-  type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SGD.t -> W.P.t -> 'c
+  type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SGD.t -> W.P.tagged -> 'c
 
   type state =
-    { theta : W.P.t
+    { theta : W.P.tagged
     ; g_avg : Tensor.t W.P.p option
     ; beta_t : float option
     }
@@ -387,10 +386,10 @@ module Adam (W : Wrapper.T) = struct
   module W = W
 
   type ('a, 'b) config = ('a, 'b) Config.Adam.t
-  type ('c, _, _) init_opts = W.P.t -> 'c
+  type ('c, _, _) init_opts = W.P.tagged -> 'c
 
   type state =
-    { theta : W.P.t
+    { theta : W.P.tagged
     ; m : Tensor.t W.P.p option
     ; v : Tensor.t W.P.p option
     ; beta1_t : float
@@ -406,13 +405,13 @@ module Adam (W : Wrapper.T) = struct
     let beta1_t = Float.(state.beta1_t * c.beta_1) in
     let beta2_t = Float.(state.beta2_t * c.beta_2) in
     let m, v =
-      let g_squared = W.P.C.sqr g in
+      let g_squared = W.P.T.sqr g in
       match state.m, state.v with
       | None, None ->
-        W.P.C.(Float.(1. - c.beta_1) $* g), W.P.C.(Float.(1. - c.beta_2) $* g_squared)
+        W.P.T.(Float.(1. - c.beta_1) $* g, Float.(1. - c.beta_2) $* g_squared)
       | Some m, Some v ->
-        let m = W.P.C.((c.beta_1 $* m) + (Float.(1. - c.beta_1) $* g)) in
-        let v = W.P.C.((c.beta_2 $* v) + (Float.(1. - c.beta_2) $* g_squared)) in
+        let m = W.P.T.((c.beta_1 $* m) + (Float.(1. - c.beta_1) $* g)) in
+        let v = W.P.T.((c.beta_2 $* v) + (Float.(1. - c.beta_2) $* g_squared)) in
         m, v
       | _ -> assert false
     in
@@ -420,10 +419,10 @@ module Adam (W : Wrapper.T) = struct
       match c.learning_rate with
       | None -> state.theta
       | Some eta ->
-        let m_hat = W.P.C.(Float.(1. / (1. - beta1_t)) $* m) in
-        let v_hat = W.P.C.(Float.(1. / (1. - beta2_t)) $* v) in
-        let v_hat_sqrt = W.P.C.sqrt v_hat in
-        let dtheta = W.P.C.(m_hat / (c.eps $+ v_hat_sqrt)) in
+        let m_hat = W.P.T.(Float.(1. / (1. - beta1_t)) $* m) in
+        let v_hat = W.P.T.(Float.(1. / (1. - beta2_t)) $* v) in
+        let v_hat_sqrt = W.P.T.sqrt v_hat in
+        let dtheta = W.P.T.(m_hat / (c.eps $+ v_hat_sqrt)) in
         let open W.P.Let_syntax in
         let+ theta = state.theta
         and++ dtheta = dtheta in

@@ -12,7 +12,7 @@ val bind
   -> f:('a -> ('b, 'b, 'bound_b) tag)
   -> ('b, 'b, 'bound_b) tag
 
-val map : t -> f:(Tensor.t -> Tensor.t) -> t
+val map : tagged -> f:(Tensor.t -> Tensor.t) -> tagged
 
 (** Constructs a constant parameter. *)
 val const : creator
@@ -24,10 +24,10 @@ val free : creator
 val create : ?above:Tensor.t -> ?below:Tensor.t -> creator
 
 (** Pin (i.e. convert to Const) either to its current value, or to some [to_]. *)
-val pin : ?to_:Tensor.t -> t -> t
+val pin : ?to_:Tensor.t -> tagged -> tagged
 
 (** Introduce bounds to a Free parameter; fails otherwise *)
-val bound : ?above:Tensor.t -> ?below:Tensor.t -> t -> t
+val bound : ?above:Tensor.t -> ?below:Tensor.t -> tagged -> tagged
 
 (** Number of float elements in this parameter *)
 val numel : Tensor.t -> int

@@ -1,6 +1,6 @@
 (executable
  (name maths)
- (libraries framework)
+ (libraries framework alcotest)
  (preprocess
   (pps ppx-forward-torch)))
 

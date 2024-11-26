@@ -6,7 +6,7 @@ module type T = sig
   type ('a, 'b, 'c) init_opts
 
   (* extract parameters from state *)
-  val params : state -> W.P.t
+  val params : state -> W.P.tagged
 
   (* initialise state from parameters *)
   val init : (state, 'a, 'b) init_opts

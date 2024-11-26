@@ -7,10 +7,10 @@ type ('a, 'const, 'bound) tag =
   | Bounded of 'a * 'bound option * 'bound option
 
 (* parameter type, can be constant, free or bounded. *)
-type t = (Tensor.t, Tensor.t, Tensor.t) tag
+type tagged = (Tensor.t, Tensor.t, Tensor.t) tag
 
 (* creator creates a parameter type from the original tensor. *)
-type creator = Tensor.t -> t
+type creator = Tensor.t -> tagged
 type path = String.t List.t
 
 module type Basic = sig
@@ -39,74 +39,67 @@ module type Basic = sig
     -> 'c
 end
 
+module type Ops = sig
+  type elt
+  type t
+
+  (** [zeros_of x] has the same structure as [x] but each [AD.t] parameter is replaced
+      by zeros of the same shape. *)
+  val zeros_like : t -> t
+
+  (** [ones_of x] has the same structure as [x] but each [AD.t] parameter is replaced
+      by ones of the same shape. *)
+  val ones_like : t -> t
+
+  (** [gaussian_of ~mu ~sigma x] has the same structure as [x] but each [AD.t] parameter is replaced
+      by independent normal samples of the same shape (mean [?(mu=0.)] and stdev. [?(sigma=1.)]). *)
+  val gaussian_like : ?mu:float -> ?sigma:float -> t -> t
+
+  val numel : t -> int
+  val dot_prod : t -> t -> elt
+  val sqr : t -> t
+  val sqrt : t -> t
+  val ( * ) : t -> t -> t
+  val ( + ) : t -> t -> t
+  val ( - ) : t -> t -> t
+  val ( / ) : t -> t -> t
+  val ( $* ) : float -> t -> t
+  val ( $+ ) : float -> t -> t
+end
+
 module type T = sig
   (** Main type for parameter structures. *)
 
   include Basic
 
-  (* p of Maths.t; sets of dual numbers. *)
-  type t' = Maths.t p
+  type nonrec tagged = tagged p
 
-  (* p of t; sets of parameters. *)
-  type nonrec t = t p
-
-  val const : Tensor.t p -> Maths.t p
-  val value : t -> Tensor.t p
-  val primal : t' -> Tensor.t p
-  val tangent : t' -> Tensor.t p
   val iter : 'a p -> f:('a -> unit) -> unit
   val iter2 : 'a p -> 'b p -> f:('a -> 'b -> unit) -> unit
-  val numel : Tensor.t p -> int
 
-  (** Below are a few commonly used math operations that can be
-      defined on arbitrary parameter sets, and which are provided
-      as shortcuts to avoid having to use {!map}. *)
+  module T : sig
+    include Ops with type t = Tensor.t p and type elt = Tensor.t
 
-  val sqr : t' -> t'
-  val sqrt : t' -> t'
-  val dot_prod : t' -> t' -> Maths.t
-  val ( * ) : t' -> t' -> t'
-  val ( + ) : t' -> t' -> t'
-  val ( - ) : t' -> t' -> t'
-  val ( / ) : t' -> t' -> t'
-  val ( $* ) : float -> t' -> t'
-  val ( $+ ) : float -> t' -> t'
+    val save : t -> kind:('a, 'b) Bigarray.kind -> out:string -> unit
+    val load : ?device:Device.t -> string -> t
 
-  module C : sig
-    type t' = Tensor.t p
-
-    val sqr : t' -> t'
-    val sqrt : t' -> t'
-    val dot_prod : t' -> t' -> Tensor.t
-    val ( + ) : t' -> t' -> t'
-    val ( - ) : t' -> t' -> t'
-    val ( * ) : t' -> t' -> t'
-    val ( / ) : t' -> t' -> t'
-    val ( $+ ) : float -> t' -> t'
-    val ( $* ) : float -> t' -> t'
+    val save_npy
+      :  ?prefix:string
+      -> kind:('a, 'b) Bigarray.kind
+      -> out:string
+      -> t
+      -> unit
   end
 
-  (** [zeros_of x] has the same structure as [x] but each [AD.t] parameter is replaced
-      by zeros of the same shape. *)
-  val zeros_like : Tensor.t p -> Tensor.t p
+  module M : sig
+    include Ops with type t = Maths.t p and type elt = Maths.t
+  end
 
-  (** [ones_of x] has the same structure as [x] but each [AD.t] parameter is replaced
-      by ones of the same shape. *)
-  val ones_like : Tensor.t p -> Tensor.t p
-
-  (** [gaussian_of ~mu ~sigma x] has the same structure as [x] but each [AD.t] parameter is replaced
-      by independent normal samples of the same shape (mean [?(mu=0.)] and stdev. [?(sigma=1.)]). *)
-  val gaussian_like : ?mu:float -> ?sigma:float -> Tensor.t p -> Tensor.t p
-
-  val make_dual : Tensor.t p -> t:Maths.tangent p -> t'
-  val save : ('a, 'b, 'c) Bigarray.Genarray.t p -> out:string -> unit
-  val load : string -> ('a, 'b, 'c) Bigarray.Genarray.t p
-
-  val save_npy
-    :  ?prefix:string
-    -> out:string
-    -> ('a, 'b, 'c) Bigarray.Genarray.t p
-    -> unit
+  val const : T.t -> M.t
+  val value : tagged -> T.t
+  val primal : M.t -> T.t
+  val tangent : M.t -> T.t
+  val make_dual : T.t -> t:Maths.tangent p -> M.t
 
   module Let_syntax : sig
     (** This module lifts the {!Let_syntax} module for the [t] type to the [t p] type. *)

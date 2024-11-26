@@ -7,7 +7,7 @@ module type Function = sig
   type input
 
   (* forward pass where we compute output of network given parameters theta and input x. *)
-  val f : theta:P.t' -> input:input -> Maths.t
+  val f : theta:P.M.t -> input:input -> Maths.t
 end
 
 module type Recurrent_function = sig
@@ -15,7 +15,7 @@ module type Recurrent_function = sig
 
   type input
 
-  val f : theta:P.t' -> input:input -> Maths.t -> Maths.t
+  val f : theta:P.M.t -> input:input -> Maths.t -> Maths.t
 end
 
 module type T = sig
@@ -33,6 +33,6 @@ module type T = sig
     -> data:data
     -> init:'a
     -> args:args
-    -> P.t'
+    -> P.M.t
     -> 'a
 end

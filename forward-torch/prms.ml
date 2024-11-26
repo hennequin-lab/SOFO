@@ -77,65 +77,35 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
 
   include B
 
+  type nonrec tagged = tagged p
   type t' = Maths.t p
-  type nonrec t = t p
-
-  let const = map ~f:Maths.const
-  let value = map ~f:value
-  let primal = map ~f:Maths.primal
-
-  let tangent x =
-    try map x ~f:(fun x -> Option.value_exn (Maths.tangent x)) with
-    | _ -> raise Maths.Not_a_dual_number
 
   let iter x ~f = fold ?path:None x ~init:() ~f:(fun () (x, _) -> f x)
   let iter2 x y ~f = fold2 ?path:None x y ~init:() ~f:(fun () (x, y, _) -> f x y)
-  let numel x = fold x ~init:0 ~f:(fun accu (x, _) -> accu + numel x)
 
-  let dot_prod x y =
-    fold2 x y ~init:None ~f:(fun accu (x, y, _) ->
-      let (z : Maths.t) = Maths.(sum (x * y)) in
-      match accu with
-      | None -> Some z
-      | Some a -> Some Maths.(a + z))
-    |> Option.value_exn
+  module T = struct
+    type t = Tensor.t p
+    type elt = Tensor.t
 
-  let sqr = map ~f:Maths.sqr
-  let sqrt = map ~f:Maths.sqrt
-  let ( + ) = map2 ~f:Maths.( + )
-  let ( - ) = map2 ~f:Maths.( - )
-  let ( * ) = map2 ~f:Maths.( * )
-  let ( / ) = map2 ~f:Maths.( / )
-  let ( $+ ) x = map ~f:Maths.(( $+ ) x)
-  let ( $* ) x = map ~f:Maths.(( $* ) x)
-  let zeros_like x = map x ~f:Tensor.zeros_like
-  let ones_like x = map x ~f:Tensor.ones_like
+    let zeros_like x = map x ~f:Tensor.zeros_like
+    let ones_like x = map x ~f:Tensor.ones_like
 
-  let save m ~out:filename =
-    let output = Stdio.Out_channel.create filename in
-    Stdlib.Marshal.to_channel output m [ Stdlib.Marshal.No_sharing ];
-    Stdio.Out_channel.close output
+    let gaussian_like ?mu ?sigma x =
+      map x ~f:(fun x ->
+        let z = Tensor.randn_like x in
+        let z =
+          match sigma with
+          | None -> z
+          | Some s -> Tensor.mul_scalar_ z (Scalar.f s)
+        in
+        let z =
+          match mu with
+          | None -> z
+          | Some m -> Tensor.add_scalar_ z (Scalar.f m)
+        in
+        z)
 
-  let load filename =
-    let input = Stdio.In_channel.create filename in
-    let m = Stdlib.Marshal.from_channel input in
-    Stdio.In_channel.close input;
-    m
-
-  let save_npy ?prefix ~out prms =
-    let path = Option.map prefix ~f:(fun s -> [ s ]) in
-    let file = Npy.Npz.open_out out in
-    fold ?path prms ~init:() ~f:(fun () (prm, path) ->
-      let descr =
-        match path with
-        | None -> assert false
-        | Some p -> String.concat ~sep:"/" (List.rev p)
-      in
-      Npy.Npz.write file descr prm);
-    Npy.Npz.close_out file
-
-  module C = struct
-    type t' = Tensor.t p
+    let numel x = fold x ~init:0 ~f:(fun accu (x, _) -> accu + numel x)
 
     let dot_prod x y =
       fold2 x y ~init:None ~f:(fun accu (x, y, _) ->
@@ -153,24 +123,69 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
     let ( / ) = map2 ~f:Tensor.( / )
     let ( $+ ) x = map ~f:(fun a -> Tensor.(add_scalar a (Scalar.f x)))
     let ( $* ) x = map ~f:(fun a -> Tensor.(mul_scalar a (Scalar.f x)))
+
+    let save m ~kind ~out:filename =
+      let m = map m ~f:(fun x -> Tensor.to_bigarray x ~kind) in
+      let output = Stdio.Out_channel.create filename in
+      Stdlib.Marshal.to_channel output m [ Stdlib.Marshal.No_sharing ];
+      Stdio.Out_channel.close output
+
+    let load ?device filename =
+      let input = Stdio.In_channel.create filename in
+      let m = Stdlib.Marshal.from_channel input in
+      Stdio.In_channel.close input;
+      map m ~f:(fun x -> Tensor.of_bigarray ?device x)
+
+    let save_npy ?prefix ~kind ~out prms =
+      let prms = map prms ~f:(fun x -> Tensor.to_bigarray x ~kind) in
+      let path = Option.map prefix ~f:(fun s -> [ s ]) in
+      let file = Npy.Npz.open_out out in
+      fold ?path prms ~init:() ~f:(fun () (prm, path) ->
+        let descr =
+          match path with
+          | None -> assert false
+          | Some p -> String.concat ~sep:"/" (List.rev p)
+        in
+        Npy.Npz.write file descr prm);
+      Npy.Npz.close_out file
   end
 
-  let gaussian_like ?mu ?sigma x =
-    map x ~f:(fun x ->
-      let z = Tensor.randn_like x in
-      let z =
-        match sigma with
-        | None -> z
-        | Some s -> Tensor.mul_scalar_ z (Scalar.f s)
-      in
-      let z =
-        match mu with
-        | None -> z
-        | Some m -> Tensor.add_scalar_ z (Scalar.f m)
-      in
-      z)
+  let const = map ~f:Maths.const
+  let value = map ~f:value
+  let primal = map ~f:Maths.primal
+
+  let tangent x =
+    try map x ~f:(fun x -> Option.value_exn (Maths.tangent x)) with
+    | _ -> raise Maths.Not_a_dual_number
 
   let make_dual x ~t = map2 x t ~f:(fun x t -> Maths.make_dual x ~t)
+
+  module M = struct
+    type t = Maths.t p
+    type elt = Maths.t
+
+    let zeros_like x = const (T.zeros_like (primal x))
+    let ones_like x = const (T.ones_like (primal x))
+    let gaussian_like ?mu ?sigma x = const (T.gaussian_like ?mu ?sigma (primal x))
+    let numel x = T.numel (primal x)
+
+    let dot_prod x y =
+      fold2 x y ~init:None ~f:(fun accu (x, y, _) ->
+        let (z : Maths.t) = Maths.(sum (x * y)) in
+        match accu with
+        | None -> Some z
+        | Some a -> Some Maths.(a + z))
+      |> Option.value_exn
+
+    let sqr = map ~f:Maths.sqr
+    let sqrt = map ~f:Maths.sqrt
+    let ( + ) = map2 ~f:Maths.( + )
+    let ( - ) = map2 ~f:Maths.( - )
+    let ( * ) = map2 ~f:Maths.( * )
+    let ( / ) = map2 ~f:Maths.( / )
+    let ( $+ ) x = map ~f:(fun a -> Maths.(x $+ a))
+    let ( $* ) x = map ~f:(fun a -> Maths.(x $* a))
+  end
 
   module Let_syntax = struct
     let ( let* ) x f =
