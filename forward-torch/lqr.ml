@@ -47,7 +47,7 @@ module Make (O : Ops) = struct
       | None -> failwith "LQR needs a time horizon >= 1"
       | Some z ->
         ( (match z._cx with
-           | None -> zero
+           | None -> zero ~shape:(List.take (shape z._Cxx) 2)
            | Some c -> c)
         , z._Cxx )
     in
@@ -86,6 +86,45 @@ module Make (O : Ops) = struct
     List.rev solution
 
   let solve (p : t params) = p |> backward |> forward p
+end
+
+module TensorOps : Ops = struct
+  type t = Tensor.t
+
+  let zero ~shape = Tensor.zeros shape
+  let shape x = Tensor.shape x
+  let ( + ) = Tensor.( + )
+  let ( - ) = Tensor.( - )
+  let ( * ) = Tensor.( * )
+  let ( / ) = Tensor.( / )
+  let neg = Tensor.neg
+
+  let einsum operands return =
+    let equation = String.concat ~sep:"," (List.map ~f:snd operands) ^ "->" ^ return in
+    Tensor.einsum ~equation (List.map ~f:fst operands) ~path:None
+
+  let cholesky = Tensor.cholesky ~upper:false
+
+  let linsolve_triangular ~left ~upper a b =
+    Tensor.linalg_solve_triangular a ~b ~upper ~left ~unitriangular:false
+
+  let reshape x ~shape = Tensor.reshape ~shape x
+end
+
+module MathsOps : Ops = struct
+  type t = Maths.t
+
+  let zero ~shape = Maths.const (Tensor.zeros shape)
+  let shape x = Tensor.shape (Maths.primal x)
+  let ( + ) = Maths.( + )
+  let ( - ) = Maths.( - )
+  let ( * ) = Maths.( * )
+  let ( / ) = Maths.( / )
+  let neg = Maths.neg
+  let einsum operands return = Maths.einsum operands return
+  let cholesky = Maths.cholesky
+  let linsolve_triangular ~left ~upper a b = Maths.linsolve_triangular ~left ~upper a b
+  let reshape x ~shape = Maths.view ~size:shape x
 end
 
 (*
