@@ -137,20 +137,26 @@ module Make_LDS (X : module type of Default) = struct
         in
         x, u, f_t)
     in
-    (* a time list of (a_tot, b_tot), each a_tot and each b_tot is batched *)
+    (* a time list of (a_tot, b_tot), each a_tot and each b_tot is batched. to conform with batch dimension first and lqr operations, transpose a and b matrices *)
     let batch_lds_params =
       List.init X.n_steps ~f:(fun t ->
         let a_tot =
           let a_tot_list =
             List.init bs ~f:(fun i ->
-              Tensor.view (fst minibatch.(i).lds_params).(t) ~size:[ 1; X.a; X.a ])
+              let tmp =
+                Tensor.transpose (fst minibatch.(i).lds_params).(t) ~dim0:1 ~dim1:0
+              in
+              Tensor.view tmp ~size:[ 1; X.a; X.a ])
           in
           Tensor.concat a_tot_list ~dim:0
         in
         let b_tot =
           let b_tot_list =
             List.init bs ~f:(fun i ->
-              Tensor.view (snd minibatch.(i).lds_params).(t) ~size:[ 1; X.a; X.b ])
+              let tmp =
+                Tensor.transpose (snd minibatch.(i).lds_params).(t) ~dim0:1 ~dim1:0
+              in
+              Tensor.view tmp ~size:[ 1; X.b; X.a ])
           in
           Tensor.concat b_tot_list ~dim:0
         in
