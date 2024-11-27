@@ -2,6 +2,8 @@ open Base
 open Torch
 open Forward_torch
 
+let print s = Stdio.print_endline (Sexp.to_string_hum s)
+
 module Make (P : Prms.T) (O : Prms.T) = struct
   let run (p : P.T.t) ~(f : P.M.t -> O.M.t) =
     let dot_prod_1, v, w =
@@ -17,6 +19,7 @@ module Make (P : Prms.T) (O : Prms.T) = struct
       let w = O.T.gaussian_like o in
       O.T.dot_prod w o |> Tensor.to_float0_exn, v, w
     in
+    print [%message "dot product with sofo completed"];
     (* compare with backward-pass torch *)
     let dot_prod_2 =
       let p =

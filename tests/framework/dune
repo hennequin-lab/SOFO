@@ -1,6 +1,8 @@
 (library
  (name framework)
- (libraries forward-torch))
+ (libraries forward-torch)
+ (preprocess
+  (pps ppx_sexp_message)))
 
 (env
  (dev

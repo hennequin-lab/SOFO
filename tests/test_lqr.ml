@@ -37,10 +37,10 @@ let bmm a b =
   | 2 -> einsum [ a, "aij"; b, "aj" ] "ai"
   | _ -> failwith "not batch multipliable"
 
-let bmm2 a b =
+let bmm2 b a =
   let open Maths in
   match List.length (shape a) with
-  | 2 -> einsum [ b, "ai"; a, "aij" ] "aj"
+  | 2 -> einsum [ a, "ai"; b, "aij" ] "aj"
   | _ -> failwith "should not happen"
 
 let f (x : Input.M.t) : Output.M.t =
@@ -88,8 +88,12 @@ let q_of ~reg d =
   |> Arr.concatenate ~axis:0
   |> Tensor.of_bigarray ~device
 
-let q_xx () = q_of ~reg:0.01 n
-let q_uu () = q_of ~reg:0.01 m
+let q_xx () = q_of ~reg:10. n
+let q_uu () = q_of ~reg:10. m
+let q_xu () = Arr.gaussian [| bs; n; m |] |> Tensor.of_bigarray ~device
+let _f () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
+let _cx () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
+let _cu () = Arr.gaussian [| bs; m |] |> Tensor.of_bigarray ~device
 
 let check_grad (x : Input.T.t) =
   let module F = Framework.Make (Input) (Output) in
@@ -102,13 +106,13 @@ let _ =
       ; params =
           List.init tmax ~f:(fun _ ->
             Temp.
-              { _f = None
+              { _f = Some (_f ())
               ; _Fx_prod = a ()
               ; _Fu_prod = b ()
-              ; _cx = None
-              ; _cu = None
+              ; _cx = Some (_cx ())
+              ; _cu = Some (_cu ())
               ; _Cxx = q_xx ()
-              ; _Cxu = None
+              ; _Cxu = Some (q_xu ())
               ; _Cuu = q_uu ()
               })
       }

@@ -34,7 +34,7 @@ module Make (O : Ops) = struct
     ; _k : t
     }
 
-  let neg_inv_symm (_B, _b) a =
+  (* let neg_inv_symm (_B, _b) a =
     let _b = reshape _b ~shape:(shape _b @ [ 1 ]) in
     let ell = cholesky a in
     let ell_T = btr ell in
@@ -44,6 +44,18 @@ module Make (O : Ops) = struct
     (* then solve L^T a = y *)
     let _sol = linsolve_triangular ~left:false ~upper:false ell _y in
     let _SOL = linsolve_triangular ~left:false ~upper:false ell _Y in
+    neg (reshape _sol ~shape:(List.take (shape _sol) 2)), neg _SOL *)
+
+  let neg_inv_symm (_B, _b) a =
+    let _b = reshape _b ~shape:(shape _b @ [ 1 ]) in
+    let ell = cholesky a in
+    let ell_T = btr ell in
+    (* solve L y = b *)
+    let _y = linsolve_triangular ~left:true ~upper:false ell _b in
+    let _Y = linsolve_triangular ~left:true ~upper:false ell _B in
+    (* then solve L^T a = y *)
+    let _sol = linsolve_triangular ~left:true ~upper:true ell_T _y in
+    let _SOL = linsolve_triangular ~left:true ~upper:true ell_T _Y in
     neg (reshape _sol ~shape:(List.take (shape _sol) 2)), neg _SOL
 
   (* backward recursion *)
@@ -70,12 +82,16 @@ module Make (O : Ops) = struct
           maybe_add p._cu (p._Fu_prod tmp), maybe_add p._cx (p._Fx_prod tmp)
         in
         (* compute LQR gain parameters to be used in the subsequent fwd pass *)
-        let _k, _K = neg_inv_symm (_Qxu, _qu) _Quu in
+        let _k, _K =
+          let _Qux = btr _Qxu in
+          neg_inv_symm (_Qux, _qu) _Quu
+        in
         (* update the value function *)
-        let _V = _Qxx + einsum [ _K, "azu"; _Qxu, "ayu" ] "azy" in
-        let _v = _qx + einsum [ _K, "azu"; _qu, "au" ] "az" in
+        let _V = _Qxx + einsum [ _Qxu, "ayu"; _K, "auz" ] "ayz" in
+        let _v = _qx + einsum [ _K, "azu"; _qu, "az" ] "au" in
         _v, _V, { _k; _K } :: info_list)
     in
+    print [%message "finish backward"];
     info
 
   let forward params backward_info =
@@ -86,10 +102,11 @@ module Make (O : Ops) = struct
         backward_info
         ~init:(params.x0, [])
         ~f:(fun (x, accu) p b ->
-          let u = b._k + einsum [ x, "ax"; b._K, "axu" ] "au" in
+          let u = b._k + einsum [ x, "au"; b._K, "ayu" ] "ay" in
           let x = maybe_add p._f (p._Fx_prod2 x + p._Fu_prod2 u) in
           x, Solution.{ u; x } :: accu)
     in
+    print [%message "finish forward"];
     List.rev solution
 
   let solve p = p |> backward |> forward p
