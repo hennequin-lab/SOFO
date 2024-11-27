@@ -1,6 +1,5 @@
 open Torch
 include module type of Maths_typ
-include module type of Lqr_typ
 
 val shape : t -> int list
 val const : Tensor.t -> t

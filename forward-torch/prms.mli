@@ -73,6 +73,9 @@ module None : T with type 'a p = unit
 (** Single parameter *)
 module P : T with type 'a p = 'a
 
+(** Pair of parameters *)
+module Pair (P1 : T) (P2 : T) : T with type 'a p = 'a P1.p * 'a P2.p
+
 (** Single optional parameter *)
 module Option (P : T) : T with type 'a p = 'a P.p Option.t
 

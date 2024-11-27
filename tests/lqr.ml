@@ -6,62 +6,8 @@ let n_tests = 100
 let device = Torch.Device.Cpu
 let kind = Torch_core.Kind.(T f64)
 
-(* generate a random shape with a specified minimum order. *)
-let random_shape min_order =
-  List.init (min_order + Random.int 3) ~f:(fun _ -> 3 + Random.int 4)
-
-(* generate a random shape with a specified order *)
-let random_shape_set order = List.init order ~f:(fun _ -> 2 + Random.int 4)
-let rel_tol = Alcotest.float 1e-3
-
-(* two types of contraints: input tensors need to be postive or their orders need to be greater than specified. *)
-type input_constr =
-  [ `positive
-  | `not_all_neg
-  | `order_greater_than of int
-  | `order_equal_to of int
-  | `specified_unary of int list
-  | `specified_binary of int list * int list
-  | `matmul
-  | `linsolve_2d_left_true
-  | `linsolve_left_true
-  | `linsolve_left_false
-  | `linsolve_tri_left_true
-  | `linsolve_tri_left_false
-  | `pos_def
-  ]
-
-(* each unary test test is characterized by a name,
-   a (potentially empty) list of constraints on the input,
-   and a unary math function to be tested *)
-type unary = string * input_constr list * (int list -> Maths.t -> Maths.t)
-
-let any_shape f _ x = f x
-
-(* generate tensor according to specified shape and any additional constraint. *)
-let generate_tensor ~shape ~input_constr_list =
-  let x = Tensor.randn ~kind ~device shape in
-  let x =
-    if List.mem input_constr_list `pos_def ~equal:Poly.( = )
-    then Tensor.(matmul x (transpose x ~dim0:1 ~dim1:0))
-    else x
-  in
-  (* if we require tensor to be positive (for log, sqrt functions etc), we take modulus *)
-  let x =
-    if List.mem input_constr_list `positive ~equal:Poly.( = )
-    then Tensor.(add_scalar (abs x) (Scalar.f 0.1))
-    else if List.mem input_constr_list `not_all_neg ~equal:Poly.( = )
-            (* guard against the all zero case *)
-    then (
-      let x_abs = Tensor.(abs x) in
-      let y = Tensor.randint_like_low_dtype x_abs ~low:(-1) ~high:1 in
-      Tensor.(add_scalar (x_abs * y) (Scalar.f 0.5)))
-    else x
-  in
-  x
-
-let check_grad1 f x =
-  let module F = Framework.Make (Prms.P) (Prms.P) in
+let check_grad x =
+  let module F = Framework.Make (Lqr.Input) (Lqr.Ouput) in
   F.run x ~f
 
 let check_grad2 f x y =

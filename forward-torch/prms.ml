@@ -207,7 +207,7 @@ module None : T with type 'a p = unit = Make (struct
     let fold2 ?path:_ () () ~init ~f:_ = init
   end)
 
-module P : T with type 'a p = 'a = Make (struct
+module P = Make (struct
     type 'a p = 'a
 
     let map x ~f = f x
@@ -216,7 +216,22 @@ module P : T with type 'a p = 'a = Make (struct
     let fold2 ?path x y ~init ~f = f init (x, y, path)
   end)
 
-module Option (P : T) : T with type 'a p = 'a P.p Option.t = Make (struct
+module Pair (P1 : T) (P2 : T) = Make (struct
+    type 'a p = 'a P1.p * 'a P2.p
+
+    let map (x1, x2) ~f = P1.map x1 ~f, P2.map x2 ~f
+    let map2 (x1, x2) (y1, y2) ~f = P1.map2 x1 y1 ~f, P2.map2 x2 y2 ~f
+
+    let fold ?path (x1, x2) ~init ~f =
+      let init = P1.fold ?path x1 ~init ~f in
+      P2.fold ?path x2 ~init ~f
+
+    let fold2 ?path (x1, x2) (y1, y2) ~init ~f =
+      let init = P1.fold2 ?path x1 y1 ~init ~f in
+      P2.fold2 ?path x2 y2 ~init ~f
+  end)
+
+module Option (P : T) = Make (struct
     type 'a p = 'a P.p Option.t
 
     let map x ~f =
@@ -240,7 +255,7 @@ module Option (P : T) : T with type 'a p = 'a P.p Option.t = Make (struct
       | _ -> init
   end)
 
-module List (P : T) : T with type 'a p = 'a P.p List.t = Make (struct
+module List (P : T) = Make (struct
     type 'a p = 'a P.p List.t
 
     let map x ~f = List.map x ~f:(P.map ~f)
@@ -258,7 +273,7 @@ module List (P : T) : T with type 'a p = 'a P.p List.t = Make (struct
       result
   end)
 
-module Array (P : T) : T with type 'a p = 'a P.p array = Make (struct
+module Array (P : T) = Make (struct
     type 'a p = 'a P.p array
 
     let map x ~f = Array.map x ~f:(P.map ~f)

@@ -1,5 +1,6 @@
 open Base
 open Torch
+open Forward_torch
 include Lqr_typ
 
 let print s = Stdio.printf "%s\n%!" (Base.Sexp.to_string_hum s)

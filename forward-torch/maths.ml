@@ -1,7 +1,6 @@
 open Base
 open Torch
 include Maths_typ
-include Lqr_typ
 
 (*
    We will systematically work with the assumption that for a primal value of shape [n1; n2; ... ],

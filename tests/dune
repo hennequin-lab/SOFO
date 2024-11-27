@@ -1,5 +1,5 @@
-(executable
- (name maths)
+(executables
+ (names maths lqr)
  (libraries framework alcotest)
  (preprocess
   (pps ppx-forward-torch)))
