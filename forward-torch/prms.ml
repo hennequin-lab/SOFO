@@ -78,7 +78,6 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
   include B
 
   type nonrec tagged = tagged p
-  type t' = Maths.t p
 
   let iter x ~f = fold ?path:None x ~init:() ~f:(fun () (x, _) -> f x)
   let iter2 x y ~f = fold2 ?path:None x y ~init:() ~f:(fun () (x, y, _) -> f x y)

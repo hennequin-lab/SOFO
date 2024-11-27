@@ -5,7 +5,6 @@ open Forward_torch
 let n_tests = 100
 let device = Torch.Device.Cpu
 let kind = Torch_core.Kind.(T f64)
-let print s = Stdio.print_endline (Sexp.to_string_hum s)
 
 (* generate a random shape with a specified minimum order. *)
 let random_shape min_order =
