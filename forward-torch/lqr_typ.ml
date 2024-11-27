@@ -28,7 +28,7 @@ type 'a solution =
 module type Ops = sig
   type t
 
-  val zero : t
+  val zero : shape:int list -> t
   val shape : t -> int list
   val ( + ) : t -> t -> t
   val ( - ) : t -> t -> t

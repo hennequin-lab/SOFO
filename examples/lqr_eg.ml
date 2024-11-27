@@ -104,98 +104,126 @@ let q_list, r_list = with_given_seed_owl 1985 (control_costs ~invariant:true)
 (* returns the x0 mat, list of target mat. targets x go from t=1 to t=T and targets u go from t=0 to t=T-1. *)
 let sample_data bs =
   let batch_lds_params, x0, x_u_list = Data_Tan.batch_trajectory bs in
-  let targets_list = List.map x_u_list ~f:(fun (x, _, _) -> x) in
-  let target_controls_list = List.map x_u_list ~f:(fun (_, u, _) -> u) in
-  let f_ts_list = List.map x_u_list ~f:(fun (_, _, f_t) -> f_t) in
-  batch_lds_params, x0, targets_list, target_controls_list, f_ts_list
+  let fx_list, fu_list =
+    List.map batch_lds_params ~f:fst, List.map batch_lds_params ~f:snd
+  in
+  let targets_list, target_controls_list, f_ts_list =
+    ( List.map x_u_list ~f:(fun (x, _, _) -> x)
+    , List.map x_u_list ~f:(fun (_, u, _) -> u)
+    , List.map x_u_list ~f:(fun (_, _, f_t) -> f_t) )
+  in
+  fx_list, fu_list, batch_lds_params, x0, targets_list, target_controls_list, f_ts_list
 
-let batch_lds_params, x0, targets_list, target_controls_list, f_ts_list =
+let fx_list, fu_list, batch_lds_params, x0, targets_list, target_controls_list, f_ts_list =
   sample_data batch_size
 
 (* -----------------------------------------
    -- Maths operations (with tangent)  ------
    ----------------------------------------- *)
-
 let batch_vecmat a b = Maths.(einsum [ a, "mi"; b, "mij" ] "mj")
 
-(* form state params/cost_params/xu_desired *)
-let state_params : Maths.t Lqr_typ.state_params =
-  { n_steps = List.length targets_list
-  ; x_0 = x0
-  ; f_x_list = List.map batch_lds_params ~f:fst
-  ; f_u_list = List.map batch_lds_params ~f:snd
-  ; f_t_list = Some f_ts_list
-  }
-
-let c_x_list =
-  let tmp =
-    List.map2_exn targets_list q_list ~f:(fun target q ->
-      Maths.(batch_vecmat (neg target) q))
+let params : Maths.t Forward_torch.Lqr.params =
+  let momentary_params =
+    List.init Lds_params_dim_tan.n_steps ~f:(fun t ->
+      let curr_params : Maths.t Forward_torch.Lqr.momentary_params =
+        let _f = Some (List.nth_exn f_ts_list t) in
+        let _Fx_prod x =
+          let fx = List.nth_exn fx_list t in
+          Maths.(fx *@ x)
+        in
+        (* simple LDS, prod is same as prod2 *)
+        let _Fx_prod2 x =
+          let fx = List.nth_exn fx_list t in
+          Maths.(x *@ fx)
+        in
+        let _Fu_prod x =
+          let fu = List.nth_exn fu_list t in
+          Maths.(fu *@ x)
+        in
+        (* simple LDS, prod is same as prod2 *)
+        let _Fu_prod2 x =
+          let fu = List.nth_exn fu_list t in
+          Maths.(x *@ fu)
+        in
+        let _cx =
+          if t = 0
+          then
+            Some
+              (Maths.const
+                 (Tensor.zeros
+                    [ batch_size; Lds_params_dim_tan.a ]
+                    ~device:Lds_params_dim_tan.device))
+          else (
+            let target = List.nth_exn targets_list Int.(t - 1) in
+            let q = List.nth_exn q_list Int.(t - 1) in
+            Some Maths.(batch_vecmat (neg target) q))
+        in
+        let _cu =
+          if t = Int.(Lds_params_dim_tan.n_steps - 1)
+          then
+            Some
+              (Maths.const
+                 (Tensor.zeros
+                    [ batch_size; Lds_params_dim_tan.b ]
+                    ~device:Lds_params_dim_tan.device))
+          else (
+            let target = List.nth_exn targets_list t in
+            let r = List.nth_exn r_list t in
+            Some Maths.(batch_vecmat (neg target) r))
+        in
+        let _Cxx =
+          if t = 0
+          then
+            Maths.const
+              (Tensor.zeros
+                 [ batch_size; Lds_params_dim_tan.a; Lds_params_dim_tan.a ]
+                 ~device:Lds_params_dim_tan.device)
+          else List.nth_exn q_list t
+        in
+        let _Cxu =
+          let primal =
+            Tensor.zeros
+              [ batch_size; Lds_params_dim_tan.a; Lds_params_dim_tan.b ]
+              ~device:Lds_params_dim_tan.device
+          in
+          let tangent =
+            Tensor.zeros
+              [ Lds_params_dim_tan.n_tangents
+              ; batch_size
+              ; Lds_params_dim_tan.a
+              ; Lds_params_dim_tan.b
+              ]
+              ~device:Lds_params_dim_tan.device
+          in
+          Maths.make_dual primal ~t:(Maths.Direct tangent)
+        in
+        let _Cuu =
+          if t = Int.(Lds_params_dim_tan.n_steps - 1)
+          then
+            Maths.const
+              (Tensor.zeros
+                 [ batch_size; Lds_params_dim_tan.b; Lds_params_dim_tan.b ]
+                 ~device:Lds_params_dim_tan.device)
+          else List.nth_exn q_list t
+        in
+        { _f; _Fx_prod; _Fx_prod2; _Fu_prod; _Fu_prod2; _cx; _cu; _Cxx; _Cxu; _Cuu }
+      in
+      curr_params)
   in
-  Some
-    (Maths.const
-       (Tensor.zeros
-          [ batch_size; Lds_params_dim_tan.a ]
-          ~device:Lds_params_dim_tan.device)
-     :: tmp)
-
-let c_u_list =
-  let tmp =
-    List.map2_exn target_controls_list r_list ~f:(fun target r ->
-      Maths.(batch_vecmat (neg target) r))
-  in
-  Some
-    (tmp
-     @ [ Maths.const
-           (Tensor.zeros
-              [ batch_size; Lds_params_dim_tan.b ]
-              ~device:Lds_params_dim_tan.device)
-       ])
-
-(* form cost parameters, which all go from step 0 to T.*)
-let cost_params : Maths.t Lqr_typ.cost_params =
-  { c_xx_list =
-      Maths.const
-        (Tensor.zeros
-           [ batch_size; Lds_params_dim_tan.a; Lds_params_dim_tan.a ]
-           ~device:Lds_params_dim_tan.device)
-      :: q_list
-  ; c_xu_list =
-      Some
-        (List.init (Lds_params_dim_tan.n_steps + 1) ~f:(fun _ ->
-           let primal =
-             Tensor.zeros
-               [ batch_size; Lds_params_dim_tan.a; Lds_params_dim_tan.b ]
-               ~device:Lds_params_dim_tan.device
-           in
-           let tangent =
-             Tensor.zeros
-               [ Lds_params_dim_tan.n_tangents
-               ; batch_size
-               ; Lds_params_dim_tan.a
-               ; Lds_params_dim_tan.b
-               ]
-               ~device:Lds_params_dim_tan.device
-           in
-           Maths.make_dual primal ~t:(Maths.Direct tangent)))
-  ; c_uu_list =
-      r_list
-      @ [ Maths.const
-            (Tensor.zeros
-               [ batch_size; Lds_params_dim_tan.b; Lds_params_dim_tan.b ]
-               ~device:Lds_params_dim_tan.device)
-        ]
-  ; c_x_list
-  ; c_u_list
-  }
+  { x0; params = momentary_params }
 
 let t0 = Unix.gettimeofday ()
 
 (* compare directly using Maths operation and using Tensor operation. *)
 let _ = Convenience.print [%message "start lqr"]
 
-(* let x_list1, u_list1 = Lqr.lqr ~state_params ~cost_params *)
-let x_list3, u_list3 = Lqr.lqr_sep ~state_params ~cost_params
+module LqrSolver = Lqr.Make (Lqr.MathsOps)
+
+let sol = LqrSolver.solve params
+
+let x_list, u_list =
+  List.map sol ~f:(fun sol -> sol.x), List.map sol ~f:(fun sol -> sol.u)
+
 let t1 = Unix.gettimeofday ()
 let time_elapsed = Float.(t1 - t0)
 

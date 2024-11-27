@@ -18,9 +18,9 @@ module One_layer = struct
 
   type input = Tensor.t
 
-  let f ~(theta : P.t') ~(input : input) = Maths.(theta *@ const input)
+  let f ~(theta : P.M.t) ~(input : input) = Maths.(theta *@ const input)
 
-  let init ~n ~d : P.t =
+  let init ~n ~d : P.tagged =
     let sigma = Float.(1. / sqrt (of_int n)) in
     Tensor.(f sigma * randn ~kind:base.kind ~device:base.device [ d; n ]) |> Prms.free
 end
@@ -66,7 +66,7 @@ let input_cov12 =
   Tensor.(u * sqrt lambda)
 
 (* true weights *)
-let teacher : One_layer.P.t' =
+let teacher : One_layer.P.M.t =
   One_layer.init ~n ~d |> One_layer.P.value |> One_layer.P.const
 
 (* data for mini batch. *)
