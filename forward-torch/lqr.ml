@@ -88,7 +88,7 @@ module Make (O : Ops) = struct
   let solve (p : t params) = p |> backward |> forward p
 end
 
-module TensorOps : Ops = struct
+module TensorOps = struct
   type t = Tensor.t
 
   let zero ~shape = Tensor.zeros shape
@@ -111,7 +111,7 @@ module TensorOps : Ops = struct
   let reshape x ~shape = Tensor.reshape ~shape x
 end
 
-module MathsOps : Ops = struct
+module MathsOps = struct
   type t = Maths.t
 
   let zero ~shape = Maths.const (Tensor.zeros shape)
