@@ -1,34 +1,43 @@
 open Base
+open Forward_torch
+
+(* conventions is, for each batch element:
+   x_(t+1) = x_t A + u_t B *)
 
 type 'a momentary_params =
   { _f : 'a option
-  ; _Fx_prod : 'a -> 'a
-      (* product with a matrix of size (x,x); e.g. THE A matrix in a linear system *)
-  ; _Fx_prod2 : 'a -> 'a (* same thing, but product from the left *)
-  ; _Fu_prod : 'a -> 'a
-      (* product with a matrix of size (u,x); e.g. THE B matrix in a linear system *)
-  ; _Fu_prod2 : 'a -> 'a (* same thing, but product from the left *)
+  ; _Fx_prod : 'a -> 'a (* Av product *)
+  ; _Fx_prod2 : 'a -> 'a (* vA product *)
+  ; _Fu_prod : 'a -> 'a (* Bv produt *)
+  ; _Fu_prod2 : 'a -> 'a (* vB product *)
   ; _cx : 'a option
   ; _cu : 'a option
   ; _Cxx : 'a
-  ; _Cxu : 'a
+  ; _Cxu : 'a option
   ; _Cuu : 'a
   }
 
-type 'a params =
-  { x0 : 'a
-  ; params : 'a momentary_params list
-  }
+module Params = struct
+  type ('a, 'p) p =
+    { x0 : 'a
+    ; params : 'p
+    }
+  [@@deriving prms]
+end
 
-type 'a solution =
-  { u : 'a
-  ; x : 'a
-  }
+module Solution = struct
+  type 'a p =
+    { u : 'a
+    ; x : 'a
+    }
+  [@@deriving prms]
+end
 
 module type Ops = sig
   type t
 
-  val zero : shape:int list -> t
+  val print_shape : t -> label:string -> unit
+  val zeros: like:t -> shape:int list -> t
   val shape : t -> int list
   val ( + ) : t -> t -> t
   val ( - ) : t -> t -> t
@@ -44,5 +53,5 @@ end
 module type T = sig
   type t
 
-  val solve : t params -> t solution list
+  val solve : (t, t momentary_params list) Params.p -> t Solution.p list
 end

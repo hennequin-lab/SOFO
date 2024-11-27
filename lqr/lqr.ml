@@ -12,7 +12,12 @@ module Make (O : Ops) = struct
 
   (* batch transposition *)
   let btr x = einsum [ x, "aij" ] "aji"
-  let ( *@ ) a b = einsum [ a, "aij"; b, "ajk" ] "aik"
+
+  let ( *@ ) a b =
+    match List.length (shape b) with
+    | 3 -> einsum [ a, "aij"; b, "ajk" ] "aik"
+    | 2 -> einsum [ a, "aij"; b, "aj" ] "ai"
+    | _ -> failwith "not batch multipliable"
 
   let maybe_add a b =
     match a with
@@ -42,23 +47,23 @@ module Make (O : Ops) = struct
     neg (reshape _sol ~shape:(List.take (shape _sol) 2)), neg _SOL
 
   (* backward recursion *)
-  let backward (params : t params) =
+  let backward (params : (t, t momentary_params list) Params.p) =
     let _v, _V =
       match List.last params.params with
       | None -> failwith "LQR needs a time horizon >= 1"
       | Some z ->
         ( (match z._cx with
-           | None -> zero ~shape:(List.take (shape z._Cxx) 2)
+           | None -> zeros ~like:params.x0 ~shape:(List.take (shape z._Cxx) 2)
            | Some c -> c)
         , z._Cxx )
     in
     let _, _, info =
       List.fold_right params.params ~init:(_v, _V, []) ~f:(fun p (_v, _V, info_list) ->
         let _Quu, _Qxx, _Qxu =
-          let tmp = btr (p._Fu_prod _V) in
-          ( p._Cuu + p._Fu_prod tmp
-          , p._Cxx + p._Fx_prod (btr (p._Fx_prod _V))
-          , p._Cxu + p._Fx_prod tmp )
+          let tmp = p._Fx_prod _V in
+          ( p._Cuu + btr (p._Fu_prod (btr (p._Fu_prod _V)))
+          , p._Cxx + btr (p._Fx_prod (btr tmp))
+          , maybe_add p._Cxu (btr (p._Fu_prod (btr tmp))) )
         in
         let _qu, _qx =
           let tmp = maybe_force _v _V p._f in
@@ -67,13 +72,14 @@ module Make (O : Ops) = struct
         (* compute LQR gain parameters to be used in the subsequent fwd pass *)
         let _k, _K = neg_inv_symm (_Qxu, _qu) _Quu in
         (* update the value function *)
-        let _V = _Qxx + einsum [ _K, "axu"; _Qxu, "ayu" ] "axy" in
-        let _v = _qx + einsum [ _K, "axu"; _qu, "au" ] "ax" in
+        let _V = _Qxx + einsum [ _K, "azu"; _Qxu, "ayu" ] "azy" in
+        let _v = _qx + einsum [ _K, "azu"; _qu, "au" ] "az" in
         _v, _V, { _k; _K } :: info_list)
     in
     info
 
-  let forward (params : t params) (backward_info : backward_info list) =
+  let forward params backward_info =
+    let open Params in
     let _, solution =
       List.fold2_exn
         params.params
@@ -82,17 +88,21 @@ module Make (O : Ops) = struct
         ~f:(fun (x, accu) p b ->
           let u = b._k + einsum [ x, "ax"; b._K, "axu" ] "au" in
           let x = maybe_add p._f (p._Fx_prod2 x + p._Fu_prod2 u) in
-          x, { u; x } :: accu)
+          x, Solution.{ u; x } :: accu)
     in
     List.rev solution
 
-  let solve (p : t params) = p |> backward |> forward p
+  let solve p = p |> backward |> forward p
 end
 
 module TensorOps = struct
   type t = Tensor.t
 
-  let zero ~shape = Tensor.zeros shape
+  let print_shape x ~label = print [%message (label : string) (Tensor.shape x : int list)]
+
+  let zeros ~like ~shape =
+    Tensor.zeros ~device:(Tensor.device like) ~kind:(Tensor.kind like) shape
+
   let shape x = Tensor.shape x
   let ( + ) = Tensor.( + )
   let ( - ) = Tensor.( - )
@@ -115,7 +125,12 @@ end
 module MathsOps = struct
   type t = Maths.t
 
-  let zero ~shape = Maths.const (Tensor.zeros shape)
+  let print_shape x ~label = print [%message (label : string) (Maths.shape x : int list)]
+
+  let zeros ~like ~shape =
+    let like = Maths.primal like in
+    Maths.const (Tensor.zeros ~device:(Tensor.device like) ~kind:(Tensor.kind like) shape)
+
   let shape x = Tensor.shape (Maths.primal x)
   let ( + ) = Maths.( + )
   let ( - ) = Maths.( - )
