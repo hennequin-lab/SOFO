@@ -1,5 +1,10 @@
 open Forward_torch
 include module type of Lqr_typ
-module Make (O : Ops) : T with type t = O.t
-module TensorOps : Ops with type t = Torch.Tensor.t
-module MathsOps : Ops with type t = Maths.t
+
+val _solve
+  :  (Maths.t option, (Maths.t, Maths.t -> Maths.t) momentary_params list) Params.p
+  -> Maths.t option Solution.p list
+
+val solve
+  :  (Maths.t option, (Maths.t, Maths.t prod) momentary_params list) Params.p
+  -> Maths.t Solution.p list

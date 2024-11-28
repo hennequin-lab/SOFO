@@ -1,20 +1,34 @@
 open Base
+open Torch
 open Forward_torch
 
 (* conventions is, for each batch element:
    x_(t+1) = x_t A + u_t B *)
 
-type 'a momentary_params =
-  { _f : 'a option
-  ; _Fx_prod : 'a -> 'a (* Av product *)
-  ; _Fx_prod2 : 'a -> 'a (* vA product *)
-  ; _Fu_prod : 'a -> 'a (* Bv produt *)
-  ; _Fu_prod2 : 'a -> 'a (* vB product *)
+type 'a prod =
+  { primal : 'a -> 'a
+  ; tangent : 'a -> 'a
+  }
+
+(* everything has to be optional, because
+   perhaps none of those input parameters will have tangents *)
+type ('a, 'prod) momentary_params_common =
+  { _Fx_prod : 'prod option (* Av product *)
+  ; _Fx_prod2 : 'prod option (* vA product *)
+  ; _Fu_prod : 'prod option (* Bv produt *)
+  ; _Fu_prod2 : 'prod option (* vB product *)
+  ; _Cxx : 'a option
+  ; _Cxu : 'a option
+  ; _Cuu : 'a option
+  }
+
+(* everything has to be optional, because
+   perhaps none of those input parameters will have tangents *)
+type ('a, 'prod) momentary_params =
+  { common : ('a, 'prod) momentary_params_common
+  ; _f : 'a option
   ; _cx : 'a option
   ; _cu : 'a option
-  ; _Cxx : 'a
-  ; _Cxu : 'a option
-  ; _Cuu : 'a
   }
 
 module Params = struct
@@ -33,26 +47,28 @@ module Solution = struct
   [@@deriving prms]
 end
 
-module type Ops = sig
-  type t
+(*
+   module type Ops = sig
+   type t
 
-  val print_shape : t -> label:string -> unit
-  val zeros: like:t -> shape:int list -> t
-  val shape : t -> int list
-  val ( + ) : t -> t -> t
-  val ( - ) : t -> t -> t
-  val ( * ) : t -> t -> t
-  val ( / ) : t -> t -> t
-  val neg : t -> t
-  val btr : t -> t
-  val einsum : (t * string) list -> string -> t
-  val cholesky : t -> t
-  val linsolve_triangular : left:bool -> upper:bool -> t -> t -> t
-  val reshape : t -> shape:int list -> t
-end
+   val print_shape : t -> label:string -> unit
+   val zeros : like:t -> shape:int list -> t
+   val shape : t -> int list
+   val ( + ) : t -> t -> t
+   val ( - ) : t -> t -> t
+   val ( * ) : t -> t -> t
+   val ( / ) : t -> t -> t
+   val neg : t -> t
+   val btr : t -> t
+   val einsum : (t * string) list -> string -> t
+   val cholesky : t -> t
+   val linsolve_triangular : left:bool -> upper:bool -> t -> t -> t
+   val reshape : t -> shape:int list -> t
+   end
 
-module type T = sig
-  type t
+   module type T = sig
+   type t
 
-  val solve : (t, t momentary_params list) Params.p -> t Solution.p list
-end
+   val solve : (t, t momentary_params list) Params.p -> t Solution.p list
+   end
+*)

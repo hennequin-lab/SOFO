@@ -65,6 +65,16 @@ let view (x, dx) ~size =
   in
   (y, dy) |> assert_right_shape "view"
 
+(* reshape the size of x to size, and of each batch in dx to size. *)
+let reshape (x, dx) ~shape =
+  let y = Tensor.reshape x ~shape in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let shape = append_batch ~tangent:dx shape in
+      Tensor.reshape ~shape dx)
+  in
+  (y, dy) |> assert_right_shape "reshape"
+
 let permute (x, dx) ~dims =
   let y = Tensor.permute x ~dims in
   let dy =
@@ -691,8 +701,28 @@ let linsolve (a, da) (b, db) ~left =
   in
   (z, dz) |> assert_right_shape "linsolve"
 
-(* solve for ax=b (if left true) or xa = b (if left false). Note that b must be 3D (i.e. m x p x n) and a needs to be triangular. *)
 let linsolve_triangular (a, da) (b, db) ~left ~upper =
+  let unitriangular = false in
+  let x = Tensor.linalg_solve_triangular a ~b ~upper ~left ~unitriangular in
+  let dz =
+    with_tangents
+      da
+      db
+      ~fx:(fun da -> Tensor.(neg (if left then matmul da x else matmul x da)))
+      ~fy:(fun db -> db)
+      ~fxy:(fun da db -> Tensor.(db - if left then matmul da x else matmul x da))
+  in
+  let dx =
+    match dz with
+    | None -> None
+    | Some dz ->
+      let dz = tangent' dz in
+      Some (Direct (Tensor.linalg_solve_triangular a ~b:dz ~upper ~left ~unitriangular))
+  in
+  (x, dx) |> assert_right_shape "linsolve_triangular"
+
+(* solve for ax=b (if left true) or xa = b (if left false). Note that b must be 3D (i.e. m x p x n) and a needs to be triangular. *)
+let __linsolve_triangular (a, da) (b, db) ~left ~upper =
   let unitriangular = false in
   let z = Tensor.linalg_solve_triangular a ~b ~upper ~left ~unitriangular in
   let a_shape = Tensor.shape a in

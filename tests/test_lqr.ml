@@ -8,6 +8,8 @@ module Linalg = Owl.Linalg.D
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
 let device = Torch.Device.Cpu
 let kind = Torch_core.Kind.(T f64)
+let rel_tol = Alcotest.float 1e-4
+let n_tests = 20
 
 module Temp = struct
   type ('a, 'o) p =
@@ -23,11 +25,9 @@ module Temp = struct
   [@@deriving prms]
 end
 
-module Input =
-  Lqr.Params.Make (Prms.P) (Prms.List (Temp.Make (Prms.P) (Prms.Option (Prms.P))))
-
-module Output = Prms.List (Lqr.Solution.Make (Prms.P))
-module L = Lqr.Make (Lqr.MathsOps)
+module O = Prms.Option (Prms.P)
+module Input = Lqr.Params.Make (O) (Prms.List (Temp.Make (Prms.P) (O)))
+module Output = Prms.List (Lqr.Solution.Make (O))
 
 let bmm a b =
   let open Maths in
@@ -47,53 +47,50 @@ let f (x : Input.M.t) : Output.M.t =
     let params =
       List.map x.params ~f:(fun p ->
         Lqr.
-          { _f = p._f
-          ; _Fx_prod = bmm p._Fx_prod
-          ; _Fx_prod2 = bmm2 p._Fx_prod
-          ; _Fu_prod = bmm p._Fu_prod
-          ; _Fu_prod2 = bmm2 p._Fu_prod
+          { common =
+              { _Fx_prod = Some (bmm p._Fx_prod)
+              ; _Fx_prod2 = Some (bmm2 p._Fx_prod)
+              ; _Fu_prod = Some (bmm p._Fu_prod)
+              ; _Fu_prod2 = Some (bmm2 p._Fu_prod)
+              ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
+              ; _Cxu = p._Cxu
+              ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
+              }
+          ; _f = p._f
           ; _cx = p._cx
           ; _cu = p._cu
-          ; _Cxx = p._Cxx
-          ; _Cxu = p._Cxu
-          ; _Cuu = p._Cuu
           })
     in
     Lqr.Params.{ x with params }
   in
-  L.solve x
+  Lqr._solve x
 
-let tmax = 2
+let tmax = 10
 let bs = 7
 let n = 5
 let m = 3
 
 let a () =
   Array.init bs ~f:(fun _ ->
-    (*
-       let a = Mat.gaussian n n in
-       let r =
-       a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
-       in
-       Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; n; n |]) *)
-    Arr.reshape (Mat.(0.8 $* eye n)) [| 1; n; n |])
+    let a = Mat.gaussian n n in
+    let r =
+      a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
+    in
+    Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; n; n |])
   |> Arr.concatenate ~axis:0
   |> Tensor.of_bigarray ~device
 
 let b () = Arr.gaussian [| bs; m; n |] |> Tensor.of_bigarray ~device
 
-let q_of ~reg:_ d =
+let q_of ~reg d =
   Array.init bs ~f:(fun _ ->
-    (*
-       let ell = Mat.gaussian d d in
-       Arr.reshape Mat.(add_diag (ell *@ transpose ell) reg) [| 1; d; d |]) *)
-    Arr.reshape Mat.(eye d) [| 1; d; d |])
+    let ell = Mat.gaussian d d in
+    Arr.reshape Mat.(add_diag (ell *@ transpose ell) reg) [| 1; d; d |])
   |> Arr.concatenate ~axis:0
   |> Tensor.of_bigarray ~device
 
-let q_xx () = q_of ~reg:10. n
-let q_uu () = q_of ~reg:10. m
-let q_xu () = Arr.gaussian [| bs; n; m |] |> Tensor.of_bigarray ~device
+let q_xx () = q_of ~reg:0.1 n
+let q_uu () = q_of ~reg:0.1 m
 let _f () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
 let _cx () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
 let _cu () = Arr.gaussian [| bs; m |] |> Tensor.of_bigarray ~device
@@ -102,10 +99,10 @@ let check_grad (x : Input.T.t) =
   let module F = Framework.Make (Input) (Output) in
   F.run x ~f
 
-let _ =
+let test_LQR () =
   let x =
     Lqr.Params.
-      { x0 = Tensor.randn ~kind ~device [ bs; n ]
+      { x0 = Some (Tensor.randn ~kind ~device [ bs; n ])
       ; params =
           (let tmp () =
              Temp.
@@ -122,8 +119,11 @@ let _ =
            List.init 3 ~f:(fun _ -> tmp ()))
       }
   in
-  Array.init 100 ~f:(fun _ ->
-    let dp1, dp2, e = check_grad x in
-    [| dp1; dp2; e |])
-  |> Mat.of_arrays
-  |> Mat.save_txt ~out:"lqr_test_haha"
+  let _, _, e = check_grad x in
+  Alcotest.(check @@ rel_tol) "LQR test" 0.0 e
+
+let () =
+  let open Alcotest in
+  run
+    "LQR tests"
+    [ "Simple-case", List.init n_tests ~f:(fun _ -> test_case "Simple" `Quick test_LQR) ]

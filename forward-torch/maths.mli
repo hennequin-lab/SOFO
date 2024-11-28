@@ -15,6 +15,7 @@ val tangent : t -> Tensor.t option
 
 (** Unary operations *)
 val view : t -> size:int list -> t
+val reshape : t -> shape:int list -> t
 
 val permute : t -> dims:int list -> t
 val neg : t -> t
