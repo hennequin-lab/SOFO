@@ -62,12 +62,14 @@ let generate_tensor ~shape ~input_constr_list =
 
 let check_grad1 f x =
   let module F = Framework.Make (Prms.P) (Prms.P) in
-  F.run x ~f
+  let _, _, e = F.run x ~f in
+  e
 
 let check_grad2 f x y =
   let module Two = Prms.Pair (Prms.P) (Prms.P) in
   let module F = Framework.Make (Two) (Prms.P) in
-  F.run (x, y) ~f
+  let _, _, e = F.run (x, y) ~f in
+  e
 
 (* this is how we test a unary function *)
 let test_unary ((name, input_constr, f) : unary) =
