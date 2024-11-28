@@ -44,6 +44,10 @@ val max_2d_dim1 : t -> keepdim:bool -> t
 
 (* transpose along two dimensions *)
 val transpose : t -> dim0:int -> dim1:int -> t
+
+(* batched transposition -- always swaps the last two dimensions *)
+val btr : t -> t
+val tril : t -> diagonal:int -> t
 val cholesky : t -> t
 val logsumexp : t -> dim:int list -> keepdim:bool -> t
 val gumbel_softmax : t -> tau:float -> with_noise:bool -> discrete:bool -> t
@@ -104,12 +108,12 @@ val check_grad1 : (t -> t) -> Tensor.t -> float
 val check_grad2 : (t -> t -> t) -> Tensor.t -> Tensor.t -> float
 
 (*
-(* check gradient against finite difference for lqr operations. *)
-val check_grad_lqr
-  :  (state_params:(Tensor.t * tangent option) state_params
-      -> cost_params:(Tensor.t * tangent option) cost_params
-      -> (Tensor.t * tangent option) list * 'a)
-  -> state_params:Tensor.t state_params
-  -> cost_params:Tensor.t cost_params
-  -> float
+   (* check gradient against finite difference for lqr operations. *)
+   val check_grad_lqr
+   :  (state_params:(Tensor.t * tangent option) state_params
+   -> cost_params:(Tensor.t * tangent option) cost_params
+   -> (Tensor.t * tangent option) list * 'a)
+   -> state_params:Tensor.t state_params
+   -> cost_params:Tensor.t cost_params
+   -> float
 *)

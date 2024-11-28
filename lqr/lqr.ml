@@ -10,9 +10,6 @@ module Make (O : Ops) = struct
 
   open O
 
-  (* batch transposition *)
-  let btr x = einsum [ x, "aij" ] "aji"
-
   let ( *@ ) a b =
     match List.length (shape b) with
     | 3 -> einsum [ a, "aij"; b, "ajk" ] "aik"
@@ -91,7 +88,6 @@ module Make (O : Ops) = struct
         let _v = _qx + einsum [ _K, "azu"; _qu, "az" ] "au" in
         _v, _V, { _k; _K } :: info_list)
     in
-    print [%message "finish backward"];
     info
 
   let forward params backward_info =
@@ -101,12 +97,11 @@ module Make (O : Ops) = struct
         params.params
         backward_info
         ~init:(params.x0, [])
-        ~f:(fun (x, accu) p b ->
-          let u = b._k + einsum [ x, "au"; b._K, "ayu" ] "ay" in
-          let x = maybe_add p._f (p._Fx_prod2 x + p._Fu_prod2 u) in
-          x, Solution.{ u; x } :: accu)
+        ~f:(fun (x, accu) p _ ->
+          (* let u = b._k + einsum [ x, "au"; b._K, "ayu" ] "ay" in *)
+          let x = maybe_add p._f (p._Fx_prod2 x (*+ p._Fu_prod2 u*)) in
+          x, Solution.{ u = zeros ~like:params.x0 ~shape:[ 7; 3 ]; x } :: accu)
     in
-    print [%message "finish forward"];
     List.rev solution
 
   let solve p = p |> backward |> forward p
@@ -126,6 +121,7 @@ module TensorOps = struct
   let ( * ) = Tensor.( * )
   let ( / ) = Tensor.( / )
   let neg = Tensor.neg
+  let btr = Tensor.transpose ~dim0:(-2) ~dim1:(-1)
 
   let einsum operands return =
     let equation = String.concat ~sep:"," (List.map ~f:snd operands) ^ "->" ^ return in
@@ -154,6 +150,7 @@ module MathsOps = struct
   let ( * ) = Maths.( * )
   let ( / ) = Maths.( / )
   let neg = Maths.neg
+  let btr = Maths.btr
   let einsum = Maths.einsum
   let cholesky = Maths.cholesky
   let linsolve_triangular ~left ~upper a b = Maths.linsolve_triangular ~left ~upper a b

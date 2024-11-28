@@ -2,6 +2,8 @@ open Base
 open Torch
 include Prms_typ
 
+let print s = Stdio.print_endline (Sexp.to_string_hum s)
+
 let value = function
   | Const x -> x
   | Free x -> x
@@ -97,12 +99,9 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
           | None -> z
           | Some s -> Tensor.mul_scalar_ z (Scalar.f s)
         in
-        let z =
-          match mu with
-          | None -> z
-          | Some m -> Tensor.add_scalar_ z (Scalar.f m)
-        in
-        z)
+        match mu with
+        | None -> z
+        | Some m -> Tensor.add_scalar_ z (Scalar.f m))
 
     let numel x = fold x ~init:0 ~f:(fun accu (x, _) -> accu + numel x)
 

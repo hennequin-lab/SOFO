@@ -44,6 +44,7 @@ module type Ops = sig
   val ( * ) : t -> t -> t
   val ( / ) : t -> t -> t
   val neg : t -> t
+  val btr : t -> t
   val einsum : (t * string) list -> string -> t
   val cholesky : t -> t
   val linsolve_triangular : left:bool -> upper:bool -> t -> t -> t

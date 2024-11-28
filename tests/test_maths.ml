@@ -116,16 +116,17 @@ let test_unary ((name, input_constr, f) : unary) =
         Alcotest.(check @@ rel_tol) name 0.0 (check_grad1 f x)) )
 
 let cholesky_test x =
-  let x_primal = Maths.primal x in
-  let x_device = Tensor.device x_primal in
-  let x_kind = Tensor.type_ x_primal in
-  (* make sure x is positive definite *)
-  let x_sym = Maths.(x *@ transpose x ~dim0:2 ~dim1:1) in
-  let x_size = List.last_exn (Tensor.shape x_primal) in
-  let x_final =
-    Maths.(x_sym + const (Tensor.eye ~n:x_size ~options:(x_kind, x_device)))
-  in
-  Maths.cholesky x_final
+  let x_sym = Maths.(x *@ transpose x ~dim0:0 ~dim1:1) in
+  Maths.cholesky x_sym
+
+let batch_cholesky_test x =
+  let x_sym = Maths.(x *@ transpose x ~dim0:1 ~dim1:2) in
+  Maths.cholesky x_sym
+
+let cholesky_then_linsolve a b =
+  let a_sym = Maths.(a *@ transpose a ~dim0:1 ~dim1:2) in
+  let ell = Maths.cholesky a_sym in
+  Maths.linsolve_triangular ell b ~left:true ~upper:false
 
 let inv_sqr x =
   let x_primal = Maths.primal x in
@@ -150,6 +151,12 @@ let unary_tests =
     ; ( "trace_with_einsum"
       , [ `specified_unary [ 10; 10 ] ]
       , any_shape (fun a -> Maths.einsum [ a, "ii" ] "") )
+    ; ( "transpose_with_einsum"
+      , [ `specified_unary [ 10; 10 ] ]
+      , any_shape (fun a -> Maths.einsum [ a, "ij" ] "ji") )
+    ; ( "batch_transpose_with_einsum"
+      , [ `specified_unary [ 4; 10; 10 ] ]
+      , any_shape (fun a -> Maths.einsum [ a, "kij" ] "kji") )
     ; "cos", [], any_shape Maths.cos
     ; "sin", [], any_shape Maths.sin
     ; "sqrt", [ `positive ], any_shape Maths.sqrt
@@ -208,7 +215,9 @@ let unary_tests =
             List.permute (List.init n_dims ~f:Fn.id)
           in
           Maths.transpose ~dim0 ~dim1 )
-    ; "cholesky", [ `specified_unary [ 2; 14; 14 ] ], any_shape cholesky_test
+    ; ("btr", [ `order_greater_than 2 ], fun _ -> Maths.btr)
+    ; "cholesky", [ `specified_unary [ 14; 14 ] ], any_shape cholesky_test
+    ; "batch_cholesky", [ `specified_unary [ 3; 14; 14 ] ], any_shape batch_cholesky_test
     ; ( "logsumexp"
       , []
       , fun shape ->
@@ -338,7 +347,8 @@ let test_binary ((name, input_constr, f) : binary) =
         Alcotest.(check @@ rel_tol) name 0.0 (check_grad2 (fun (x, y) -> f x y) x y)) )
 
 let matmul_with_einsum a b = Maths.einsum [ a, "ij"; b, "jk" ] "ik"
-let batch_matmul_with_einsum a b = Maths.einsum [ a, "mij"; b, "mjk" ] "mik"
+let batch_matmul_with_einsum_33 a b = Maths.einsum [ a, "mij"; b, "mjk" ] "mik"
+let batch_matmul_with_einsum_32 a b = Maths.einsum [ a, "mij"; b, "mj" ] "mi"
 let batch_trans_matmul_with_einsum a b = Maths.(einsum [ a, "mij"; b, "mik" ] "mjk")
 let batch_vecmat_with_einsum a b = Maths.(einsum [ a, "mi"; b, "mij" ] "mj")
 let batch_vecmat_trans_with_einsum a b = Maths.(einsum [ a, "mi"; b, "mji" ] "mj")
@@ -361,28 +371,12 @@ let linsolve ~left a b =
   Maths.linsolve ~left a b
 
 let linsolve_tri ~left ~upper a b =
-  let a_primal = Maths.primal a in
-  let n = List.last_exn (Tensor.shape a_primal) in
-  let a_device = Tensor.device a_primal in
-  let a_kind = Tensor.type_ a_primal in
-  (* make sure x is positive definite *)
-  let a_batch = if List.length (Tensor.shape (Maths.primal a)) = 3 then 1 else 0 in
-  let aaT =
-    Maths.(
-      (a *@ transpose a ~dim0:Int.(a_batch + 1) ~dim1:a_batch)
-      + const
-          Tensor.(
-            mul_scalar
-              (eye ~n ~options:(a_kind, a_device))
-              (Scalar.f Float.(1. *. of_int n))))
+  let a =
+    match upper with
+    | false -> Maths.tril a ~diagonal:0
+    | true -> Maths.(btr (tril a ~diagonal:0))
   in
-  let a_lower = Maths.cholesky aaT in
-  let a_final =
-    if upper
-    then Maths.transpose a_lower ~dim0:Int.(a_batch + 1) ~dim1:a_batch
-    else a_lower
-  in
-  Maths.linsolve_triangular a_final b ~left ~upper
+  Maths.linsolve_triangular a b ~left ~upper
 
 let binary_tests =
   let test_list : binary list =
@@ -392,9 +386,12 @@ let binary_tests =
     ; "div", [ `positive ], any_shape Maths.( / )
     ; "matmul", [ `matmul ], any_shape Maths.( *@ )
     ; "matmul_with_einsum", [ `matmul ], any_shape matmul_with_einsum
-    ; ( "batch_matmul_with_einsum"
+    ; ( "batch_matmul_with_einsum_33"
       , [ `specified_binary ([ 3; 4; 5 ], [ 3; 5; 7 ]) ]
-      , any_shape batch_matmul_with_einsum )
+      , any_shape batch_matmul_with_einsum_33 )
+    ; ( "batch_matmul_with_einsum_32"
+      , [ `specified_binary ([ 3; 4; 5 ], [ 3; 5 ]) ]
+      , any_shape batch_matmul_with_einsum_32 )
     ; ( "batch_trans_matmul_with_einsum"
       , [ `specified_binary ([ 3; 4; 5 ], [ 3; 4; 7 ]) ]
       , any_shape batch_trans_matmul_with_einsum )
@@ -405,6 +402,7 @@ let binary_tests =
       , [ `specified_binary ([ 3; 4 ], [ 3; 8; 4 ]) ]
       , any_shape batch_vecmat_trans_with_einsum )
     ; "linsolve_2d_left_true", [ `linsolve_2d_left_true ], any_shape (linsolve ~left:true)
+    ; "cholesky_then_linsolve", [ `linsolve_left_true ], any_shape cholesky_then_linsolve
     ; "linsolve_left_true", [ `linsolve_left_true ], any_shape (linsolve ~left:true)
     ; "linsolve_left_false", [ `linsolve_left_false ], any_shape (linsolve ~left:false)
     ; ( "linsolve_tri_left_true_upper_true"

@@ -6,7 +6,6 @@ module Mat = Owl.Mat
 module Linalg = Owl.Linalg.D
 
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
-let n_tests = 100
 let device = Torch.Device.Cpu
 let kind = Torch_core.Kind.(T f64)
 
@@ -60,31 +59,35 @@ let f (x : Input.M.t) : Output.M.t =
           ; _Cuu = p._Cuu
           })
     in
-    Lqr.Params.{ x0 = x.x0; params }
+    Lqr.Params.{ x with params }
   in
   L.solve x
 
-let tmax = 32
+let tmax = 2
 let bs = 7
 let n = 5
 let m = 3
 
 let a () =
   Array.init bs ~f:(fun _ ->
-    let a = Mat.gaussian n n in
-    let r =
-      a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
-    in
-    Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; n; n |])
+    (*
+       let a = Mat.gaussian n n in
+       let r =
+       a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
+       in
+       Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; n; n |]) *)
+    Arr.reshape (Mat.(0.8 $* eye n)) [| 1; n; n |])
   |> Arr.concatenate ~axis:0
   |> Tensor.of_bigarray ~device
 
 let b () = Arr.gaussian [| bs; m; n |] |> Tensor.of_bigarray ~device
 
-let q_of ~reg d =
+let q_of ~reg:_ d =
   Array.init bs ~f:(fun _ ->
-    let ell = Mat.gaussian d d in
-    Arr.reshape Mat.(add_diag (ell *@ transpose ell) reg) [| 1; d; d |])
+    (*
+       let ell = Mat.gaussian d d in
+       Arr.reshape Mat.(add_diag (ell *@ transpose ell) reg) [| 1; d; d |]) *)
+    Arr.reshape Mat.(eye d) [| 1; d; d |])
   |> Arr.concatenate ~axis:0
   |> Tensor.of_bigarray ~device
 
@@ -104,17 +107,23 @@ let _ =
     Lqr.Params.
       { x0 = Tensor.randn ~kind ~device [ bs; n ]
       ; params =
-          List.init tmax ~f:(fun _ ->
-            Temp.
-              { _f = Some (_f ())
-              ; _Fx_prod = a ()
-              ; _Fu_prod = b ()
-              ; _cx = Some (_cx ())
-              ; _cu = Some (_cu ())
-              ; _Cxx = q_xx ()
-              ; _Cxu = Some (q_xu ())
-              ; _Cuu = q_uu ()
-              })
+          (let tmp () =
+             Temp.
+               { _f = None
+               ; _Fx_prod = a ()
+               ; _Fu_prod = b ()
+               ; _cx = None
+               ; _cu = None
+               ; _Cxx = q_xx ()
+               ; _Cxu = None
+               ; _Cuu = q_uu ()
+               }
+           in
+           List.init 3 ~f:(fun _ -> tmp ()))
       }
   in
-  print [%message (check_grad x : float)]
+  Array.init 100 ~f:(fun _ ->
+    let dp1, dp2, e = check_grad x in
+    [| dp1; dp2; e |])
+  |> Mat.of_arrays
+  |> Mat.save_txt ~out:"lqr_test_haha"

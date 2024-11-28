@@ -291,74 +291,48 @@ let transpose (x, dx) ~dim0 ~dim1 =
   let dy = with_tangent dx ~f:(Tensor.transpose_copy ~dim0:(dim0 + 1) ~dim1:(dim1 + 1)) in
   (y, dy) |> assert_right_shape "transpose"
 
+let btr (x, dx) =
+  let n = List.length (Tensor.shape x) in
+  assert (n > 1);
+  let tr = Tensor.transpose ~dim0:(-2) ~dim1:(-1) in
+  let y = tr x in
+  let dy = with_tangent dx ~f:tr in
+  (y, dy) |> assert_right_shape "btr"
+
+let tril (x, dx) ~diagonal =
+  let y = Tensor.tril x ~diagonal in
+  let dy = with_tangent dx ~f:(Tensor.tril ~diagonal) in
+  (y, dy) |> assert_right_shape "tril"
+
 let last_two_elements lst =
   let len = List.length lst in
   if len < 2 then None else Some (List.drop lst (len - 2))
 
-(* y y^T = x, x and dx needs to be symmetric positive semi-definite. *)
 let cholesky (x, dx) =
-  let primal_shape = last_two_elements (Tensor.shape x) |> Option.value_exn in
-  let x_size = List.hd_exn primal_shape in
   let y = Tensor.linalg_cholesky ~upper:false x in
   let dy =
     with_tangent dx ~f:(fun dx ->
-      let x_device = Tensor.device x in
-      let x_kind = Tensor.type_ x in
-      let batch_size =
-        if List.length (Tensor.shape x) = 2 then 1 else List.hd_exn (Tensor.shape x)
+      let yt =
+        match Tensor.shape y with
+        | [ _; _ ] -> Tensor.transpose y ~dim0:0 ~dim1:1
+        | [ _; _; _ ] -> Tensor.transpose y ~dim0:1 ~dim1:2
+        | _ -> assert false
       in
-      let a = List.drop_last_exn (Tensor.shape dx) in
-      (* original shape of km in original tangents *)
-      let km_shape = List.drop_last_exn a in
-      let k = List.hd_exn km_shape in
-      let km = Int.(k * batch_size) in
-      (* y and y inv is of shape [m x n x n] *)
-      let y_reshaped = Tensor.reshape y ~shape:(batch_size :: primal_shape) in
-      let y_id =
-        List.init batch_size ~f:(fun _ ->
-          let id = Tensor.eye ~n:x_size ~options:(x_kind, x_device) in
-          Tensor.reshape id ~shape:[ 1; x_size; x_size ])
-        |> Tensor.concat ~dim:0
+      let solve = Tensor.linalg_solve_triangular ~unitriangular:false in
+      (* compute L^(-1) dx by solving L z = dx *)
+      let tmp = solve y ~b:dx ~upper:false ~left:true in
+      (* compute tmp L^(-T) by A L^T = TMP *)
+      let tmp = solve yt ~b:tmp ~upper:true ~left:false in
+      (* take the lower triangular part and halve the diagonal *)
+      let tmp = Tensor.tril_ ~diagonal:0 tmp in
+      let dim1, dim2 =
+        match Tensor.shape tmp with
+        | [ _; a; b ] when a = b -> 1, 2
+        | [ _; _; a; b ] when a = b -> 2, 3
+        | _ -> assert false
       in
-      let y_inv =
-        Tensor.linalg_solve ~a:y_reshaped ~b:y_id ~left:true
-        |> Tensor.reshape ~shape:(batch_size :: primal_shape)
-      in
-      (* dx_reshaped is of shape [k x m x n x n] *)
-      let dx_reshaped = Tensor.reshape dx ~shape:([ k; batch_size ] @ primal_shape) in
-      let y_inv_trans = Tensor.transpose y_inv ~dim0:2 ~dim1:1 in
-      let tmp =
-        let tmp1 =
-          Tensor.einsum ~equation:"kmij,mjl->kmil" [ dx_reshaped; y_inv_trans ] ~path:None
-        in
-        Tensor.einsum ~equation:"mji,kmil->kmjl" [ y_inv; tmp1 ] ~path:None
-      in
-      let tmp_squeezed = Tensor.reshape tmp ~shape:(km :: primal_shape) in
-      (* phi takes the lower-triangular part of a tmp and halves its diagonal *)
-      let phi =
-        List.init km ~f:(fun i ->
-          let tmp_i =
-            Tensor.slice
-              tmp_squeezed
-              ~dim:0
-              ~start:(Some i)
-              ~end_:(Some Int.(i + 1))
-              ~step:1
-            |> Tensor.squeeze
-          in
-          let phi_i =
-            let lower = Tensor.tril ~diagonal:(-1) tmp_i in
-            let diag_half = Tensor.(div_scalar (diag tmp_i ~diagonal:0) (Scalar.f 2.)) in
-            Tensor.(diag ~diagonal:0 diag_half + lower)
-          in
-          Tensor.reshape phi_i ~shape:(1 :: primal_shape))
-        |> Tensor.concat ~dim:0
-      in
-      let phi_reshaped = Tensor.reshape phi ~shape:([ k; batch_size ] @ primal_shape) in
-      let final =
-        Tensor.einsum ~equation:"mij,kmjl->kmil" [ y_reshaped; phi_reshaped ] ~path:None
-      in
-      Tensor.reshape final ~shape:(km_shape @ primal_shape))
+      let _ = Tensor.(mul_scalar_ (diagonal tmp ~offset:0 ~dim1 ~dim2) (Scalar.f 0.5)) in
+      Tensor.(matmul (tril ~diagonal:0 y) tmp))
   in
   (y, dy) |> assert_right_shape "cholesky"
 
