@@ -13,17 +13,18 @@ type 'a prod =
 (* everything has to be optional, because
    perhaps none of those input parameters will have tangents *)
 type ('a, 'prod) momentary_params_common =
-  { _Fx_prod : 'prod option (* Av product *)
-  ; _Fx_prod2 : 'prod option (* vA product *)
-  ; _Fu_prod : 'prod option (* Bv produt *)
-  ; _Fu_prod2 : 'prod option (* vB product *)
+  { _Fx_prod : 'prod option (* Fx v product *)
+  ; _Fx_prod2 : 'prod option (* v Fx product *)
+  ; _Fu_prod : 'prod option (* Fu v produt *)
+  ; _Fu_prod2 : 'prod option (* v Fu product *)
   ; _Cxx : 'a option
   ; _Cxu : 'a option
   ; _Cuu : 'a option
   }
 
 (* everything has to be optional, because
-   perhaps none of those input parameters will have tangents *)
+   perhaps none of those input parameters will have tangents. 
+   commpn refers to what is commoro both primal and tangent LQR problems. *)
 type ('a, 'prod) momentary_params =
   { common : ('a, 'prod) momentary_params_common
   ; _f : 'a option

@@ -27,6 +27,15 @@ let maybe_prod f v =
   | Some f, Some v -> Some (f v)
   | _ -> None
 
+(* let maybe_prod_tan f v =
+   match f, v with
+   | Some f, Some v ->
+   let g x = f in
+   let x_tan = Maths.tangent x in
+
+   Some (f v)
+   | _ -> None *)
+
 (* a + m *@ b *)
 let maybe_force a m b =
   match a, m, b with
@@ -115,7 +124,8 @@ let backward common_info (params : (t option, (t, t -> t) momentary_params list)
         let _v = maybe_add _qx (maybe_einsum (z._K, "azu") (_qu, "az") "au") in
         _v, { _k; _K = z._K } :: info_list)
   in
-  List.rev info (* that's still forward in time *)
+  info
+(* TODO: we should not need to reverse here *)
 
 let forward params backward_info =
   let open Params in
@@ -143,8 +153,141 @@ let _solve p =
   let common_info = backward_common (List.map p.Params.params ~f:(fun x -> x.common)) in
   backward common_info p |> forward p
 
-(* surrogate rhs for the tangent problem *)
-let surrogate_rhs (s : t option Solution.p list) p = assert false
+(* surrogate rhs for the tangent problem; s is the solution obtained from lqr through the primals and p is the full set
+   of parameters *)
+let surrogate_rhs
+  (s : t option Solution.p list)
+  (p : (t option, (t, t prod) momentary_params list) Params.p)
+  : (t option, (t, t -> t) momentary_params list) Params.p
+  =
+  let _p_implicit_primal = Option.map ~f:(fun x -> x.primal) in
+  let _p_implicit_tangent = Option.map ~f:(fun x -> x.tangent) in
+  let _p_primal = Option.map ~f:(fun x -> Maths.const (Maths.primal x)) in
+  let _p_tangent x =
+    match x with
+    | None -> None
+    | Some x ->
+      let x_tangent = Maths.tangent x in
+      (match x_tangent with
+       | None -> None
+       | Some tangent -> Some (Maths.const tangent))
+  in
+  (* initialise lambda *)
+  let x_final =
+    let tmp = List.last_exn s in
+    tmp.x
+  in
+  let u_final =
+    let tmp = List.last_exn s in
+    tmp.u
+  in
+  let params_final = p.params |> List.last_exn in
+  let lambda_final =
+    let _Cxx_final = _p_primal params_final.common._Cxx in
+    let _Cx_final = _p_primal params_final._cx in
+    maybe_force _Cx_final x_final _Cxx_final
+  in
+  (* initialise _cx and _cu*)
+  let _cx_surro_final, _cu_surro_final =
+    let _dCxx_final = _p_tangent params_final.common._Cxx in
+    let _dCxu_final = _p_tangent params_final.common._Cxu in
+    let _dcx_final = _p_tangent params_final._cx in
+    let _dCuu_final = _p_tangent params_final.common._Cuu in
+    let _dcu_final = _p_tangent params_final._cu in
+    let _cx_surro_final =
+      let tmp1 = maybe_einsum (x_final, "ma") (_dCxx_final, "kmab") "kmb" in
+      let tmp2 = maybe_einsum (u_final, "ma") (_dCxu_final, "kmba") "kmb" in
+      maybe_add (maybe_add tmp1 tmp2) _dcx_final
+    in
+    let _cu_surro_final =
+      let tmp1 = maybe_einsum (u_final, "ma") (_dCuu_final, "kmab") "kmb" in
+      let tmp2 = maybe_einsum (x_final, "ma") (_dCxu_final, "kmab") "kmb" in
+      maybe_add (maybe_add tmp1 tmp2) _dcu_final
+    in
+    _cx_surro_final, _cu_surro_final
+  in
+  let n_steps = List.length p.params in
+  let n_steps_list = List.init n_steps ~f:(fun i -> i) in
+  let _cx_surro, _cu_surro, _ =
+    List.fold_right
+      n_steps_list
+      ~init:([ _cx_surro_final ], [ _cu_surro_final ], lambda_final)
+      ~f:(fun t (_cx_surro_accu, _cu_surro_accu, lambda_next) ->
+        let params_curr = List.nth_exn p.params t in
+        let x_curr, u_curr =
+          let tmp = List.nth_exn s t in
+          tmp.x, tmp.u
+        in
+        let _dCxx_curr = _p_tangent params_curr.common._Cxx in
+        let _dCxu_curr = _p_tangent params_curr.common._Cxu in
+        let _dcx_curr = _p_tangent params_curr._cx in
+        let _dCuu_curr = _p_tangent params_curr.common._Cuu in
+        let _dcu_curr = _p_tangent params_curr._cu in
+        let _cx_surro_curr =
+          let tmp1 = maybe_einsum (x_curr, "ma") (_dCxx_curr, "kmab") "kmb" in
+          let tmp2 = maybe_einsum (u_curr, "ma") (_dCxu_curr, "kmba") "kmb" in
+          let tmp3 =
+            maybe_prod (_p_implicit_primal params_curr.common._Fx_prod) lambda_next
+          in
+          maybe_add (maybe_add (maybe_add tmp1 tmp2) tmp3) _dcx_curr
+        in
+        let _cu_surro_curr =
+          let tmp1 = maybe_einsum (u_curr, "ma") (_dCuu_curr, "kmab") "kmb" in
+          let tmp2 = maybe_einsum (x_curr, "ma") (_dCxu_curr, "kmab") "kmb" in
+          let tmp3 =
+            maybe_prod (_p_implicit_primal params_curr.common._Fu_prod) lambda_next
+          in
+          maybe_add (maybe_add (maybe_add tmp1 tmp2) tmp3) _dcu_curr
+        in
+        let lambda_curr =
+          let tmp1 =
+            let _Cxx_curr = _p_primal params_curr.common._Cxx in
+            let _Cx_curr = _p_primal params_curr._cx in
+            maybe_force _Cx_curr x_curr _Cxx_curr
+          in
+          let tmp2 =
+            let _Cxu_curr = _p_primal params_curr.common._Cxu in
+            maybe_einsum (u_curr, "mb") (_Cxu_curr, "mab") "ma"
+          in
+          let tmp3 =
+            maybe_prod (_p_implicit_primal params_curr.common._Fx_prod2) lambda_next
+          in
+          maybe_add (maybe_add tmp1 tmp2) tmp3
+        in
+        _cx_surro_curr :: _cx_surro_accu, _cu_surro_curr :: _cu_surro_accu, lambda_curr)
+  in
+  let _f_surro =
+    List.init n_steps ~f:(fun t ->
+      let params_curr = List.nth_exn p.params t in
+      let x_curr, u_curr =
+        let tmp = List.nth_exn s t in
+        tmp.x, tmp.u
+      in
+      let tmp1 = maybe_prod (_p_implicit_tangent params_curr.common._Fx_prod2) x_curr in
+      let tmp2 = maybe_prod (_p_implicit_tangent params_curr.common._Fu_prod2) u_curr in
+      maybe_add (maybe_add tmp1 tmp2) (_p_primal params_curr._f))
+  in
+  let p_tangent =
+    Params.
+      { x0 = _p_tangent p.x0
+      ; params =
+          List.mapi p.params ~f:(fun i p ->
+            { common =
+                { _Fx_prod = _p_implicit_primal p.common._Fx_prod
+                ; _Fx_prod2 = _p_implicit_primal p.common._Fx_prod2
+                ; _Fu_prod = _p_implicit_primal p.common._Fu_prod
+                ; _Fu_prod2 = _p_implicit_primal p.common._Fu_prod
+                ; _Cxx = _p_primal p.common._Cxx
+                ; _Cuu = _p_primal p.common._Cuu
+                ; _Cxu = _p_primal p.common._Cxu
+                }
+            ; _f = List.nth_exn _f_surro i
+            ; _cx = List.nth_exn _cx_surro i
+            ; _cu = List.nth_exn _cu_surro i
+            })
+      }
+  in
+  p_tangent
 
 let solve p =
   (* solve the primal problem first *)
