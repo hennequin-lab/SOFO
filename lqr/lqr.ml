@@ -173,15 +173,11 @@ let surrogate_rhs
        | Some tangent -> Some (Maths.const tangent))
   in
   (* initialise lambda *)
-  let x_final =
+  let x_final, u_final =
     let tmp = List.last_exn s in
-    tmp.x
+    tmp.x, tmp.u
   in
-  let u_final =
-    let tmp = List.last_exn s in
-    tmp.u
-  in
-  let params_final = p.params |> List.last_exn in
+  let params_final = List.last_exn p.params in
   let lambda_final =
     let _Cxx_final = _p_primal params_final.common._Cxx in
     let _Cx_final = _p_primal params_final._cx in
@@ -208,11 +204,11 @@ let surrogate_rhs
   in
   let n_steps = List.length p.params in
   let n_steps_list = List.init n_steps ~f:(fun i -> i) in
-  let _cx_surro, _cu_surro, _ =
+  let _cx_cu_surro, _ =
     List.fold_right
       n_steps_list
-      ~init:([ _cx_surro_final ], [ _cu_surro_final ], lambda_final)
-      ~f:(fun t (_cx_surro_accu, _cu_surro_accu, lambda_next) ->
+      ~init:([ _cx_surro_final, _cu_surro_final ], lambda_final)
+      ~f:(fun t (_cx_cu_surro_accu, lambda_next) ->
         let params_curr = List.nth_exn p.params t in
         let x_curr, u_curr =
           let tmp = List.nth_exn s t in
@@ -254,15 +250,11 @@ let surrogate_rhs
           in
           maybe_add (maybe_add tmp1 tmp2) tmp3
         in
-        _cx_surro_curr :: _cx_surro_accu, _cu_surro_curr :: _cu_surro_accu, lambda_curr)
+        (_cx_surro_curr, _cu_surro_curr) :: _cx_cu_surro_accu, lambda_curr)
   in
   let _f_surro =
-    List.init n_steps ~f:(fun t ->
-      let params_curr = List.nth_exn p.params t in
-      let x_curr, u_curr =
-        let tmp = List.nth_exn s t in
-        tmp.x, tmp.u
-      in
+    List.map2_exn p.params s ~f:(fun params_curr s_curr ->
+      let x_curr, u_curr = s_curr.x, s_curr.u in
       let tmp1 = maybe_prod (_p_implicit_tangent params_curr.common._Fx_prod2) x_curr in
       let tmp2 = maybe_prod (_p_implicit_tangent params_curr.common._Fu_prod2) u_curr in
       maybe_add (maybe_add tmp1 tmp2) (_p_primal params_curr._f))
@@ -271,20 +263,23 @@ let surrogate_rhs
     Params.
       { x0 = _p_tangent p.x0
       ; params =
-          List.mapi p.params ~f:(fun i p ->
-            { common =
-                { _Fx_prod = _p_implicit_primal p.common._Fx_prod
-                ; _Fx_prod2 = _p_implicit_primal p.common._Fx_prod2
-                ; _Fu_prod = _p_implicit_primal p.common._Fu_prod
-                ; _Fu_prod2 = _p_implicit_primal p.common._Fu_prod
-                ; _Cxx = _p_primal p.common._Cxx
-                ; _Cuu = _p_primal p.common._Cuu
-                ; _Cxu = _p_primal p.common._Cxu
-                }
-            ; _f = List.nth_exn _f_surro i
-            ; _cx = List.nth_exn _cx_surro i
-            ; _cu = List.nth_exn _cu_surro i
-            })
+          List.map2_exn
+            p.params
+            (List.zip_exn _f_surro _cx_cu_surro)
+            ~f:(fun p (_f_surro, (_cx_surro, _cu_surro)) ->
+              { common =
+                  { _Fx_prod = _p_implicit_primal p.common._Fx_prod
+                  ; _Fx_prod2 = _p_implicit_primal p.common._Fx_prod2
+                  ; _Fu_prod = _p_implicit_primal p.common._Fu_prod
+                  ; _Fu_prod2 = _p_implicit_primal p.common._Fu_prod
+                  ; _Cxx = _p_primal p.common._Cxx
+                  ; _Cuu = _p_primal p.common._Cuu
+                  ; _Cxu = _p_primal p.common._Cxu
+                  }
+              ; _f = _f_surro
+              ; _cx = _cx_surro
+              ; _cu = _cu_surro
+              })
       }
   in
   p_tangent
