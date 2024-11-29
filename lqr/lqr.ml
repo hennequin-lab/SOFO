@@ -172,48 +172,13 @@ let surrogate_rhs
        | None -> None
        | Some tangent -> Some (Maths.const tangent))
   in
-  (* initialise lambda *)
-  let x_final, u_final =
-    let tmp = List.last_exn s in
-    tmp.x, tmp.u
-  in
-  let params_final = List.last_exn p.params in
-  let lambda_final =
-    let _Cxx_final = _p_primal params_final.common._Cxx in
-    let _Cx_final = _p_primal params_final._cx in
-    maybe_force _Cx_final x_final _Cxx_final
-  in
-  (* initialise _cx and _cu*)
-  let _cx_surro_final, _cu_surro_final =
-    let _dCxx_final = _p_tangent params_final.common._Cxx in
-    let _dCxu_final = _p_tangent params_final.common._Cxu in
-    let _dcx_final = _p_tangent params_final._cx in
-    let _dCuu_final = _p_tangent params_final.common._Cuu in
-    let _dcu_final = _p_tangent params_final._cu in
-    let _cx_surro_final =
-      let tmp1 = maybe_einsum (x_final, "ma") (_dCxx_final, "kmab") "kmb" in
-      let tmp2 = maybe_einsum (u_final, "ma") (_dCxu_final, "kmba") "kmb" in
-      maybe_add (maybe_add tmp1 tmp2) _dcx_final
-    in
-    let _cu_surro_final =
-      let tmp1 = maybe_einsum (u_final, "ma") (_dCuu_final, "kmab") "kmb" in
-      let tmp2 = maybe_einsum (x_final, "ma") (_dCxu_final, "kmab") "kmb" in
-      maybe_add (maybe_add tmp1 tmp2) _dcu_final
-    in
-    _cx_surro_final, _cu_surro_final
-  in
-  let n_steps = List.length p.params in
-  let n_steps_list = List.init n_steps ~f:(fun i -> i) in
   let _cx_cu_surro, _ =
-    List.fold_right
-      n_steps_list
-      ~init:([ _cx_surro_final, _cu_surro_final ], lambda_final)
-      ~f:(fun t (_cx_cu_surro_accu, lambda_next) ->
-        let params_curr = List.nth_exn p.params t in
-        let x_curr, u_curr =
-          let tmp = List.nth_exn s t in
-          tmp.x, tmp.u
-        in
+    List.fold_right2_exn
+      s
+      p.params
+      ~init:([], None)
+      ~f:(fun s_curr params_curr (_cx_cu_surro_accu, lambda_next) ->
+        let x_curr, u_curr = s_curr.x, s_curr.u in
         let _dCxx_curr = _p_tangent params_curr.common._Cxx in
         let _dCxu_curr = _p_tangent params_curr.common._Cxu in
         let _dcx_curr = _p_tangent params_curr._cx in
@@ -222,18 +187,26 @@ let surrogate_rhs
         let _cx_surro_curr =
           let tmp1 = maybe_einsum (x_curr, "ma") (_dCxx_curr, "kmab") "kmb" in
           let tmp2 = maybe_einsum (u_curr, "ma") (_dCxu_curr, "kmba") "kmb" in
-          let tmp3 =
-            maybe_prod (_p_implicit_primal params_curr.common._Fx_prod) lambda_next
-          in
-          maybe_add (maybe_add (maybe_add tmp1 tmp2) tmp3) _dcx_curr
+          let common = maybe_add (maybe_add tmp1 tmp2) _dcx_curr in
+          match lambda_next with
+          | None -> common
+          | Some lambda_next ->
+            let tmp3 =
+              maybe_prod (_p_implicit_primal params_curr.common._Fx_prod) lambda_next
+            in
+            maybe_add common tmp3
         in
         let _cu_surro_curr =
           let tmp1 = maybe_einsum (u_curr, "ma") (_dCuu_curr, "kmab") "kmb" in
           let tmp2 = maybe_einsum (x_curr, "ma") (_dCxu_curr, "kmab") "kmb" in
-          let tmp3 =
-            maybe_prod (_p_implicit_primal params_curr.common._Fu_prod) lambda_next
-          in
-          maybe_add (maybe_add (maybe_add tmp1 tmp2) tmp3) _dcu_curr
+          let common = maybe_add (maybe_add tmp1 tmp2) _dcu_curr in
+          match lambda_next with
+          | None -> common
+          | Some lambda_next ->
+            let tmp3 =
+              maybe_prod (_p_implicit_primal params_curr.common._Fu_prod) lambda_next
+            in
+            maybe_add common tmp3
         in
         let lambda_curr =
           let tmp1 =
@@ -245,12 +218,16 @@ let surrogate_rhs
             let _Cxu_curr = _p_primal params_curr.common._Cxu in
             maybe_einsum (u_curr, "mb") (_Cxu_curr, "mab") "ma"
           in
-          let tmp3 =
-            maybe_prod (_p_implicit_primal params_curr.common._Fx_prod2) lambda_next
-          in
-          maybe_add (maybe_add tmp1 tmp2) tmp3
+          let common = maybe_add tmp1 tmp2 in
+          match lambda_next with
+          | None -> common
+          | Some lambda_next ->
+            let tmp3 =
+              maybe_prod (_p_implicit_primal params_curr.common._Fx_prod2) lambda_next
+            in
+            maybe_add common tmp3
         in
-        (_cx_surro_curr, _cu_surro_curr) :: _cx_cu_surro_accu, lambda_curr)
+        (_cx_surro_curr, _cu_surro_curr) :: _cx_cu_surro_accu, Some lambda_curr)
   in
   let _f_surro =
     List.map2_exn p.params s ~f:(fun params_curr s_curr ->
