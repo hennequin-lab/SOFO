@@ -84,6 +84,11 @@ let permute (x, dx) ~dims =
   in
   (y, dy) |> assert_right_shape "permute"
 
+let unsqueeze (x, dx) ~dim =
+  let y = Tensor.unsqueeze x ~dim in
+  let dy = with_tangent dx ~f:(fun dx -> Tensor.unsqueeze dx ~dim:Int.(dim + 1)) in
+  (y, dy) |> assert_right_shape "unsqueeze"
+
 (* y = -x, dy = -dx *)
 let neg (x, dx) =
   let y = Tensor.neg x in

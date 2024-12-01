@@ -9,8 +9,8 @@ open Maths
 
 let ( *@ ) a b =
   match List.length (shape b) with
-  | 3 -> einsum [ a, "aij"; b, "ajk" ] "aik"
-  | 2 -> einsum [ a, "aij"; b, "aj" ] "ai"
+  | 3 -> einsum [ a, "mab"; b, "mbc" ] "mac"
+  | 2 -> einsum [ a, "mab"; b, "mb" ] "ma"
   | _ -> failwith "not batch multipliable"
 
 let maybe_btr = Option.map ~f:btr
@@ -27,15 +27,6 @@ let maybe_prod f v =
   | Some f, Some v -> Some (f v)
   | _ -> None
 
-(* let maybe_prod_tan f v =
-   match f, v with
-   | Some f, Some v ->
-   let g x = f in
-   let x_tan = Maths.tangent x in
-
-   Some (f v)
-   | _ -> None *)
-
 (* a + m *@ b *)
 let maybe_force a m b =
   match a, m, b with
@@ -48,6 +39,22 @@ let maybe_einsum (a, opsA) (b, opsB) opsC =
   match a, b with
   | Some a, Some b -> Some (einsum [ a, opsA; b, opsB ] opsC)
   | _ -> None
+
+(* reshape a from [shape] to [1, shape] *)
+let maybe_expand a =
+  match a with
+  | Some a -> Some (unsqueeze a ~dim:0)
+  | None -> None
+
+let maybe_shape a =
+  match a with
+  | Some a -> shape a
+  | None -> failwith "shape of a None object cannot be determined"
+
+let maybe_reshape a ~shape =
+  match a with
+  | Some a -> Some (reshape a ~shape)
+  | None -> failwith "shape of a None object cannot be determined"
 
 type backward_common_info =
   { _Quu_chol : t option
@@ -80,8 +87,10 @@ let backward_common (common : (t, t -> t) momentary_params_common list) =
     | None -> failwith "LQR needs a time horizon >= 1"
     | Some z -> z._Cxx
   in
+  (* info goes from 0 to t-1 *)
   let _, info =
-    List.fold_right common ~init:(_V, []) ~f:(fun z (_V, info_list) ->
+    let common_except_last = List.drop_last_exn common in
+    List.fold_right common_except_last ~init:(_V, []) ~f:(fun z (_V, info_list) ->
       let _Quu, _Qxx, _Qux =
         let tmp = maybe_prod z._Fx_prod _V in
         ( maybe_add z._Cuu (maybe_prod z._Fu_prod (maybe_btr (maybe_prod z._Fu_prod _V)))
@@ -93,10 +102,10 @@ let backward_common (common : (t, t -> t) momentary_params_common list) =
       let _Quu_chol_T = maybe_btr _Quu_chol in
       let _K = neg_inv_symm ~is_vector:false _Qux (_Quu_chol, _Quu_chol_T) in
       (* update the value function *)
-      let _V_new = maybe_add _Qxx (maybe_einsum (_Qux, "auy") (_K, "auz") "ayz") in
+      let _V_new = maybe_add _Qxx (maybe_einsum (_Qux, "mab") (_K, "mac") "mbc") in
       _V_new, { _Quu_chol; _Quu_chol_T; _V; _K } :: info_list)
   in
-  info (* that's now → in time *)
+  info
 
 (* backward recursion; assumes all the common (expensive) stuff has already been
    computed *)
@@ -107,10 +116,12 @@ let backward common_info (params : (t option, (t, t -> t) momentary_params list)
     | None -> failwith "LQR needs a time horizon >= 1"
     | Some z -> z._cx
   in
+  (* info (k/K) goes from 0 to T-1 *)
   let _, info =
+    let params_except_last = List.drop_last_exn params.params in
     List.fold_right2_exn
       common_info
-      params.params
+      params_except_last
       ~init:(_v, [])
       ~f:(fun z p (_v, info_list) ->
         let _qu, _qx =
@@ -121,22 +132,83 @@ let backward common_info (params : (t option, (t, t -> t) momentary_params list)
         (* compute LQR gain parameters to be used in the subsequent fwd pass *)
         let _k = neg_inv_symm ~is_vector:true _qu (z._Quu_chol, z._Quu_chol_T) in
         (* update the value function *)
-        let _v = maybe_add _qx (maybe_einsum (z._K, "azu") (_qu, "az") "au") in
+        let _v = maybe_add _qx (maybe_einsum (z._K, "mba") (_qu, "mb") "ma") in
         _v, { _k; _K = z._K } :: info_list)
   in
   info
-(* TODO: we should not need to reverse here *)
+
+(* backward with some parameters having the tangent dimension *)
+let backward_tangents
+  common_info
+  (params : (t option, (t, t -> t) momentary_params list) Params.p)
+  =
+  let _v =
+    match List.last params.params with
+    | None -> failwith "LQR needs a time horizon >= 1"
+    | Some z -> z._cx
+  in
+  let _, info =
+    let params_except_last = List.drop_last_exn params.params in
+    List.fold_right2_exn
+      common_info
+      params_except_last
+      ~init:(_v, [])
+      ~f:(fun z p (_v, info_list) ->
+        let _qu, _qx =
+          let tmp = maybe_add _v (maybe_einsum (z._V, "mab") (p._f, "kmb") "kma") in
+          ( maybe_add p._cu (maybe_prod p.common._Fu_prod_tangent tmp)
+          , maybe_add p._cx (maybe_prod p.common._Fx_prod_tangent tmp) )
+        in
+        let n_tangents, bs =
+          List.hd_exn (maybe_shape p._f), List.nth_exn (maybe_shape p._f) 1
+        in
+        (* compute LQR gain parameters to be used in the subsequent fwd pass *)
+        let _k =
+          (* shape [km x b x b ]*)
+          let _quu_chol_expanded =
+            List.init n_tangents ~f:(fun _ ->
+              unsqueeze (Option.value_exn z._Quu_chol) ~dim:0)
+            |> concat_list ~dim:0
+          in
+          let _quu_chol_squeezed =
+            Some
+              (reshape
+                 _quu_chol_expanded
+                 ~shape:
+                   (Int.(n_tangents * bs)
+                    :: [ List.last_exn (shape _quu_chol_expanded)
+                       ; List.last_exn (shape _quu_chol_expanded)
+                       ]))
+          in
+          let _quu_chol_squeezed_T = maybe_btr _quu_chol_squeezed in
+          (* shape [km x b] *)
+          let _qu_squeezed = maybe_reshape _qu ~shape:[ Int.(n_tangents * bs); -1 ] in
+          let _k_squeezed =
+            neg_inv_symm
+              ~is_vector:true
+              _qu_squeezed
+              (_quu_chol_squeezed, _quu_chol_squeezed_T)
+          in
+          maybe_reshape _k_squeezed ~shape:[ n_tangents; bs; -1 ]
+        in
+        (* update the value function *)
+        let _v = maybe_add _qx (maybe_einsum (z._K, "mba") (_qu, "kmb") "kma") in
+        _v, { _k; _K = z._K } :: info_list)
+  in
+  info
 
 let forward params backward_info =
   let open Params in
+  (* u goes from 0 to T-1, x goes from 1 to T *)
   let _, solution =
+    let params_except_last = List.drop_last_exn params.params in
     List.fold2_exn
-      params.params
+      params_except_last
       backward_info
       ~init:(params.x0, [])
       ~f:(fun (x, accu) p b ->
         (* compute the optimal control inputs *)
-        let u = maybe_add b._k (maybe_einsum (x, "au") (b._K, "ayu") "ay") in
+        let u = maybe_add b._k (maybe_einsum (x, "ma") (b._K, "mba") "mb") in
         (* fold them into the state update *)
         let x =
           maybe_add
@@ -149,9 +221,38 @@ let forward params backward_info =
   in
   List.rev solution
 
+let forward_tangents params backward_info =
+  let open Params in
+  let _, solution =
+    let params_except_last = List.drop_last_exn params.params in
+    List.fold2_exn
+      params_except_last
+      backward_info
+      ~init:(params.x0, [])
+      ~f:(fun (x, accu) p b ->
+        (* compute the optimal control inputs *)
+        let u = maybe_add b._k (maybe_einsum (x, "kma") (b._K, "mba") "kmb") in
+        (* fold them into the state update *)
+        let x =
+          maybe_add
+            p._f
+            (maybe_add
+               (maybe_prod p.common._Fx_prod2_tangent x)
+               (maybe_prod p.common._Fu_prod2_tangent u))
+        in
+        x, Solution.{ u; x } :: accu)
+  in
+  List.rev solution
+
 let _solve p =
   let common_info = backward_common (List.map p.Params.params ~f:(fun x -> x.common)) in
   backward common_info p |> forward p
+
+(* when the surrogate parameters come from the tangents of the problem,
+   special care needs to be taken to deal with the extra k dimension in front of some parameters *)
+let _solve_tangents p =
+  let common_info = backward_common (List.map p.Params.params ~f:(fun x -> x.common)) in
+  backward_tangents common_info p |> forward_tangents p
 
 (* surrogate rhs for the tangent problem; s is the solution obtained from lqr through the primals and p is the full set
    of parameters *)
@@ -172,21 +273,37 @@ let surrogate_rhs
        | None -> None
        | Some tangent -> Some (Maths.const tangent))
   in
+  (* create new list and foldi is necessary since u goes from 0 to T-1 but x goes from 1 to T in solution *)
+  let n_steps = Int.(List.length p.params - 1) in
+  let n_steps_list = List.range 0 Int.(n_steps + 1) in
   let _cx_cu_surro, _ =
-    List.fold_right2_exn
-      s
-      p.params
+    List.fold_right
+      n_steps_list
       ~init:([], None)
-      ~f:(fun s_curr params_curr (_cx_cu_surro_accu, lambda_next) ->
-        let x_curr, u_curr = s_curr.x, s_curr.u in
+      ~f:(fun i (_cx_cu_surro_accu, lambda_next) ->
+        let x_curr =
+          if i = 0
+          then _p_primal p.x0
+          else (
+            let tmp = List.nth_exn s Int.(i - 1) in
+            tmp.x)
+        in
+        let u_curr =
+          if i = n_steps
+          then None
+          else (
+            let tmp = List.nth_exn s i in
+            tmp.u)
+        in
+        let params_curr = List.nth_exn p.params i in
         let _dCxx_curr = _p_tangent params_curr.common._Cxx in
         let _dCxu_curr = _p_tangent params_curr.common._Cxu in
         let _dcx_curr = _p_tangent params_curr._cx in
         let _dCuu_curr = _p_tangent params_curr.common._Cuu in
         let _dcu_curr = _p_tangent params_curr._cu in
         let _cx_surro_curr =
-          let tmp1 = maybe_einsum (x_curr, "ma") (_dCxx_curr, "kmab") "kmb" in
-          let tmp2 = maybe_einsum (u_curr, "ma") (_dCxu_curr, "kmba") "kmb" in
+          let tmp1 = maybe_einsum (x_curr, "mb") (_dCxx_curr, "kmba") "kma" in
+          let tmp2 = maybe_einsum (u_curr, "mb") (_dCxu_curr, "kmab") "kma" in
           let common = maybe_add (maybe_add tmp1 tmp2) _dcx_curr in
           match lambda_next with
           | None -> common
@@ -209,33 +326,52 @@ let surrogate_rhs
             maybe_add common tmp3
         in
         let lambda_curr =
-          let tmp1 =
+          let common =
             let _Cxx_curr = _p_primal params_curr.common._Cxx in
-            let _Cx_curr = _p_primal params_curr._cx in
-            maybe_force _Cx_curr x_curr _Cxx_curr
+            let _cx_curr = _p_primal params_curr._cx in
+            maybe_force _cx_curr _Cxx_curr x_curr
           in
-          let tmp2 =
-            let _Cxu_curr = _p_primal params_curr.common._Cxu in
-            maybe_einsum (u_curr, "mb") (_Cxu_curr, "mab") "ma"
-          in
-          let common = maybe_add tmp1 tmp2 in
           match lambda_next with
           | None -> common
           | Some lambda_next ->
+            let tmp2 =
+              let _Cxu_curr = _p_primal params_curr.common._Cxu in
+              maybe_einsum (u_curr, "mb") (_Cxu_curr, "mab") "ma"
+            in
             let tmp3 =
               maybe_prod (_p_implicit_primal params_curr.common._Fx_prod2) lambda_next
             in
-            maybe_add common tmp3
+            maybe_add common (maybe_add tmp2 tmp3)
         in
         (_cx_surro_curr, _cu_surro_curr) :: _cx_cu_surro_accu, Some lambda_curr)
   in
   let _f_surro =
-    List.map2_exn p.params s ~f:(fun params_curr s_curr ->
-      let x_curr, u_curr = s_curr.x, s_curr.u in
+    List.mapi p.params ~f:(fun i params_curr ->
+      let x_curr =
+        if i = 0
+        then _p_primal p.x0
+        else (
+          let s_curr = List.nth_exn s Int.(i - 1) in
+          s_curr.x)
+      in
+      let u_curr =
+        if i = n_steps
+        then None
+        else (
+          let s_curr = List.nth_exn s i in
+          s_curr.u)
+      in
       let tmp1 = maybe_prod (_p_implicit_tangent params_curr.common._Fx_prod2) x_curr in
       let tmp2 = maybe_prod (_p_implicit_tangent params_curr.common._Fu_prod2) u_curr in
       maybe_add (maybe_add tmp1 tmp2) (_p_primal params_curr._f))
   in
+  (* let _f_surro =
+     List.map2_exn p.params s ~f:(fun params_curr s_curr ->
+     let x_curr, u_curr = s_curr.x, s_curr.u in
+     let tmp1 = maybe_prod (_p_implicit_tangent params_curr.common._Fx_prod2) x_curr in
+     let tmp2 = maybe_prod (_p_implicit_tangent params_curr.common._Fu_prod2) u_curr in
+     maybe_add (maybe_add tmp1 tmp2) (_p_primal params_curr._f))
+     in *)
   let p_tangent =
     Params.
       { x0 = _p_tangent p.x0
@@ -249,6 +385,10 @@ let surrogate_rhs
                   ; _Fx_prod2 = _p_implicit_primal p.common._Fx_prod2
                   ; _Fu_prod = _p_implicit_primal p.common._Fu_prod
                   ; _Fu_prod2 = _p_implicit_primal p.common._Fu_prod
+                  ; _Fx_prod_tangent = _p_implicit_primal p.common._Fx_prod_tangent
+                  ; _Fx_prod2_tangent = _p_implicit_primal p.common._Fx_prod2_tangent
+                  ; _Fu_prod_tangent = _p_implicit_primal p.common._Fu_prod_tangent
+                  ; _Fu_prod2_tangent = _p_implicit_primal p.common._Fu_prod2_tangent
                   ; _Cxx = _p_primal p.common._Cxx
                   ; _Cuu = _p_primal p.common._Cuu
                   ; _Cxu = _p_primal p.common._Cxu
@@ -274,7 +414,11 @@ let solve p =
                 { _Fx_prod = _p_implicit p.common._Fx_prod
                 ; _Fx_prod2 = _p_implicit p.common._Fx_prod2
                 ; _Fu_prod = _p_implicit p.common._Fu_prod
-                ; _Fu_prod2 = _p_implicit p.common._Fu_prod
+                ; _Fu_prod2 = _p_implicit p.common._Fu_prod2
+                ; _Fx_prod_tangent = _p_implicit p.common._Fx_prod_tangent
+                ; _Fx_prod2_tangent = _p_implicit p.common._Fx_prod2_tangent
+                ; _Fu_prod_tangent = _p_implicit p.common._Fu_prod_tangent
+                ; _Fu_prod2_tangent = _p_implicit p.common._Fu_prod_tangent
                 ; _Cxx = _p p.common._Cxx
                 ; _Cuu = _p p.common._Cuu
                 ; _Cxu = _p p.common._Cxu
@@ -292,7 +436,7 @@ let solve p =
   let s = backward common_info p_primal |> forward p_primal in
   (* SOLVE THE TANGENT PROBLEM, reusing what's common *)
   let surrogate = surrogate_rhs s p in
-  let s_tangents = _solve surrogate in
+  let s_tangents = _solve_tangents surrogate in
   (* MANUALLY PAIR UP PRIMAL AND TANGENTS OF THE SOLUTION *)
   List.map2_exn s s_tangents ~f:(fun s st ->
     let zip a at =

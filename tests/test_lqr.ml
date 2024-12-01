@@ -4,43 +4,7 @@ open Forward_torch
 module Arr = Owl.Arr
 module Mat = Owl.Mat
 module Linalg = Owl.Linalg.D
-
-let print s = Stdio.print_endline (Sexp.to_string_hum s)
-let device = Torch.Device.Cpu
-let kind = Torch_core.Kind.(T f64)
-let rel_tol = Alcotest.float 1e-4
-let n_tests = 20
-
-module Temp = struct
-  type ('a, 'o) p =
-    { _f : 'o
-    ; _Fx_prod : 'a
-    ; _Fu_prod : 'a
-    ; _cx : 'o
-    ; _cu : 'o
-    ; _Cxx : 'a
-    ; _Cxu : 'o
-    ; _Cuu : 'a
-    }
-  [@@deriving prms]
-end
-
-module O = Prms.Option (Prms.P)
-module Input = Lqr.Params.Make (O) (Prms.List (Temp.Make (Prms.P) (O)))
-module Output = Prms.List (Lqr.Solution.Make (O))
-
-let bmm a b =
-  let open Maths in
-  match List.length (shape b) with
-  | 3 -> einsum [ a, "aij"; b, "ajk" ] "aik"
-  | 2 -> einsum [ a, "aij"; b, "aj" ] "ai"
-  | _ -> failwith "not batch multipliable"
-
-let bmm2 b a =
-  let open Maths in
-  match List.length (shape a) with
-  | 2 -> einsum [ a, "ai"; b, "aij" ] "aj"
-  | _ -> failwith "should not happen"
+open Lqr_common
 
 let f (x : Input.M.t) : Output.M.t =
   let x =
@@ -52,6 +16,10 @@ let f (x : Input.M.t) : Output.M.t =
               ; _Fx_prod2 = Some (bmm2 p._Fx_prod)
               ; _Fu_prod = Some (bmm p._Fu_prod)
               ; _Fu_prod2 = Some (bmm2 p._Fu_prod)
+              ; _Fx_prod_tangent = Some (bmm_tangent_F p._Fx_prod)
+              ; _Fx_prod2_tangent = Some (bmm2_tangent_F p._Fx_prod)
+              ; _Fu_prod_tangent = Some (bmm_tangent_F p._Fu_prod)
+              ; _Fu_prod2_tangent = Some (bmm2_tangent_F p._Fu_prod)
               ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
               ; _Cxu = p._Cxu
               ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
@@ -65,37 +33,8 @@ let f (x : Input.M.t) : Output.M.t =
   in
   Lqr._solve x
 
-  
-
-let tmax = 10
-let bs = 7
-let n = 5
-let m = 3
-
-let a () =
-  Array.init bs ~f:(fun _ ->
-    let a = Mat.gaussian n n in
-    let r =
-      a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
-    in
-    Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; n; n |])
-  |> Arr.concatenate ~axis:0
-  |> Tensor.of_bigarray ~device
-
-let b () = Arr.gaussian [| bs; m; n |] |> Tensor.of_bigarray ~device
-
-let q_of ~reg d =
-  Array.init bs ~f:(fun _ ->
-    let ell = Mat.gaussian d d in
-    Arr.reshape Mat.(add_diag (ell *@ transpose ell) reg) [| 1; d; d |])
-  |> Arr.concatenate ~axis:0
-  |> Tensor.of_bigarray ~device
-
-let q_xx () = q_of ~reg:0.1 n
-let q_uu () = q_of ~reg:0.1 m
-let _f () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
-let _cx () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
-let _cu () = Arr.gaussian [| bs; m |] |> Tensor.of_bigarray ~device
+let rel_tol = Alcotest.float 1e-4
+let n_tests = 20
 
 let check_grad (x : Input.T.t) =
   let module F = Framework.Make (Input) (Output) in
@@ -118,7 +57,7 @@ let test_LQR () =
                ; _Cuu = q_uu ()
                }
            in
-           List.init 3 ~f:(fun _ -> tmp ()))
+           List.init (tmax + 1) ~f:(fun _ -> tmp ()))
       }
   in
   let _, _, e = check_grad x in

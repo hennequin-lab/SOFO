@@ -17,14 +17,19 @@ type ('a, 'prod) momentary_params_common =
   ; _Fx_prod2 : 'prod option (* vA product *)
   ; _Fu_prod : 'prod option (* Bv produt *)
   ; _Fu_prod2 : 'prod option (* vB product *)
+  ; _Fx_prod_tangent :
+      'prod option (* Av product, where the leading dim of v is the tangent dim *)
+  ; _Fx_prod2_tangent : 'prod option (* vA product *)
+  ; _Fu_prod_tangent : 'prod option (* Bv produt *)
+  ; _Fu_prod2_tangent : 'prod option (* vB product *)
   ; _Cxx : 'a option
   ; _Cxu : 'a option
   ; _Cuu : 'a option
   }
 
 (* everything has to be optional, because
-   perhaps none of those input parameters will have tangents. 
-   commpn refers to what is commoro both primal and tangent LQR problems. *)
+   perhaps none of those input parameters will have tangents.
+   common refers to what is commoro both primal and tangent LQR problems. *)
 type ('a, 'prod) momentary_params =
   { common : ('a, 'prod) momentary_params_common
   ; _f : 'a option
@@ -32,6 +37,7 @@ type ('a, 'prod) momentary_params =
   ; _cu : 'a option
   }
 
+(* params starts at time idx 0 and ends at time index T. Note that at time index T only _Cxx and _cx is used *)
 module Params = struct
   type ('a, 'p) p =
     { x0 : 'a
