@@ -5,6 +5,12 @@ module Arr = Owl.Arr
 module Mat = Owl.Mat
 module Linalg = Owl.Linalg.D
 
+let _ =
+  Random.init 1999;
+  (* Random.self_init (); *)
+  Owl_stats_prng.init (Random.int 100000);
+  Torch_core.Wrapper.manual_seed (Random.int 100000)
+
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
 let device = Torch.Device.Cpu
 let kind = Torch_core.Kind.(T f64)
@@ -85,7 +91,7 @@ let bmm2_tangent_Fv b a =
   | 3 -> einsum [ a, "kma"; b, "kmab" ] "kmb"
   | _ -> failwith "should not happen"
 
-let tmax = 3
+let tmax = 12
 let bs = 7
 let n = 5
 let m = 3
@@ -114,59 +120,3 @@ let q_uu () = q_of ~reg:0.1 m
 let _f () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
 let _cx () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
 let _cu () = Arr.gaussian [| bs; m |] |> Tensor.of_bigarray ~device
-let k = 12
-
-let x0 =
-  let pri = Tensor.rand ~kind ~device [ bs; n ] in
-  let tan = Tensor.randn ~kind ~device [ k; bs; n ] in
-  Maths.make_dual pri ~t:(Maths.Direct tan)
-
-let fx () =
-  let pri = Tensor.randn ~kind ~device [ bs; n; n ] in
-  let tan = Tensor.randn ~kind ~device [ k; bs; n; n ] in
-  Maths.make_dual pri ~t:(Maths.Direct tan)
-
-let fu () =
-  let pri = Tensor.randn ~kind ~device [ bs; m; n ] in
-  let tan = Tensor.randn ~kind ~device [ k; bs; m; n ] in
-  Maths.make_dual pri ~t:(Maths.Direct tan)
-
-let prod f : Maths.t Lqr.prod =
-  let primal = bmm (Maths.const (Maths.primal f)) in
-  (* tangent on f only *)
-  let tangent = bmm_tangent_F (Maths.const (Option.value_exn (Maths.tangent f))) in
-  { primal; tangent }
-
-let prod_tangent f : Maths.t Lqr.prod =
-  (* tangent on v only *)
-  let primal = bmm_tangent_v (Maths.const (Maths.primal f)) in
-  let tangent = bmm_tangent_Fv (Maths.const (Option.value_exn (Maths.tangent f))) in
-  { primal; tangent }
-
-let prod2 f : Maths.t Lqr.prod =
-  let primal = bmm2 (Maths.const (Maths.primal f)) in
-  let tangent = bmm2_tangent_F (Maths.const (Option.value_exn (Maths.tangent f))) in
-  { primal; tangent }
-
-let prod2_tangent f : Maths.t Lqr.prod =
-  let primal = bmm2_tangent_v (Maths.const (Maths.primal f)) in
-  let tangent = bmm2_tangent_Fv (Maths.const (Option.value_exn (Maths.tangent f))) in
-  { primal; tangent }
-
-let _Fx_prod fx = prod fx
-let _Fx_prod2 fx = prod2 fx
-let _Fx_prod_tangent fx = prod_tangent fx
-let _Fx_prod2_tangent fx = prod2_tangent fx
-let _Fu_prod fu = prod fu
-let _Fu_prod2 fu = prod2 fu
-let _Fu_prod_tangent fu = prod_tangent fu
-let _Fu_prod2_tangent fu = prod2_tangent fu
-
-let q_of_tan ~reg d =
-  Array.init k ~f:(fun _ ->
-    Array.init bs ~f:(fun _ ->
-      let ell = Mat.gaussian d d in
-      Arr.reshape Mat.(add_diag (ell *@ transpose ell) reg) [| 1; 1; d; d |])
-    |> Arr.concatenate ~axis:1)
-  |> Arr.concatenate ~axis:0
-  |> Tensor.of_bigarray ~device

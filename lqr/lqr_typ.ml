@@ -7,7 +7,7 @@ open Forward_torch
 
 type 'a prod =
   { primal : 'a -> 'a
-  ; tangent : 'a -> 'a
+  ; tangent : ('a -> 'a) option
   }
 
 (* everything has to be optional, because

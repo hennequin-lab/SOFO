@@ -7,6 +7,8 @@ module Mat = Owl.Mat
 module Linalg = Owl.Linalg.D
 open Lqr_common
 
+let rel_tol = Alcotest.float 1e-4
+let n_tests = 20
 let k = 12
 
 let x0 =
@@ -27,24 +29,39 @@ let fu () =
 let prod f : Maths.t Lqr.prod =
   let primal = bmm (Maths.const (Maths.primal f)) in
   (* tangent on f only *)
-  let tangent = bmm_tangent_F (Maths.const (Option.value_exn (Maths.tangent f))) in
+  let tangent =
+    match Maths.tangent f with
+    | None -> None
+    | Some df -> Some (bmm_tangent_F (Maths.const df))
+  in
   { primal; tangent }
 
 let prod_tangent f : Maths.t Lqr.prod =
   (* tangent on v only *)
   let primal = bmm_tangent_v (Maths.const (Maths.primal f)) in
-  (* tangent on both F and v *)
-  let tangent = bmm_tangent_Fv (Maths.const (Option.value_exn (Maths.tangent f))) in
+  let tangent =
+    match Maths.tangent f with
+    | None -> None
+    | Some df -> Some (bmm_tangent_Fv (Maths.const df))
+  in
   { primal; tangent }
 
 let prod2 f : Maths.t Lqr.prod =
   let primal = bmm2 (Maths.const (Maths.primal f)) in
-  let tangent = bmm2_tangent_F (Maths.const (Option.value_exn (Maths.tangent f))) in
+  let tangent =
+    match Maths.tangent f with
+    | None -> None
+    | Some df -> Some (bmm2_tangent_F (Maths.const df))
+  in
   { primal; tangent }
 
 let prod2_tangent f : Maths.t Lqr.prod =
   let primal = bmm2_tangent_v (Maths.const (Maths.primal f)) in
-  let tangent = bmm2_tangent_Fv (Maths.const (Option.value_exn (Maths.tangent f))) in
+  let tangent =
+    match Maths.tangent f with
+    | None -> None
+    | Some df -> Some (bmm2_tangent_Fv (Maths.const df))
+  in
   { primal; tangent }
 
 let _Fx_prod fx = prod fx
@@ -107,10 +124,10 @@ let f_naive (x : Input.M.t) : Output.M.t =
               ; _Fx_prod2 = Some (bmm2 p._Fx_prod)
               ; _Fu_prod = Some (bmm p._Fu_prod)
               ; _Fu_prod2 = Some (bmm2 p._Fu_prod)
-              ; _Fx_prod_tangent = Some (bmm_tangent_F p._Fx_prod)
-              ; _Fx_prod2_tangent = Some (bmm2_tangent_F p._Fx_prod)
-              ; _Fu_prod_tangent = Some (bmm_tangent_F p._Fu_prod)
-              ; _Fu_prod2_tangent = Some (bmm2_tangent_F p._Fu_prod)
+              ; _Fx_prod_tangent = Some (bmm_tangent_v p._Fx_prod)
+              ; _Fx_prod2_tangent = Some (bmm2_tangent_v p._Fx_prod)
+              ; _Fu_prod_tangent = Some (bmm_tangent_v p._Fu_prod)
+              ; _Fu_prod2_tangent = Some (bmm2_tangent_v p._Fu_prod)
               ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
               ; _Cxu = p._Cxu
               ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
@@ -151,12 +168,48 @@ let f_implicit (x : Input.M.t) =
   in
   Lqr.solve x
 
-(* test whether the tangents agree *)
-let lqr_naive = f_naive common_params
-let lqr_implicit = f_implicit common_params
+let check_implicit common_params =
+  let lqr_naive = f_naive common_params in
+  let lqr_implicit = f_implicit common_params in
+  let x_error =
+    List.fold2_exn lqr_naive lqr_implicit ~init:0. ~f:(fun acc naive implicit ->
+      let x_naive = naive.x |> Option.value_exn in
+      let x_implicit = implicit.x in
+      let error =
+        Tensor.(
+          norm (Option.value_exn Maths.(tangent (x_naive - x_implicit))) |> to_float0_exn)
+      in
+      acc +. error)
+  in
+  x_error
 
-let _ =
-  List.iter2_exn lqr_naive lqr_implicit ~f:(fun naive implicit ->
-    let x_naive = naive.x |> Option.value_exn in
-    let x_implicit = implicit.x in
-    Tensor.(print (norm (Option.value_exn Maths.(tangent (x_naive - x_implicit))))))
+(* test whether the tangents agree *)
+let test_LQR () =
+  let common_params =
+    Lqr.Params.
+      { x0 = Some x0
+      ; params =
+          (let tmp () =
+             Temp.
+               { _f = None
+               ; _Fx_prod = fx ()
+               ; _Fu_prod = fu ()
+               ; _cx = None
+               ; _cu = None
+               ; _Cxx = q_xx ()
+               ; _Cxu = None
+               ; _Cuu = q_uu ()
+               }
+           in
+           List.init (tmax + 1) ~f:(fun _ -> tmp ()))
+      }
+  in
+  let e = check_implicit common_params in
+  Alcotest.(check @@ rel_tol) "LQR test" 0.0 e
+
+let () =
+  let open Alcotest in
+  run
+    "LQR tests"
+    [ "Check implicit", List.init n_tests ~f:(fun _ -> test_case "Simple" `Quick test_LQR)
+    ]

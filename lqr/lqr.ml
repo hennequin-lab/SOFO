@@ -77,7 +77,7 @@ let neg_inv_symm ~is_vector _b (ell, ell_T) =
       else Option.map _b ~f:(fun x -> reshape x ~shape:(shape x @ [ 1 ]))
     in
     let _y = Option.map _b ~f:(linsolve_triangular ~left:true ~upper:false ell) in
-    Option.map _y ~f:(linsolve_triangular ~left:true ~upper:true ell_T)
+    Option.map _y ~f:(fun x -> linsolve_triangular ~left:true ~upper:true ell_T x |> neg)
   | _ -> None
 
 (* backward recursion: all the (most expensive) common bits *)
@@ -248,12 +248,6 @@ let _solve p =
   let common_info = backward_common (List.map p.Params.params ~f:(fun x -> x.common)) in
   backward common_info p |> forward p
 
-(* when the surrogate parameters come from the tangents of the problem,
-   special care needs to be taken to deal with the extra k dimension in front of some parameters *)
-let _solve_tangents p =
-  let common_info = backward_common (List.map p.Params.params ~f:(fun x -> x.common)) in
-  backward_tangents common_info p |> forward_tangents p
-
 (* surrogate rhs for the tangent problem; s is the solution obtained from lqr through the primals and p is the full set
    of parameters *)
 let surrogate_rhs
@@ -262,7 +256,12 @@ let surrogate_rhs
   : (t option, (t, t -> t) momentary_params list) Params.p
   =
   let _p_implicit_primal = Option.map ~f:(fun x -> x.primal) in
-  let _p_implicit_tangent = Option.map ~f:(fun x -> x.tangent) in
+  let _p_implicit_tangent x =
+    let tmp = Option.map x ~f:(fun x -> x.tangent) in
+    match tmp with
+    | Some a -> a
+    | None _ -> None
+  in
   let _p_primal = Option.map ~f:(fun x -> Maths.const (Maths.primal x)) in
   let _p_tangent x =
     match x with
@@ -276,6 +275,7 @@ let surrogate_rhs
   (* create new list and foldi is necessary since u goes from 0 to T-1 but x goes from 1 to T in solution *)
   let n_steps = Int.(List.length p.params - 1) in
   let n_steps_list = List.range 0 Int.(n_steps + 1) in
+  (* this list goes from 0 to T *)
   let _cx_cu_surro, _ =
     List.fold_right
       n_steps_list
@@ -302,28 +302,34 @@ let surrogate_rhs
         let _dCuu_curr = _p_tangent params_curr.common._Cuu in
         let _dcu_curr = _p_tangent params_curr._cu in
         let _cx_surro_curr =
-          let tmp1 = maybe_einsum (x_curr, "mb") (_dCxx_curr, "kmba") "kma" in
-          let tmp2 = maybe_einsum (u_curr, "mb") (_dCxu_curr, "kmab") "kma" in
-          let common = maybe_add (maybe_add tmp1 tmp2) _dcx_curr in
-          match lambda_next with
-          | None -> common
-          | Some lambda_next ->
-            let tmp3 =
-              maybe_prod (_p_implicit_primal params_curr.common._Fx_prod) lambda_next
-            in
-            maybe_add common tmp3
+          if i = 0
+          then None
+          else (
+            let tmp1 = maybe_einsum (x_curr, "mb") (_dCxx_curr, "kmba") "kma" in
+            let tmp2 = maybe_einsum (u_curr, "mb") (_dCxu_curr, "kmab") "kma" in
+            let common = maybe_add (maybe_add tmp1 tmp2) _dcx_curr in
+            match lambda_next with
+            | None -> common
+            | Some lambda_next ->
+              let tmp3 =
+                maybe_prod (_p_implicit_tangent params_curr.common._Fx_prod) lambda_next
+              in
+              maybe_add common tmp3)
         in
         let _cu_surro_curr =
-          let tmp1 = maybe_einsum (u_curr, "ma") (_dCuu_curr, "kmab") "kmb" in
-          let tmp2 = maybe_einsum (x_curr, "ma") (_dCxu_curr, "kmab") "kmb" in
-          let common = maybe_add (maybe_add tmp1 tmp2) _dcu_curr in
-          match lambda_next with
-          | None -> common
-          | Some lambda_next ->
-            let tmp3 =
-              maybe_prod (_p_implicit_primal params_curr.common._Fu_prod) lambda_next
-            in
-            maybe_add common tmp3
+          if i = n_steps
+          then None
+          else (
+            let tmp1 = maybe_einsum (u_curr, "ma") (_dCuu_curr, "kmab") "kmb" in
+            let tmp2 = maybe_einsum (x_curr, "ma") (_dCxu_curr, "kmab") "kmb" in
+            let common = maybe_add (maybe_add tmp1 tmp2) _dcu_curr in
+            match lambda_next with
+            | None -> common
+            | Some lambda_next ->
+              let tmp3 =
+                maybe_prod (_p_implicit_tangent params_curr.common._Fu_prod) lambda_next
+              in
+              maybe_add common tmp3)
         in
         let lambda_curr =
           let common =
@@ -339,7 +345,7 @@ let surrogate_rhs
               maybe_einsum (u_curr, "mb") (_Cxu_curr, "mab") "ma"
             in
             let tmp3 =
-              maybe_prod (_p_implicit_primal params_curr.common._Fx_prod2) lambda_next
+              maybe_prod (_p_implicit_primal params_curr.common._Fx_prod) lambda_next
             in
             maybe_add common (maybe_add tmp2 tmp3)
         in
@@ -363,15 +369,10 @@ let surrogate_rhs
       in
       let tmp1 = maybe_prod (_p_implicit_tangent params_curr.common._Fx_prod2) x_curr in
       let tmp2 = maybe_prod (_p_implicit_tangent params_curr.common._Fu_prod2) u_curr in
-      maybe_add (maybe_add tmp1 tmp2) (_p_primal params_curr._f))
+      if i = n_steps
+      then None
+      else maybe_add (maybe_add tmp1 tmp2) (_p_tangent params_curr._f))
   in
-  (* let _f_surro =
-     List.map2_exn p.params s ~f:(fun params_curr s_curr ->
-     let x_curr, u_curr = s_curr.x, s_curr.u in
-     let tmp1 = maybe_prod (_p_implicit_tangent params_curr.common._Fx_prod2) x_curr in
-     let tmp2 = maybe_prod (_p_implicit_tangent params_curr.common._Fu_prod2) u_curr in
-     maybe_add (maybe_add tmp1 tmp2) (_p_primal params_curr._f))
-     in *)
   let p_tangent =
     Params.
       { x0 = _p_tangent p.x0
@@ -384,7 +385,7 @@ let surrogate_rhs
                   { _Fx_prod = _p_implicit_primal p.common._Fx_prod
                   ; _Fx_prod2 = _p_implicit_primal p.common._Fx_prod2
                   ; _Fu_prod = _p_implicit_primal p.common._Fu_prod
-                  ; _Fu_prod2 = _p_implicit_primal p.common._Fu_prod
+                  ; _Fu_prod2 = _p_implicit_primal p.common._Fu_prod2
                   ; _Fx_prod_tangent = _p_implicit_primal p.common._Fx_prod_tangent
                   ; _Fx_prod2_tangent = _p_implicit_primal p.common._Fx_prod2_tangent
                   ; _Fu_prod_tangent = _p_implicit_primal p.common._Fu_prod_tangent
@@ -418,7 +419,7 @@ let solve p =
                 ; _Fx_prod_tangent = _p_implicit p.common._Fx_prod_tangent
                 ; _Fx_prod2_tangent = _p_implicit p.common._Fx_prod2_tangent
                 ; _Fu_prod_tangent = _p_implicit p.common._Fu_prod_tangent
-                ; _Fu_prod2_tangent = _p_implicit p.common._Fu_prod_tangent
+                ; _Fu_prod2_tangent = _p_implicit p.common._Fu_prod2_tangent
                 ; _Cxx = _p p.common._Cxx
                 ; _Cuu = _p p.common._Cuu
                 ; _Cxu = _p p.common._Cxu
@@ -436,7 +437,9 @@ let solve p =
   let s = backward common_info p_primal |> forward p_primal in
   (* SOLVE THE TANGENT PROBLEM, reusing what's common *)
   let surrogate = surrogate_rhs s p in
-  let s_tangents = _solve_tangents surrogate in
+  let s_tangents =
+    backward_tangents common_info surrogate |> forward_tangents surrogate
+  in
   (* MANUALLY PAIR UP PRIMAL AND TANGENTS OF THE SOLUTION *)
   List.map2_exn s s_tangents ~f:(fun s st ->
     let zip a at =
