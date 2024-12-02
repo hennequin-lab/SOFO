@@ -43,7 +43,7 @@ let check_grad (x : Input.T.t) =
 let test_LQR () =
   let x =
     Lqr.Params.
-      { x0 = Some (Tensor.randn ~kind ~device [ bs; n ])
+      { x0 = Some (Tensor.randn ~kind ~device [ m; a_dim ])
       ; params =
           (let tmp () =
              Temp.

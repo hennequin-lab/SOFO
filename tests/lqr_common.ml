@@ -5,7 +5,6 @@ module Arr = Owl.Arr
 module Mat = Owl.Mat
 module Linalg = Owl.Linalg.D
 
-
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
 let device = Torch.Device.Cpu
 let kind = Torch_core.Kind.(T f64)
@@ -87,32 +86,32 @@ let bmm2_tangent_Fv b a =
   | _ -> failwith "should not happen"
 
 let tmax = 12
-let bs = 7
-let n = 5
-let m = 3
+let m = 7
+let a_dim = 5
+let b_dim = 3
 
 let a () =
-  Array.init bs ~f:(fun _ ->
-    let a = Mat.gaussian n n in
+  Array.init m ~f:(fun _ ->
+    let a = Mat.gaussian a_dim a_dim in
     let r =
       a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
     in
-    Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; n; n |])
+    Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; a_dim; a_dim |])
   |> Arr.concatenate ~axis:0
   |> Tensor.of_bigarray ~device
 
-let b () = Arr.gaussian [| bs; m; n |] |> Tensor.of_bigarray ~device
+let b () = Arr.gaussian [| m; b_dim; a_dim |] |> Tensor.of_bigarray ~device
 
 let q_of ~reg d =
-  Array.init bs ~f:(fun _ ->
+  Array.init m ~f:(fun _ ->
     let ell = Mat.gaussian d d in
     Arr.reshape Mat.(add_diag (ell *@ transpose ell) reg) [| 1; d; d |])
   |> Arr.concatenate ~axis:0
   |> Tensor.of_bigarray ~device
 
-let q_xx () = q_of ~reg:1. n
-let q_uu () = q_of ~reg:1. m
-let _f () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
-let _cx () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
-let _cu () = Arr.gaussian [| bs; m |] |> Tensor.of_bigarray ~device
-let _cxu () = Arr.gaussian [| bs; n; m |] |> Tensor.of_bigarray ~device
+let q_xx () = q_of ~reg:1. a_dim
+let q_uu () = q_of ~reg:1. b_dim
+let _f () = Arr.gaussian [| m; a_dim |] |> Tensor.of_bigarray ~device
+let _cx () = Arr.gaussian [| m; a_dim |] |> Tensor.of_bigarray ~device
+let _cu () = Arr.gaussian [| m; b_dim |] |> Tensor.of_bigarray ~device
+let _cxu () = Arr.gaussian [| m; a_dim; b_dim |] |> Tensor.of_bigarray ~device
