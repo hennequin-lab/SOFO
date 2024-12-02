@@ -95,24 +95,25 @@ let q_uu () =
   let tan = dq_uu () in
   Maths.make_dual pri ~t:(Maths.Direct tan)
 
-let common_params =
-  Lqr.Params.
-    { x0 = Some x0
-    ; params =
-        (let tmp () =
-           Temp.
-             { _f = None
-             ; _Fx_prod = fx ()
-             ; _Fu_prod = fu ()
-             ; _cx = None
-             ; _cu = None
-             ; _Cxx = q_xx ()
-             ; _Cxu = None
-             ; _Cuu = q_uu ()
-             }
-         in
-         List.init (tmax + 1) ~f:(fun _ -> tmp ()))
-    }
+let c_xu () =
+  let pri = _cxu () in
+  let tan = Arr.gaussian [| k; bs; n; m |] |> Tensor.of_bigarray ~device in
+  Maths.make_dual pri ~t:(Maths.Direct tan)
+
+let c_x () =
+  let pri = _cx () in
+  let tan = Arr.gaussian [| k; bs; n |] |> Tensor.of_bigarray ~device in
+  Maths.make_dual pri ~t:(Maths.Direct tan)
+
+let c_u () =
+  let pri = _cu () in
+  let tan = Arr.gaussian [| k; bs; m |] |> Tensor.of_bigarray ~device in
+  Maths.make_dual pri ~t:(Maths.Direct tan)
+
+let f () =
+  let pri = _f () in
+  let tan = Arr.gaussian [| k; bs; n |] |> Tensor.of_bigarray ~device in
+  Maths.make_dual pri ~t:(Maths.Direct tan)
 
 let f_naive (x : Input.M.t) : Output.M.t =
   let x =
@@ -184,6 +185,26 @@ let check_implicit common_params =
   x_error
 
 (* test whether the tangents agree *)
+
+let common_params =
+  Lqr.Params.
+    { x0 = Some x0
+    ; params =
+        (let tmp () =
+           Temp.
+             { _f = f ()
+             ; _Fx_prod = fx ()
+             ; _Fu_prod = fu ()
+             ; _cx = c_x ()
+             ; _cu = c_u ()
+             ; _Cxx = q_xx ()
+             ; _Cxu = c_xu ()
+             ; _Cuu = q_uu ()
+             }
+         in
+         List.init (tmax + 1) ~f:(fun _ -> tmp ()))
+    }
+
 let test_LQR () =
   let common_params =
     Lqr.Params.
@@ -191,13 +212,13 @@ let test_LQR () =
       ; params =
           (let tmp () =
              Temp.
-               { _f = None
+               { _f = Some (f ())
                ; _Fx_prod = fx ()
                ; _Fu_prod = fu ()
-               ; _cx = None
-               ; _cu = None
+               ; _cx = Some (c_x ())
+               ; _cu =  Some ( c_u ())
                ; _Cxx = q_xx ()
-               ; _Cxu = None
+               ; _Cxu =  Some (c_xu ())
                ; _Cuu = q_uu ()
                }
            in
@@ -211,5 +232,6 @@ let () =
   let open Alcotest in
   run
     "LQR tests"
-    [ "Check implicit", List.init n_tests ~f:(fun _ -> test_case "Simple" `Quick test_LQR)
+    [ ( "Check implicit"
+      , List.init n_tests ~f:(fun _ -> test_case "Complex" `Quick test_LQR) )
     ]

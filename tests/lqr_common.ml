@@ -5,11 +5,6 @@ module Arr = Owl.Arr
 module Mat = Owl.Mat
 module Linalg = Owl.Linalg.D
 
-let _ =
-  Random.init 1999;
-  (* Random.self_init (); *)
-  Owl_stats_prng.init (Random.int 100000);
-  Torch_core.Wrapper.manual_seed (Random.int 100000)
 
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
 let device = Torch.Device.Cpu
@@ -115,8 +110,9 @@ let q_of ~reg d =
   |> Arr.concatenate ~axis:0
   |> Tensor.of_bigarray ~device
 
-let q_xx () = q_of ~reg:0.1 n
-let q_uu () = q_of ~reg:0.1 m
+let q_xx () = q_of ~reg:1. n
+let q_uu () = q_of ~reg:1. m
 let _f () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
 let _cx () = Arr.gaussian [| bs; n |] |> Tensor.of_bigarray ~device
 let _cu () = Arr.gaussian [| bs; m |] |> Tensor.of_bigarray ~device
+let _cxu () = Arr.gaussian [| bs; n; m |] |> Tensor.of_bigarray ~device

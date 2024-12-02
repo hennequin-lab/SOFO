@@ -95,7 +95,7 @@ let backward_common (common : (t, t -> t) momentary_params_common list) =
         let tmp = maybe_prod z._Fx_prod _V in
         ( maybe_add z._Cuu (maybe_prod z._Fu_prod (maybe_btr (maybe_prod z._Fu_prod _V)))
         , maybe_add z._Cxx (maybe_prod z._Fx_prod (maybe_btr tmp))
-        , maybe_add z._Cxu (maybe_prod z._Fu_prod (maybe_btr tmp)) )
+        , maybe_add (maybe_btr z._Cxu) (maybe_prod z._Fu_prod (maybe_btr tmp)) )
       in
       (* compute LQR gain parameters to be used in the subsequent fwd pass *)
       let _Quu_chol = Option.map _Quu ~f:cholesky in
@@ -130,7 +130,15 @@ let backward common_info (params : (t option, (t, t -> t) momentary_params list)
           , maybe_add p._cx (maybe_prod p.common._Fx_prod tmp) )
         in
         (* compute LQR gain parameters to be used in the subsequent fwd pass *)
-        let _k = neg_inv_symm ~is_vector:true _qu (z._Quu_chol, z._Quu_chol_T) in
+        let _k =
+          let _k_unsqueezed =
+            neg_inv_symm ~is_vector:true _qu (z._Quu_chol, z._Quu_chol_T)
+          in
+          match _k_unsqueezed with
+          | None -> None
+          | Some _k_unsqueezed ->
+            Some (reshape _k_unsqueezed ~shape:(List.take (shape _k_unsqueezed) 2))
+        in
         (* update the value function *)
         let _v = maybe_add _qx (maybe_einsum (z._K, "mba") (_qu, "mb") "ma") in
         _v, { _k; _K = z._K } :: info_list)
