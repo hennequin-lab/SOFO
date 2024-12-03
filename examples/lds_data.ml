@@ -7,6 +7,12 @@ module Mat = Owl.Dense.Matrix.D
 module Arr = Owl.Dense.Ndarray.D
 module Linalg = Owl.Linalg.D
 
+type 'a f_params =
+  { _Fx_prod : 'a
+  ; _Fu_prod : 'a
+  ; _f : 'a option
+  }
+
 (* -----------------------------------------
    -- Some utility functions         ------
    ----------------------------------------- *)
@@ -155,7 +161,6 @@ module Default = struct
   let b = 3
   let tmax = 10
   let m = 7
-  let k = 12
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
 end
@@ -167,49 +172,20 @@ module Make_LDS (X : module type of Default) = struct
   let to_device = Tensor.of_bigarray ~device:X.device
   let device = X.device
   let kind = X.kind
-
-  let sample_x0 () =
-    let pri = Tensor.randn ~device ~kind [ X.m; X.a ] in
-    let tan = Tensor.randn ~device ~kind [ X.k; X.m; X.a ] in
-    Maths.make_dual pri ~t:(Maths.Direct tan)
+  let sample_x0 () = Tensor.randn ~device ~kind [ X.m; X.a ] |> Maths.const
 
   let sample_fx () =
-    let pri =
-      Array.init X.m ~f:(fun _ ->
-        let a = Mat.gaussian X.a X.a in
-        let r =
-          a
-          |> Linalg.eigvals
-          |> Owl.Dense.Matrix.Z.abs
-          |> Owl.Dense.Matrix.Z.re
-          |> Mat.max'
-        in
-        Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; X.a; X.a |])
-      |> Arr.concatenate ~axis:0
-      |> to_device
-    in
-    let tan =
-      Array.init X.k ~f:(fun _ ->
-        Array.init X.m ~f:(fun _ ->
-          let a = Mat.gaussian X.a X.a in
-          let r =
-            a
-            |> Linalg.eigvals
-            |> Owl.Dense.Matrix.Z.abs
-            |> Owl.Dense.Matrix.Z.re
-            |> Mat.max'
-          in
-          Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; 1; X.a; X.a |])
-        |> Arr.concatenate ~axis:1)
-      |> Arr.concatenate ~axis:0
-      |> to_device
-    in
-    Maths.make_dual pri ~t:(Maths.Direct tan)
+    Array.init X.m ~f:(fun _ ->
+      let a = Mat.gaussian X.a X.a in
+      let r =
+        a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
+      in
+      Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; X.a; X.a |])
+    |> Arr.concatenate ~axis:0
+    |> to_device
+    |> Maths.const
 
-  let sample_fu () =
-    let pri = Tensor.randn ~device ~kind [ X.m; X.b; X.a ] in
-    let tan = Tensor.randn ~device ~kind [ X.k; X.m; X.b; X.a ] in
-    Maths.make_dual pri ~t:(Maths.Direct tan)
+  let sample_fu () = Tensor.randn ~device ~kind [ X.m; X.b; X.a ] |> Maths.const
 
   let q_of ~reg d =
     Array.init X.m ~f:(fun _ ->
@@ -218,53 +194,13 @@ module Make_LDS (X : module type of Default) = struct
     |> Arr.concatenate ~axis:0
     |> to_device
 
-  let q_of_tan ~reg d =
-    Array.init X.k ~f:(fun _ ->
-      Array.init X.m ~f:(fun _ ->
-        let ell = Mat.gaussian d d in
-        Arr.reshape Mat.(add_diag (ell *@ transpose ell) reg) [| 1; 1; d; d |])
-      |> Arr.concatenate ~axis:1)
-    |> Arr.concatenate ~axis:0
-    |> to_device
-
-  let sample_q_xx () =
-    let q_xx () = q_of ~reg:0.1 X.a in
-    let dq_xx () = q_of_tan ~reg:0.1 X.a in
-    let pri = q_xx () in
-    let tan = dq_xx () in
-    Maths.make_dual pri ~t:(Maths.Direct tan)
-
-  let sample_q_uu () =
-    let q_uu () = q_of ~reg:0.1 X.b in
-    let dq_uu () = q_of_tan ~reg:0.1 X.b in
-    let pri = q_uu () in
-    let tan = dq_uu () in
-    Maths.make_dual pri ~t:(Maths.Direct tan)
-
-  let sample_q_xu () =
-    let pri = Tensor.randn ~device ~kind [ X.m; X.a; X.b ] in
-    let tan = Tensor.randn ~device ~kind [ X.k; X.m; X.a; X.b ] in
-    Maths.make_dual pri ~t:(Maths.Direct tan)
-
-  let sample_c_x () =
-    let pri = Tensor.randn ~device ~kind [ X.m; X.a ] in
-    let tan = Tensor.randn ~device ~kind [ X.k; X.m; X.a ] in
-    Maths.make_dual pri ~t:(Maths.Direct tan)
-
-  let sample_c_u () =
-    let pri = Tensor.randn ~device ~kind [ X.m; X.b ] in
-    let tan = Tensor.randn ~device ~kind [ X.k; X.m; X.b ] in
-    Maths.make_dual pri ~t:(Maths.Direct tan)
-
-  let sample_f () =
-    let pri = Tensor.randn ~device ~kind [ X.m; X.a ] in
-    let tan = Tensor.randn ~device ~kind [ X.k; X.m; X.a ] in
-    Maths.make_dual pri ~t:(Maths.Direct tan)
-
-  let sample_u () =
-    let pri = Tensor.randn ~device ~kind [ X.m; X.b ] in
-    let tan = Tensor.randn ~device ~kind [ X.k; X.m; X.b ] in
-    Maths.make_dual pri ~t:(Maths.Direct tan)
+  let sample_q_xx () = q_of ~reg:0.1 X.a |> Maths.const
+  let sample_q_uu () = q_of ~reg:0.1 X.b |> Maths.const
+  let sample_q_xu () = Tensor.randn ~device ~kind [ X.m; X.a; X.b ] |> Maths.const
+  let sample_c_x () = Tensor.randn ~device ~kind [ X.m; X.a ] |> Maths.const
+  let sample_c_u () = Tensor.randn ~device ~kind [ X.m; X.b ] |> Maths.const
+  let sample_f () = Tensor.randn ~device ~kind [ X.m; X.a ] |> Maths.const
+  let sample_u () = Tensor.randn ~device ~kind [ X.m; X.b ] |> Maths.const
 
   let params : (Maths.t option, (Maths.t, Maths.t option) Temp.p list) Params.p =
     Lqr.Params.

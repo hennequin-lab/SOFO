@@ -166,37 +166,38 @@ let backward_tangents
           ( p._cu +? (p.common._Fu_prod_tangent *? tmp)
           , p._cx +? (p.common._Fx_prod_tangent *? tmp) )
         in
-        let n_tangents, bs =
-          List.hd_exn (maybe_shape p._f), List.nth_exn (maybe_shape p._f) 1
-        in
         (* compute LQR gain parameters to be used in the subsequent fwd pass *)
         let _k =
-          (* shape [km x b x b ]*)
-          let _quu_chol_expanded =
-            List.init n_tangents ~f:(fun _ ->
-              unsqueeze (Option.value_exn z._Quu_chol) ~dim:0)
-            |> concat_list ~dim:0
-          in
-          let _quu_chol_squeezed =
-            Some
-              (reshape
-                 _quu_chol_expanded
-                 ~shape:
-                   (Int.(n_tangents * bs)
-                    :: [ List.last_exn (shape _quu_chol_expanded)
-                       ; List.last_exn (shape _quu_chol_expanded)
-                       ]))
-          in
-          let _quu_chol_squeezed_T = maybe_btr _quu_chol_squeezed in
-          (* shape [km x b] *)
-          let _qu_squeezed = maybe_reshape _qu ~shape:[ Int.(n_tangents * bs); -1 ] in
-          let _k_squeezed =
-            neg_inv_symm
-              ~is_vector:true
-              _qu_squeezed
-              (_quu_chol_squeezed, _quu_chol_squeezed_T)
-          in
-          maybe_reshape _k_squeezed ~shape:[ n_tangents; bs; -1 ]
+          match p._f with
+          | Some _f ->
+            let n_tangents, bs = List.hd_exn (shape _f), List.nth_exn (shape _f) 1 in
+            (* shape [km x b x b ]*)
+            let _quu_chol_expanded =
+              List.init n_tangents ~f:(fun _ ->
+                unsqueeze (Option.value_exn z._Quu_chol) ~dim:0)
+              |> concat_list ~dim:0
+            in
+            let _quu_chol_squeezed =
+              Some
+                (reshape
+                   _quu_chol_expanded
+                   ~shape:
+                     (Int.(n_tangents * bs)
+                      :: [ List.last_exn (shape _quu_chol_expanded)
+                         ; List.last_exn (shape _quu_chol_expanded)
+                         ]))
+            in
+            let _quu_chol_squeezed_T = maybe_btr _quu_chol_squeezed in
+            (* shape [km x b] *)
+            let _qu_squeezed = maybe_reshape _qu ~shape:[ Int.(n_tangents * bs); -1 ] in
+            let _k_squeezed =
+              neg_inv_symm
+                ~is_vector:true
+                _qu_squeezed
+                (_quu_chol_squeezed, _quu_chol_squeezed_T)
+            in
+            maybe_reshape _k_squeezed ~shape:[ n_tangents; bs; -1 ]
+          | None -> None
         in
         (* update the value function *)
         let _v = _qx +? maybe_einsum (z._K, "mba") (_qu, "kmb") "kma" in

@@ -30,8 +30,7 @@ module Lds_params_dim = struct
   let a = 5
   let b = 3
   let tmax = 10
-  let m = 7
-  let k = 12
+  let m = 3
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
 end
@@ -50,7 +49,7 @@ let _Cxx =
   Maths.(const pri)
 
 (* control cost set by alpha *)
-let alpha = 0.1
+let alpha = 0.01
 
 let _Cuu =
   let pri = q_id_of Lds_params_dim.b in
@@ -60,9 +59,9 @@ let _Cuu =
 let x0 = Data.sample_x0 ()
 
 (* need to sample these first to get the trajectory *)
-let f_list : Maths.t Lds_typ.f_params list =
+let f_list : Maths.t Lds_data.f_params list =
   List.init (Lds_params_dim.tmax + 1) ~f:(fun _ ->
-    Lds_typ.
+    Lds_data.
       { _Fx_prod = Data.sample_fx ()
       ; _Fu_prod = Data.sample_fu ()
       ; _f = Some (Data.sample_f ())
@@ -95,7 +94,11 @@ let check_quality common_params u_targets =
     List.fold2_exn result u_targets ~init:0. ~f:(fun acc res u_target ->
       let u_res = res.u in
       (* let u_res = res.u |> Option.value_exn in *)
-      let error = Tensor.(norm Maths.(primal (u_res - u_target)) |> to_float0_exn) in
+      let error =
+        Tensor.(
+          norm Maths.(primal (u_res - u_target)) / norm Maths.(primal u_target)
+          |> to_float0_exn)
+      in
       acc +. error)
   in
   u_error
