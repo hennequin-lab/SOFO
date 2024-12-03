@@ -7,14 +7,20 @@ let print s = Stdio.print_endline (Sexp.to_string_hum s)
 module Make (P : Prms.T) (O : Prms.T) = struct
   let run (p : P.T.t) ~(f : P.M.t -> O.M.t) =
     (* batched JVP tests *)
-    let k = 2 in
+    let k = 7 in
     let dot_prod_1, v, w =
       (* samples v where it has one extra dimension in front of size k *)
       let v = P.T.gaussian_like_k ~k p in
       let p = P.make_dual p ~t:(P.map v ~f:(fun v -> Maths.Direct v)) in
-      let o = f p |> O.tangent in
-      let w = O.T.gaussian_like_k ~k o in
-      O.T.dot_prod w o |> Tensor.to_float0_exn, v, w
+      let o = f p in
+      let w = O.T.gaussian_like (O.primal o) in
+      let o = O.tangent o in
+      let dp1 =
+        O.fold2 w o ~init:(Tensor.f 0.) ~f:(fun accu (w, o, _) ->
+          let wo = Tensor.(reshape (w * o) ~shape:[ k; -1 ]) in
+          Tensor.(accu + sum_to_size ~size:[ k; 1 ] wo))
+      in
+      Tensor.squeeze dp1, v, w
     in
     (* compare with backward-pass torch *)
     let dot_prod_2 =
@@ -34,9 +40,17 @@ module Make (P : Prms.T) (O : Prms.T) = struct
       let surrogate = O.T.dot_prod w (O.primal o) in
       Tensor.backward surrogate;
       let g = P.map p ~f:(fun x -> Tensor.grad (Maths.primal x)) in
-      P.T.dot_prod v g |> Tensor.to_float0_exn
+      let dp2 =
+        P.fold2 v g ~init:(Tensor.f 0.) ~f:(fun accu (v, g, _) ->
+          let vg = Tensor.(reshape (v * g) ~shape:[ k; -1 ]) in
+          Tensor.(accu + sum_to_size ~size:[ k; 1 ] vg))
+      in
+      Tensor.squeeze dp2
     in
-    ( dot_prod_1
-    , dot_prod_2
-    , Float.(abs (dot_prod_1 - dot_prod_2) / (abs dot_prod_1 + abs dot_prod_2)) )
+    let err =
+      Tensor.(
+        mean (square (dot_prod_1 - dot_prod_2)) / mean (square (dot_prod_1 + dot_prod_2)))
+      |> Tensor.to_float0_exn
+    in
+    dot_prod_1, dot_prod_2, err
 end
