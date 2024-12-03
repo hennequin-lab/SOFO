@@ -54,6 +54,9 @@ module type Ops = sig
   (** [gaussian_of ~mu ~sigma x] has the same structure as [x] but each [AD.t] parameter is replaced
       by independent normal samples of the same shape (mean [?(mu=0.)] and stdev. [?(sigma=1.)]). *)
   val gaussian_like : ?mu:float -> ?sigma:float -> t -> t
+  (** similar to gaussian_like, except for that the tensors sampled has an extra dimension k in front *)
+  val gaussian_like_k : ?mu:float -> ?sigma:float -> k:int -> t -> t
+
 
   val numel : t -> int
   val dot_prod : t -> t -> elt

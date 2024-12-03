@@ -103,6 +103,21 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
         | None -> z
         | Some m -> Tensor.add_scalar_ z (Scalar.f m))
 
+    let gaussian_like_k ?mu ?sigma ~(k : int) x =
+      map x ~f:(fun x ->
+        let x_shape = Tensor.shape x in
+        let z =
+          Tensor.randn ~device:(Tensor.device x) ~kind:(Tensor.kind x) (k :: x_shape)
+        in
+        let z =
+          match sigma with
+          | None -> z
+          | Some s -> Tensor.mul_scalar_ z (Scalar.f s)
+        in
+        match mu with
+        | None -> z
+        | Some m -> Tensor.add_scalar_ z (Scalar.f m))
+
     let numel x = fold x ~init:0 ~f:(fun accu (x, _) -> accu + numel x)
 
     let dot_prod x y =
@@ -165,6 +180,10 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
     let zeros_like x = const (T.zeros_like (primal x))
     let ones_like x = const (T.ones_like (primal x))
     let gaussian_like ?mu ?sigma x = const (T.gaussian_like ?mu ?sigma (primal x))
+
+    let gaussian_like_k ?mu ?sigma ~k x =
+      const (T.gaussian_like_k ?mu ?sigma ~k (primal x))
+
     let numel x = T.numel (primal x)
 
     let dot_prod x y =
