@@ -1,4 +1,3 @@
-(* propagate tangents either naively together with primals or separately to form (K+1) lqr problems. *)
 open Base
 open Torch
 open Forward_torch
@@ -13,10 +12,6 @@ let _ =
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
-(* -----------------------------------------
-   -- Define Control Problem          ------
-   ----------------------------------------- *)
-
 let with_given_seed_owl seed f =
   (* generate a random key to later restore the state of the RNG *)
   let key = Random.int Int.max_value in
@@ -28,8 +23,9 @@ let with_given_seed_owl seed f =
   (* return the result *)
   result
 
-let base = Optimizer.Config.Base.default
-
+(* -----------------------------------------
+   -- Define Control Problem          ------
+   ----------------------------------------- *)
 module Lds_params_dim = struct
   let a = 5
   let b = 3
@@ -48,7 +44,7 @@ let q_id_of d =
     Tensor.reshape ell ~shape:[ 1; d; d ])
   |> Tensor.concat ~dim:0
 
-(* Q set as identity *)
+(* state cost set as identity *)
 let _Cxx =
   let pri = q_id_of Lds_params_dim.a in
   Maths.(const pri)
@@ -60,6 +56,7 @@ let _Cuu =
   let pri = q_id_of Lds_params_dim.b in
   Maths.(alpha $* const pri)
 
+(* sample params first to rollout traj for _cx calculation *)
 let x0 = Data.sample_x0 ()
 
 (* need to sample these first to get the trajectory *)
@@ -92,8 +89,8 @@ let params : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lq
     }
 
 let check_quality common_params u_targets =
-  (* let result = Data.f_naive common_params in *)
-  let result = Data.f_implicit common_params in
+  (* let result = Lqr._solve (Data.naive_params common_params) in *)
+  let result = Lqr.solve (Data.implicit_params common_params) in
   let u_error =
     List.fold2_exn result u_targets ~init:0. ~f:(fun acc res u_target ->
       let u_res = res.u in

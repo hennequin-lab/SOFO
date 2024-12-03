@@ -7,6 +7,9 @@ module Mat = Owl.Dense.Matrix.D
 module Arr = Owl.Dense.Ndarray.D
 module Linalg = Owl.Linalg.D
 
+(* -----------------------------------------
+   -- Some utility functions         ------
+   ----------------------------------------- *)
 let bmm a b =
   let open Maths in
   match List.length (shape b) with
@@ -124,6 +127,10 @@ let _Fu_prod2 fu = prod2 fu
 let _Fu_prod_tangent fu = prod_tangent fu
 let _Fu_prod2_tangent fu = prod2_tangent fu
 
+(* -----------------------------------------
+   -- Parameter specification     ------
+   ----------------------------------------- *)
+
 module Temp = struct
   type ('a, 'o) p =
     { _f : 'o
@@ -153,7 +160,9 @@ module Default = struct
   let device = Torch.Device.cuda_if_available ()
 end
 
-(* randomly sample a lds *)
+(* -----------------------------------------
+   -- Main LDS Module    ------
+   ----------------------------------------- *)
 module Make_LDS (X : module type of Default) = struct
   let to_device = Tensor.of_bigarray ~device:X.device
   let device = X.device
@@ -278,7 +287,7 @@ module Make_LDS (X : module type of Default) = struct
 
   let print s = Stdio.print_endline (Sexp.to_string_hum s)
 
-  (* returns u list and x list; this x_targets list goes from 0 to T *)
+  (* given parameters such as f_x, f_u and f, returns u list and x list; u list goes from 0 to T-1 and x_targets list goes from 0 to T *)
   let traj_rollout ~x0 ~(f_list : Maths.t f_params list) =
     (* randomly sample u *)
     let tmax = List.length f_list - 1 in
@@ -301,57 +310,51 @@ module Make_LDS (X : module type of Default) = struct
     in
     u_list, List.rev x_list
 
-  let f_naive (x : Input.M.t) : Output.M.t =
-    let x =
-      let params =
-        List.map x.params ~f:(fun p ->
-          Lqr.
-            { common =
-                { _Fx_prod = Some (bmm p._Fx_prod)
-                ; _Fx_prod2 = Some (bmm2 p._Fx_prod)
-                ; _Fu_prod = Some (bmm p._Fu_prod)
-                ; _Fu_prod2 = Some (bmm2 p._Fu_prod)
-                ; _Fx_prod_tangent = Some (bmm_tangent_v p._Fx_prod)
-                ; _Fx_prod2_tangent = Some (bmm2_tangent_v p._Fx_prod)
-                ; _Fu_prod_tangent = Some (bmm_tangent_v p._Fu_prod)
-                ; _Fu_prod2_tangent = Some (bmm2_tangent_v p._Fu_prod)
-                ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
-                ; _Cxu = p._Cxu
-                ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
-                }
-            ; _f = p._f
-            ; _cx = p._cx
-            ; _cu = p._cu
-            })
-      in
-      Lqr.Params.{ x with params }
+  let naive_params (x : Input.M.t) =
+    let params =
+      List.map x.params ~f:(fun p ->
+        Lqr.
+          { common =
+              { _Fx_prod = Some (bmm p._Fx_prod)
+              ; _Fx_prod2 = Some (bmm2 p._Fx_prod)
+              ; _Fu_prod = Some (bmm p._Fu_prod)
+              ; _Fu_prod2 = Some (bmm2 p._Fu_prod)
+              ; _Fx_prod_tangent = Some (bmm_tangent_v p._Fx_prod)
+              ; _Fx_prod2_tangent = Some (bmm2_tangent_v p._Fx_prod)
+              ; _Fu_prod_tangent = Some (bmm_tangent_v p._Fu_prod)
+              ; _Fu_prod2_tangent = Some (bmm2_tangent_v p._Fu_prod)
+              ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
+              ; _Cxu = p._Cxu
+              ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
+              }
+          ; _f = p._f
+          ; _cx = p._cx
+          ; _cu = p._cu
+          })
     in
-    Lqr._solve x
+    Lqr.Params.{ x with params }
 
-  let f_implicit (x : Input.M.t) =
-    let x =
-      let params =
-        List.map x.params ~f:(fun p ->
-          Lqr.
-            { common =
-                { _Fx_prod = Some (_Fx_prod p._Fx_prod)
-                ; _Fx_prod2 = Some (_Fx_prod2 p._Fx_prod)
-                ; _Fu_prod = Some (_Fu_prod p._Fu_prod)
-                ; _Fu_prod2 = Some (_Fu_prod2 p._Fu_prod)
-                ; _Fx_prod_tangent = Some (_Fx_prod_tangent p._Fx_prod)
-                ; _Fx_prod2_tangent = Some (_Fx_prod2_tangent p._Fx_prod)
-                ; _Fu_prod_tangent = Some (_Fu_prod_tangent p._Fu_prod)
-                ; _Fu_prod2_tangent = Some (_Fu_prod2_tangent p._Fu_prod)
-                ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
-                ; _Cxu = p._Cxu
-                ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
-                }
-            ; _f = p._f
-            ; _cx = p._cx
-            ; _cu = p._cu
-            })
-      in
-      Lqr.Params.{ x with params }
+  let implicit_params (x : Input.M.t) =
+    let params =
+      List.map x.params ~f:(fun p ->
+        Lqr.
+          { common =
+              { _Fx_prod = Some (_Fx_prod p._Fx_prod)
+              ; _Fx_prod2 = Some (_Fx_prod2 p._Fx_prod)
+              ; _Fu_prod = Some (_Fu_prod p._Fu_prod)
+              ; _Fu_prod2 = Some (_Fu_prod2 p._Fu_prod)
+              ; _Fx_prod_tangent = Some (_Fx_prod_tangent p._Fx_prod)
+              ; _Fx_prod2_tangent = Some (_Fx_prod2_tangent p._Fx_prod)
+              ; _Fu_prod_tangent = Some (_Fu_prod_tangent p._Fu_prod)
+              ; _Fu_prod2_tangent = Some (_Fu_prod2_tangent p._Fu_prod)
+              ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
+              ; _Cxu = p._Cxu
+              ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
+              }
+          ; _f = p._f
+          ; _cx = p._cx
+          ; _cu = p._cu
+          })
     in
-    Lqr.solve x
+    Lqr.Params.{ x with params }
 end
