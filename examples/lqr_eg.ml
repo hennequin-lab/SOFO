@@ -87,13 +87,18 @@ let params : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lq
             })
     }
 
+(* -----------------------------------------
+   -- Check quality of LQR results    ------
+   ----------------------------------------- *)
+let f_naive params = Lqr._solve (Data.naive_params params)
+let f_implicit params = Lqr.solve (Data.implicit_params params)
+
 let check_quality common_params u_targets =
-  (* let result = Lqr._solve (Data.naive_params common_params) in *)
-  let result = Lqr.solve (Data.implicit_params common_params) in
-  let u_error =
+  let naive_result = f_naive common_params in
+  let implicit_result = f_naive common_params in
+  let u_error (result : Maths.t Lqr.Solution.p list) =
     List.fold2_exn result u_targets ~init:0. ~f:(fun acc res u_target ->
       let u_res = res.u in
-      (* let u_res = res.u |> Option.value_exn in *)
       let error =
         Tensor.(
           norm Maths.(primal (u_res - u_target)) / norm Maths.(primal u_target)
@@ -101,7 +106,9 @@ let check_quality common_params u_targets =
       in
       acc +. error)
   in
-  u_error
+  let naive_error = u_error naive_result in
+  let implicit_error = u_error implicit_result in
+  Convenience.print [%message (naive_error : float)];
+  Convenience.print [%message (implicit_error : float)]
 
-let error = check_quality params u_targets
-let _ = Convenience.print [%message (error : float)]
+let _ = check_quality params u_targets

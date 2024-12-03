@@ -85,6 +85,44 @@ let bmm2_tangent_Fv b a =
   | 3 -> einsum [ a, "kma"; b, "kmab" ] "kmb"
   | _ -> failwith "should not happen"
 
+let prod f : Maths.t Lqr.prod =
+  let primal = bmm (Maths.const (Maths.primal f)) in
+  (* tangent on f only *)
+  let tangent =
+    match Maths.tangent f with
+    | None -> None
+    | Some df -> Some (bmm_tangent_F (Maths.const df))
+  in
+  { primal; tangent }
+
+let prod_tangent f : Maths.t Lqr.prod =
+  (* tangent on v only *)
+  let primal = bmm_tangent_v (Maths.const (Maths.primal f)) in
+  let tangent =
+    match Maths.tangent f with
+    | None -> None
+    | Some df -> Some (bmm_tangent_Fv (Maths.const df))
+  in
+  { primal; tangent }
+
+let prod2 f : Maths.t Lqr.prod =
+  let primal = bmm2 (Maths.const (Maths.primal f)) in
+  let tangent =
+    match Maths.tangent f with
+    | None -> None
+    | Some df -> Some (bmm2_tangent_F (Maths.const df))
+  in
+  { primal; tangent }
+
+let prod2_tangent f : Maths.t Lqr.prod =
+  let primal = bmm2_tangent_v (Maths.const (Maths.primal f)) in
+  let tangent =
+    match Maths.tangent f with
+    | None -> None
+    | Some df -> Some (bmm2_tangent_Fv (Maths.const df))
+  in
+  { primal; tangent }
+
 let tmax = 12
 let m = 7
 let a_dim = 5
@@ -115,3 +153,55 @@ let _f () = Arr.gaussian [| m; a_dim |] |> Tensor.of_bigarray ~device
 let _cx () = Arr.gaussian [| m; a_dim |] |> Tensor.of_bigarray ~device
 let _cu () = Arr.gaussian [| m; b_dim |] |> Tensor.of_bigarray ~device
 let _cxu () = Arr.gaussian [| m; a_dim; b_dim |] |> Tensor.of_bigarray ~device
+
+let map_naive (x : Input.M.t) =
+  let irrelevant = Some (fun _ -> assert false) in
+  let params =
+    List.map x.params ~f:(fun p ->
+      Lqr.
+        { common =
+            { _Fx_prod = Some (bmm p._Fx_prod)
+            ; _Fx_prod2 = Some (bmm2 p._Fx_prod)
+            ; _Fu_prod = Some (bmm p._Fu_prod)
+            ; _Fu_prod2 = Some (bmm2 p._Fu_prod)
+            ; _Fx_prod_tangent = irrelevant
+            ; _Fx_prod2_tangent = irrelevant
+            ; _Fu_prod_tangent = irrelevant
+            ; _Fu_prod2_tangent = irrelevant
+            ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
+            ; _Cxu = p._Cxu
+            ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
+            }
+        ; _f = p._f
+        ; _cx = p._cx
+        ; _cu = p._cu
+        })
+  in
+  Lqr.Params.{ x with params }
+
+let map_implicit (x : Input.M.t) =
+  let params =
+    List.map x.params ~f:(fun p ->
+      Lqr.
+        { common =
+            { _Fx_prod = Some (prod p._Fx_prod)
+            ; _Fx_prod2 = Some (prod2 p._Fx_prod)
+            ; _Fu_prod = Some (prod p._Fu_prod)
+            ; _Fu_prod2 = Some (prod2 p._Fu_prod)
+            ; _Fx_prod_tangent = Some (prod_tangent p._Fx_prod)
+            ; _Fx_prod2_tangent = Some (prod2_tangent p._Fx_prod)
+            ; _Fu_prod_tangent = Some (prod_tangent p._Fu_prod)
+            ; _Fu_prod2_tangent = Some (prod2_tangent p._Fu_prod)
+            ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
+            ; _Cxu = p._Cxu
+            ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
+            }
+        ; _f = p._f
+        ; _cx = p._cx
+        ; _cu = p._cu
+        })
+  in
+  Lqr.Params.{ x with params }
+
+let f_naive (x : Input.M.t) : Output.M.t = Lqr._solve (map_naive x)
+let f_implicit (x : Input.M.t) : Output.M.t = Lqr.solve (map_implicit x)

@@ -2,7 +2,6 @@ open Base
 open Torch
 open Forward_torch
 open Lqr
-include Lds_typ
 module Mat = Owl.Dense.Matrix.D
 module Arr = Owl.Dense.Ndarray.D
 module Linalg = Owl.Linalg.D
@@ -174,6 +173,7 @@ module Make_LDS (X : module type of Default) = struct
   let kind = X.kind
   let sample_x0 () = Tensor.randn ~device ~kind [ X.m; X.a ] |> Maths.const
 
+  (* make sure fx is stable *)
   let sample_fx () =
     Array.init X.m ~f:(fun _ ->
       let a = Mat.gaussian X.a X.a in
@@ -185,8 +185,7 @@ module Make_LDS (X : module type of Default) = struct
     |> to_device
     |> Maths.const
 
-  let sample_fu () = Tensor.randn ~device ~kind [ X.m; X.b; X.a ] |> Maths.const
-
+  (* make sure cost matrices are positive definite *)
   let q_of ~reg d =
     Array.init X.m ~f:(fun _ ->
       let ell = Mat.gaussian d d in
@@ -196,11 +195,13 @@ module Make_LDS (X : module type of Default) = struct
 
   let sample_q_xx () = q_of ~reg:0.1 X.a |> Maths.const
   let sample_q_uu () = q_of ~reg:0.1 X.b |> Maths.const
-  let sample_q_xu () = Tensor.randn ~device ~kind [ X.m; X.a; X.b ] |> Maths.const
-  let sample_c_x () = Tensor.randn ~device ~kind [ X.m; X.a ] |> Maths.const
-  let sample_c_u () = Tensor.randn ~device ~kind [ X.m; X.b ] |> Maths.const
-  let sample_f () = Tensor.randn ~device ~kind [ X.m; X.a ] |> Maths.const
-  let sample_u () = Tensor.randn ~device ~kind [ X.m; X.b ] |> Maths.const
+  let sample_const shape = Tensor.randn ~device ~kind shape |> Maths.const
+  let sample_fu () = sample_const [ X.m; X.b; X.a ]
+  let sample_q_xu () = sample_const [ X.m; X.a; X.b ]
+  let sample_c_x () = sample_const [ X.m; X.a ]
+  let sample_c_u () = sample_const [ X.m; X.b ]
+  let sample_f () = sample_const [ X.m; X.a ]
+  let sample_u () = sample_const [ X.m; X.b ]
 
   let params : (Maths.t option, (Maths.t, Maths.t option) Temp.p list) Params.p =
     Lqr.Params.
