@@ -43,10 +43,10 @@ module RNN = struct
 
   type input = unit
 
-  let f ~(theta : P.t') ~input:_ y =
+  let f ~(theta : P.M.t) ~input:_ y =
     Maths.((y *@ theta.a) + (relu (theta.b + (y *@ theta.c)) *@ theta.w))
 
-  let init ~d ~dh : P.t =
+  let init ~d ~dh : P.tagged =
     let w =
       Convenience.gaussian_tensor_2d_normed
         ~kind:base.kind
@@ -69,7 +69,7 @@ module RNN = struct
     in
     { w; c; b; a = Prms.free a }
 
-  let simulate ~(theta : P.t') ~horizon y0 =
+  let simulate ~(theta : P.M.t) ~horizon y0 =
     let rec iter t accu y =
       if t = 0 then List.rev accu else iter (t - 1) (y :: accu) (f ~theta ~input:() y)
     in
@@ -114,9 +114,8 @@ let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size t
 (* simulate n trials from saved parameters; first 3 columns are predictions and last 3 columns are ground truth *)
 let simulate ~f_name n_trials =
   let model_params =
-    let params_ba = O.W.P.load (in_dir f_name ^ "_params") in
-    RNN.P.map params_ba ~f:(fun x ->
-      Tensor.of_bigarray ~device:base.device x |> Maths.const)
+    let params_ba = O.W.P.T.load (in_dir f_name ^ "_params") in
+    RNN.P.map params_ba ~f:(fun x -> x |> Maths.const)
   in
   let n_list = List.range 0 n_trials in
   List.iter n_list ~f:(fun j ->
@@ -166,12 +165,10 @@ let rec iter ~f_name ~config ~t ~state ~time_elapsed running_avg =
     if t % 10 = 0
     then (
       (* save params *)
-      let ba_params =
-        RNN.P.map
-          (RNN.P.value (O.params new_state))
-          ~f:(fun x -> Tensor.to_bigarray ~kind:base.ba_kind x)
-      in
-      O.W.P.save ba_params ~out:(in_dir f_name ^ "_params");
+      O.W.P.T.save
+        (RNN.P.value (O.params new_state))
+        ~kind:base.ba_kind
+        ~out:(in_dir f_name ^ "_params");
       (* if t % 500 = 0 then simulate ~f_name n_trials_simulation; *)
       let loss_avg =
         match running_avg with

@@ -5,23 +5,10 @@ open Sofo
 module Mat = Owl.Dense.Matrix.S
 module Arr = Owl.Dense.Ndarray.S
 
-(* let in_dir = Cmdargs.in_dir "-d" *)
-
 let _ =
   Random.init 1999;
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
-
-let with_given_seed_owl seed f =
-  (* generate a random key to later restore the state of the RNG *)
-  let key = Random.int Int.max_value in
-  (* now force the state of the RNG under which f will be evaluated *)
-  Owl_stats_prng.init seed;
-  let result = f () in
-  (* restore the RGN using key *)
-  Owl_stats_prng.init key;
-  (* return the result *)
-  result
 
 (* -----------------------------------------
    -- Define Control Problem          ------
@@ -95,7 +82,7 @@ let f_implicit params = Lqr.solve (Data.implicit_params params)
 
 let check_quality common_params u_targets =
   let naive_result = f_naive common_params in
-  let implicit_result = f_naive common_params in
+  let implicit_result = f_implicit common_params in
   let u_error (result : Maths.t Lqr.Solution.p list) =
     List.fold2_exn result u_targets ~init:0. ~f:(fun acc res u_target ->
       let u_res = res.u in
