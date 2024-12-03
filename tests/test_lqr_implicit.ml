@@ -64,15 +64,6 @@ let prod2_tangent f : Maths.t Lqr.prod =
   in
   { primal; tangent }
 
-let _Fx_prod fx = prod fx
-let _Fx_prod2 fx = prod2 fx
-let _Fx_prod_tangent fx = prod_tangent fx
-let _Fx_prod2_tangent fx = prod2_tangent fx
-let _Fu_prod fu = prod fu
-let _Fu_prod2 fu = prod2 fu
-let _Fu_prod_tangent fu = prod_tangent fu
-let _Fu_prod2_tangent fu = prod2_tangent fu
-
 let q_of_tan ~reg d =
   Array.init k ~f:(fun _ ->
     Array.init bs ~f:(fun _ ->
@@ -117,6 +108,7 @@ let f () =
 
 let f_naive (x : Input.M.t) : Output.M.t =
   let x =
+    let irrelevant = Some (fun _ -> assert false) in
     let params =
       List.map x.params ~f:(fun p ->
         Lqr.
@@ -125,10 +117,10 @@ let f_naive (x : Input.M.t) : Output.M.t =
               ; _Fx_prod2 = Some (bmm2 p._Fx_prod)
               ; _Fu_prod = Some (bmm p._Fu_prod)
               ; _Fu_prod2 = Some (bmm2 p._Fu_prod)
-              ; _Fx_prod_tangent = Some (bmm_tangent_v p._Fx_prod)
-              ; _Fx_prod2_tangent = Some (bmm2_tangent_v p._Fx_prod)
-              ; _Fu_prod_tangent = Some (bmm_tangent_v p._Fu_prod)
-              ; _Fu_prod2_tangent = Some (bmm2_tangent_v p._Fu_prod)
+              ; _Fx_prod_tangent = irrelevant
+              ; _Fx_prod2_tangent = irrelevant
+              ; _Fu_prod_tangent = irrelevant
+              ; _Fu_prod2_tangent = irrelevant
               ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
               ; _Cxu = p._Cxu
               ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
@@ -142,20 +134,20 @@ let f_naive (x : Input.M.t) : Output.M.t =
   in
   Lqr._solve x
 
-let f_implicit (x : Input.M.t) =
+let f_implicit (x : Input.M.t) : Output.M.t =
   let x =
     let params =
       List.map x.params ~f:(fun p ->
         Lqr.
           { common =
-              { _Fx_prod = Some (_Fx_prod p._Fx_prod)
-              ; _Fx_prod2 = Some (_Fx_prod2 p._Fx_prod)
-              ; _Fu_prod = Some (_Fu_prod p._Fu_prod)
-              ; _Fu_prod2 = Some (_Fu_prod2 p._Fu_prod)
-              ; _Fx_prod_tangent = Some (_Fx_prod_tangent p._Fx_prod)
-              ; _Fx_prod2_tangent = Some (_Fx_prod2_tangent p._Fx_prod)
-              ; _Fu_prod_tangent = Some (_Fu_prod_tangent p._Fu_prod)
-              ; _Fu_prod2_tangent = Some (_Fu_prod2_tangent p._Fu_prod)
+              { _Fx_prod = Some (prod p._Fx_prod)
+              ; _Fx_prod2 = Some (prod2 p._Fx_prod)
+              ; _Fu_prod = Some (prod p._Fu_prod)
+              ; _Fu_prod2 = Some (prod2 p._Fu_prod)
+              ; _Fx_prod_tangent = Some (prod_tangent p._Fx_prod)
+              ; _Fx_prod2_tangent = Some (prod2_tangent p._Fx_prod)
+              ; _Fu_prod_tangent = Some (prod_tangent p._Fu_prod)
+              ; _Fu_prod2_tangent = Some (prod2_tangent p._Fu_prod)
               ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
               ; _Cxu = p._Cxu
               ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
@@ -174,7 +166,7 @@ let check_implicit common_params =
   let lqr_implicit = f_implicit common_params in
   let x_error =
     List.fold2_exn lqr_naive lqr_implicit ~init:0. ~f:(fun acc naive implicit ->
-      let x_naive = naive.x |> Option.value_exn in
+      let x_naive = naive.x in
       let x_implicit = implicit.x in
       let error =
         Tensor.(
@@ -186,26 +178,7 @@ let check_implicit common_params =
 
 (* test whether the tangents agree *)
 
-let common_params =
-  Lqr.Params.
-    { x0 = Some x0
-    ; params =
-        (let tmp () =
-           Temp.
-             { _f = f ()
-             ; _Fx_prod = fx ()
-             ; _Fu_prod = fu ()
-             ; _cx = c_x ()
-             ; _cu = c_u ()
-             ; _Cxx = q_xx ()
-             ; _Cxu = c_xu ()
-             ; _Cuu = q_uu ()
-             }
-         in
-         List.init (tmax + 1) ~f:(fun _ -> tmp ()))
-    }
-
-let test_LQR () =
+let test_same_tangents () =
   let common_params =
     Lqr.Params.
       { x0 = Some x0
@@ -216,9 +189,9 @@ let test_LQR () =
                ; _Fx_prod = fx ()
                ; _Fu_prod = fu ()
                ; _cx = Some (c_x ())
-               ; _cu =  Some ( c_u ())
+               ; _cu = Some (c_u ())
                ; _Cxx = q_xx ()
-               ; _Cxu =  Some (c_xu ())
+               ; _Cxu = Some (c_xu ())
                ; _Cuu = q_uu ()
                }
            in
@@ -233,5 +206,6 @@ let () =
   run
     "LQR tests"
     [ ( "Check implicit"
-      , List.init n_tests ~f:(fun _ -> test_case "Complex" `Quick test_LQR) )
+      , List.init n_tests ~f:(fun _ ->
+          test_case "Implicit (test same tangents)" `Quick test_same_tangents) )
     ]

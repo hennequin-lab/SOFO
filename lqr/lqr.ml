@@ -15,14 +15,14 @@ let ( *@ ) a b =
 
 let maybe_btr = Option.map ~f:btr
 
-let maybe_add a b =
+let ( +? ) a b =
   match a, b with
   | None, None -> None
   | Some a, None -> Some a
   | None, Some b -> Some b
   | Some a, Some b -> Some (a + b)
 
-let maybe_prod f v =
+let ( *? ) f v =
   match f, v with
   | Some f, Some v -> Some (f v)
   | _ -> None
@@ -92,17 +92,17 @@ let backward_common (common : (t, t -> t) momentary_params_common list) =
     let common_except_last = List.drop_last_exn common in
     List.fold_right common_except_last ~init:(_V, []) ~f:(fun z (_V, info_list) ->
       let _Quu, _Qxx, _Qux =
-        let tmp = maybe_prod z._Fx_prod _V in
-        ( maybe_add z._Cuu (maybe_prod z._Fu_prod (maybe_btr (maybe_prod z._Fu_prod _V)))
-        , maybe_add z._Cxx (maybe_prod z._Fx_prod (maybe_btr tmp))
-        , maybe_add (maybe_btr z._Cxu) (maybe_prod z._Fu_prod (maybe_btr tmp)) )
+        let tmp = z._Fx_prod *? _V in
+        ( z._Cuu +? (z._Fu_prod *? maybe_btr (z._Fu_prod *? _V))
+        , z._Cxx +? (z._Fx_prod *? maybe_btr tmp)
+        , maybe_btr z._Cxu +? (z._Fu_prod *? maybe_btr tmp) )
       in
       (* compute LQR gain parameters to be used in the subsequent fwd pass *)
       let _Quu_chol = Option.map _Quu ~f:cholesky in
       let _Quu_chol_T = maybe_btr _Quu_chol in
       let _K = neg_inv_symm ~is_vector:false _Qux (_Quu_chol, _Quu_chol_T) in
       (* update the value function *)
-      let _V_new = maybe_add _Qxx (maybe_einsum (_Qux, "mab") (_K, "mac") "mbc") in
+      let _V_new = _Qxx +? maybe_einsum (_Qux, "mab") (_K, "mac") "mbc" in
       _V_new, { _Quu_chol; _Quu_chol_T; _V; _K } :: info_list)
   in
   info
@@ -126,8 +126,7 @@ let backward common_info (params : (t option, (t, t -> t) momentary_params list)
       ~f:(fun z p (_v, info_list) ->
         let _qu, _qx =
           let tmp = maybe_force _v z._V p._f in
-          ( maybe_add p._cu (maybe_prod p.common._Fu_prod tmp)
-          , maybe_add p._cx (maybe_prod p.common._Fx_prod tmp) )
+          p._cu +? (p.common._Fu_prod *? tmp), p._cx +? (p.common._Fx_prod *? tmp)
         in
         (* compute LQR gain parameters to be used in the subsequent fwd pass *)
         let _k =
@@ -140,7 +139,7 @@ let backward common_info (params : (t option, (t, t -> t) momentary_params list)
             Some (reshape _k_unsqueezed ~shape:(List.take (shape _k_unsqueezed) 2))
         in
         (* update the value function *)
-        let _v = maybe_add _qx (maybe_einsum (z._K, "mba") (_qu, "mb") "ma") in
+        let _v = _qx +? maybe_einsum (z._K, "mba") (_qu, "mb") "ma" in
         _v, { _k; _K = z._K } :: info_list)
   in
   info
@@ -163,9 +162,9 @@ let backward_tangents
       ~init:(_v, [])
       ~f:(fun z p (_v, info_list) ->
         let _qu, _qx =
-          let tmp = maybe_add _v (maybe_einsum (z._V, "mab") (p._f, "kmb") "kma") in
-          ( maybe_add p._cu (maybe_prod p.common._Fu_prod_tangent tmp)
-          , maybe_add p._cx (maybe_prod p.common._Fx_prod_tangent tmp) )
+          let tmp = _v +? maybe_einsum (z._V, "mab") (p._f, "kmb") "kma" in
+          ( p._cu +? (p.common._Fu_prod_tangent *? tmp)
+          , p._cx +? (p.common._Fx_prod_tangent *? tmp) )
         in
         let n_tangents, bs =
           List.hd_exn (maybe_shape p._f), List.nth_exn (maybe_shape p._f) 1
@@ -200,7 +199,7 @@ let backward_tangents
           maybe_reshape _k_squeezed ~shape:[ n_tangents; bs; -1 ]
         in
         (* update the value function *)
-        let _v = maybe_add _qx (maybe_einsum (z._K, "mba") (_qu, "kmb") "kma") in
+        let _v = _qx +? maybe_einsum (z._K, "mba") (_qu, "kmb") "kma" in
         _v, { _k; _K = z._K } :: info_list)
   in
   info
@@ -216,15 +215,9 @@ let forward params backward_info =
       ~init:(params.x0, [])
       ~f:(fun (x, accu) p b ->
         (* compute the optimal control inputs *)
-        let u = maybe_add b._k (maybe_einsum (x, "ma") (b._K, "mba") "mb") in
+        let u = b._k +? maybe_einsum (x, "ma") (b._K, "mba") "mb" in
         (* fold them into the state update *)
-        let x =
-          maybe_add
-            p._f
-            (maybe_add
-               (maybe_prod p.common._Fx_prod2 x)
-               (maybe_prod p.common._Fu_prod2 u))
-        in
+        let x = p._f +? (p.common._Fx_prod2 *? x) +? (p.common._Fu_prod2 *? u) in
         x, Solution.{ u; x } :: accu)
   in
   List.rev solution
@@ -239,14 +232,10 @@ let forward_tangents params backward_info =
       ~init:(params.x0, [])
       ~f:(fun (x, accu) p b ->
         (* compute the optimal control inputs *)
-        let u = maybe_add b._k (maybe_einsum (x, "kma") (b._K, "mba") "kmb") in
+        let u = b._k +? maybe_einsum (x, "kma") (b._K, "mba") "kmb" in
         (* fold them into the state update *)
         let x =
-          maybe_add
-            p._f
-            (maybe_add
-               (maybe_prod p.common._Fx_prod2_tangent x)
-               (maybe_prod p.common._Fu_prod2_tangent u))
+          p._f +? (p.common._Fx_prod2_tangent *? x) +? (p.common._Fu_prod2_tangent *? u)
         in
         x, Solution.{ u; x } :: accu)
   in
@@ -254,7 +243,10 @@ let forward_tangents params backward_info =
 
 let _solve p =
   let common_info = backward_common (List.map p.Params.params ~f:(fun x -> x.common)) in
-  backward common_info p |> forward p
+  backward common_info p
+  |> forward p
+  |> List.map ~f:(fun s ->
+    Solution.{ x = Option.value_exn s.x; u = Option.value_exn s.u })
 
 (* surrogate rhs for the tangent problem; s is the solution obtained from lqr through the primals and p is the full set
    of parameters *)
@@ -268,7 +260,7 @@ let surrogate_rhs
     let tmp = Option.map x ~f:(fun x -> x.tangent) in
     match tmp with
     | Some a -> a
-    | None _ -> None
+    | None -> None
   in
   let _p_primal = Option.map ~f:(fun x -> Maths.const (Maths.primal x)) in
   let _p_tangent x =
@@ -315,14 +307,12 @@ let surrogate_rhs
           else (
             let tmp1 = maybe_einsum (x_curr, "mb") (_dCxx_curr, "kmba") "kma" in
             let tmp2 = maybe_einsum (u_curr, "mb") (_dCxu_curr, "kmab") "kma" in
-            let common = maybe_add (maybe_add tmp1 tmp2) _dcx_curr in
+            let common = tmp1 +? tmp2 +? _dcx_curr in
             match lambda_next with
             | None -> common
             | Some lambda_next ->
-              let tmp3 =
-                maybe_prod (_p_implicit_tangent params_curr.common._Fx_prod) lambda_next
-              in
-              maybe_add common tmp3)
+              let tmp3 = _p_implicit_tangent params_curr.common._Fx_prod *? lambda_next in
+              common +? tmp3)
         in
         let _cu_surro_curr =
           if i = n_steps
@@ -330,14 +320,12 @@ let surrogate_rhs
           else (
             let tmp1 = maybe_einsum (u_curr, "ma") (_dCuu_curr, "kmab") "kmb" in
             let tmp2 = maybe_einsum (x_curr, "ma") (_dCxu_curr, "kmab") "kmb" in
-            let common = maybe_add (maybe_add tmp1 tmp2) _dcu_curr in
+            let common = tmp1 +? tmp2 +? _dcu_curr in
             match lambda_next with
             | None -> common
             | Some lambda_next ->
-              let tmp3 =
-                maybe_prod (_p_implicit_tangent params_curr.common._Fu_prod) lambda_next
-              in
-              maybe_add common tmp3)
+              let tmp3 = _p_implicit_tangent params_curr.common._Fu_prod *? lambda_next in
+              common +? tmp3)
         in
         let lambda_curr =
           let common =
@@ -352,10 +340,8 @@ let surrogate_rhs
               let _Cxu_curr = _p_primal params_curr.common._Cxu in
               maybe_einsum (u_curr, "mb") (_Cxu_curr, "mab") "ma"
             in
-            let tmp3 =
-              maybe_prod (_p_implicit_primal params_curr.common._Fx_prod) lambda_next
-            in
-            maybe_add common (maybe_add tmp2 tmp3)
+            let tmp3 = _p_implicit_primal params_curr.common._Fx_prod *? lambda_next in
+            common +? tmp2 +? tmp3
         in
         (_cx_surro_curr, _cu_surro_curr) :: _cx_cu_surro_accu, Some lambda_curr)
   in
@@ -375,11 +361,9 @@ let surrogate_rhs
           let s_curr = List.nth_exn s i in
           s_curr.u)
       in
-      let tmp1 = maybe_prod (_p_implicit_tangent params_curr.common._Fx_prod2) x_curr in
-      let tmp2 = maybe_prod (_p_implicit_tangent params_curr.common._Fu_prod2) u_curr in
-      if i = n_steps
-      then None
-      else maybe_add (maybe_add tmp1 tmp2) (_p_tangent params_curr._f))
+      let tmp1 = _p_implicit_tangent params_curr.common._Fx_prod2 *? x_curr in
+      let tmp2 = _p_implicit_tangent params_curr.common._Fu_prod2 *? u_curr in
+      if i = n_steps then None else tmp1 +? tmp2 +? _p_tangent params_curr._f)
   in
   let p_tangent =
     Params.

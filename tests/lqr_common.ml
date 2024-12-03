@@ -5,7 +5,6 @@ module Arr = Owl.Arr
 module Mat = Owl.Mat
 module Linalg = Owl.Linalg.D
 
-
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
 let device = Torch.Device.Cpu
 let kind = Torch_core.Kind.(T f64)
@@ -26,7 +25,7 @@ end
 
 module O = Prms.Option (Prms.P)
 module Input = Lqr.Params.Make (O) (Prms.List (Temp.Make (Prms.P) (O)))
-module Output = Prms.List (Lqr.Solution.Make (O))
+module Output = Prms.List (Lqr.Solution.Make (Prms.P))
 
 let bmm a b =
   let open Maths in
