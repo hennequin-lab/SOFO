@@ -9,21 +9,45 @@ open Lqr_common
 
 let rel_tol = Alcotest.float 1e-4
 let n_tests = 20
-let k = 12
+let k = 10
 
 let x0 =
-  let pri = Tensor.rand ~kind ~device [ bs; n ] in
-  let tan = Tensor.randn ~kind ~device [ k; bs; n ] in
+  let pri = Tensor.randn ~kind ~device [ m; a_dim ] in
+  let tan = Tensor.randn ~kind ~device [ k; m; a_dim ] in
   Maths.make_dual pri ~t:(Maths.Direct tan)
 
 let fx () =
-  let pri = Tensor.randn ~kind ~device [ bs; n; n ] in
-  let tan = Tensor.randn ~kind ~device [ k; bs; n; n ] in
+  let pri =
+    Array.init m ~f:(fun _ ->
+      let a = Mat.gaussian a_dim a_dim in
+      let r =
+        a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
+      in
+      Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; a_dim; a_dim |])
+    |> Arr.concatenate ~axis:0
+    |> Tensor.of_bigarray ~device
+  in
+  let tan =
+    Array.init k ~f:(fun _ ->
+      Array.init m ~f:(fun _ ->
+        let a = Mat.gaussian a_dim a_dim in
+        let r =
+          a
+          |> Linalg.eigvals
+          |> Owl.Dense.Matrix.Z.abs
+          |> Owl.Dense.Matrix.Z.re
+          |> Mat.max'
+        in
+        Arr.reshape Mat.(Float.(0.8 / r) $* a) [| 1; 1; a_dim; a_dim |])
+      |> Arr.concatenate ~axis:1)
+    |> Arr.concatenate ~axis:0
+    |> Tensor.of_bigarray ~device
+  in
   Maths.make_dual pri ~t:(Maths.Direct tan)
 
 let fu () =
-  let pri = Tensor.randn ~kind ~device [ bs; m; n ] in
-  let tan = Tensor.randn ~kind ~device [ k; bs; m; n ] in
+  let pri = Tensor.randn ~kind ~device [ m; b_dim; a_dim ] in
+  let tan = Tensor.randn ~kind ~device [ k; m; b_dim; a_dim ] in
   Maths.make_dual pri ~t:(Maths.Direct tan)
 
 let prod f : Maths.t Lqr.prod =
@@ -66,15 +90,15 @@ let prod2_tangent f : Maths.t Lqr.prod =
 
 let q_of_tan ~reg d =
   Array.init k ~f:(fun _ ->
-    Array.init bs ~f:(fun _ ->
+    Array.init m ~f:(fun _ ->
       let ell = Mat.gaussian d d in
       Arr.reshape Mat.(add_diag (ell *@ transpose ell) reg) [| 1; 1; d; d |])
     |> Arr.concatenate ~axis:1)
   |> Arr.concatenate ~axis:0
   |> Tensor.of_bigarray ~device
 
-let dq_xx () = q_of_tan ~reg:0.1 n
-let dq_uu () = q_of_tan ~reg:0.1 m
+let dq_xx () = q_of_tan ~reg:0.1 a_dim
+let dq_uu () = q_of_tan ~reg:0.1 b_dim
 
 let q_xx () =
   let pri = q_xx () in
@@ -88,22 +112,22 @@ let q_uu () =
 
 let c_xu () =
   let pri = _cxu () in
-  let tan = Arr.gaussian [| k; bs; n; m |] |> Tensor.of_bigarray ~device in
+  let tan = Arr.gaussian [| k; m; a_dim; b_dim |] |> Tensor.of_bigarray ~device in
   Maths.make_dual pri ~t:(Maths.Direct tan)
 
 let c_x () =
   let pri = _cx () in
-  let tan = Arr.gaussian [| k; bs; n |] |> Tensor.of_bigarray ~device in
+  let tan = Arr.gaussian [| k; m; a_dim |] |> Tensor.of_bigarray ~device in
   Maths.make_dual pri ~t:(Maths.Direct tan)
 
 let c_u () =
   let pri = _cu () in
-  let tan = Arr.gaussian [| k; bs; m |] |> Tensor.of_bigarray ~device in
+  let tan = Arr.gaussian [| k; m; b_dim |] |> Tensor.of_bigarray ~device in
   Maths.make_dual pri ~t:(Maths.Direct tan)
 
 let f () =
   let pri = _f () in
-  let tan = Arr.gaussian [| k; bs; n |] |> Tensor.of_bigarray ~device in
+  let tan = Arr.gaussian [| k; m; a_dim |] |> Tensor.of_bigarray ~device in
   Maths.make_dual pri ~t:(Maths.Direct tan)
 
 let f_naive (x : Input.M.t) : Output.M.t =
