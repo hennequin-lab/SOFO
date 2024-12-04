@@ -2,8 +2,6 @@ open Base
 open Torch
 include Prms_typ
 
-let print s = Stdio.print_endline (Sexp.to_string_hum s)
-
 let value = function
   | Const x -> x
   | Free x -> x

@@ -319,10 +319,6 @@ let tril (x, dx) ~diagonal =
   let dy = with_tangent dx ~f:(Tensor.tril ~diagonal) in
   (y, dy) |> assert_right_shape "tril"
 
-let last_two_elements lst =
-  let len = List.length lst in
-  if len < 2 then None else Some (List.drop lst (len - 2))
-
 let cholesky (x, dx) =
   let y = Tensor.linalg_cholesky ~upper:false x in
   let dy =
@@ -619,12 +615,6 @@ let einsum (operands : (t * string) list) return =
          | Some a -> Some Tensor.(a + tangent_contrib)))
   in
   primal, Option.map tangent ~f:(fun x -> Direct x)
-
-let cal_cond a =
-  let _, svals, _ = Tensor.svd ~some:true ~compute_uv:true a in
-  let upper = Tensor.maximum svals |> Tensor.to_float0_exn in
-  let lower = Tensor.minimum svals |> Tensor.to_float0_exn in
-  upper /. lower
 
 (* solve for ax=b (if left true) abd xa = b (if left false). Note that if left is false, then b must be 3D (i.e. m x p x n) whereas if left is true, b can be 2D (i.e. m x n) *)
 let linsolve (a, da) (b, db) ~left =

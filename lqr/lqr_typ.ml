@@ -1,5 +1,4 @@
 open Base
-open Torch
 open Forward_torch
 
 (* conventions is, for each batch element:

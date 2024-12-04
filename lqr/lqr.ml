@@ -1,10 +1,6 @@
 open Base
-open Torch
 open Forward_torch
 include Lqr_typ
-
-let print s = Stdio.printf "%s\n%!" (Base.Sexp.to_string_hum s)
-
 open Maths
 
 let ( *@ ) a b =
@@ -39,17 +35,6 @@ let maybe_einsum (a, opsA) (b, opsB) opsC =
   match a, b with
   | Some a, Some b -> Some (einsum [ a, opsA; b, opsB ] opsC)
   | _ -> None
-
-(* reshape a from [shape] to [1, shape] *)
-let maybe_expand a =
-  match a with
-  | Some a -> Some (unsqueeze a ~dim:0)
-  | None -> None
-
-let maybe_shape a =
-  match a with
-  | Some a -> shape a
-  | None -> failwith "shape of a None object cannot be determined"
 
 let maybe_reshape a ~shape =
   match a with
