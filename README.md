@@ -31,7 +31,7 @@ Training recurrent neural networks (RNNs) to perform neuroscience tasks can be c
 @inproceedings{yusecond,
   title={Second-order forward-mode optimization of recurrent neural networks for neuroscience},
   author={Yu, Youjing and Xia, Rui and Ma, Qingxi and Lengyel, M{\'a}t{\'e} and Hennequin, Guillaume},
-  booktitle={The Thirty-eighth Annual Conference on Neural Information Processing Systems},
+  booktitle={Advances in Neural Information Processing Systems 38},
   year={2024},
   url={https://github.com/hennequin-lab/SOFO}
 }
