@@ -76,6 +76,7 @@ let backward_common (common : (t, t -> t) momentary_params_common list) =
   let _, info =
     let common_except_last = List.drop_last_exn common in
     List.fold_right common_except_last ~init:(_V, []) ~f:(fun z (_V, info_list) ->
+      Stdlib.Gc.major ();
       let _Quu, _Qxx, _Qux =
         let tmp = z._Fx_prod *? _V in
         ( z._Cuu +? (z._Fu_prod *? maybe_btr (z._Fu_prod *? _V))
@@ -149,9 +150,9 @@ let v ~tangent ~_K ~_qx ~_qu =
 (* backward recursion; assumes all the common (expensive) stuff has already been
    computed *)
 let backward
-  ?(tangent = false)
-  common_info
-  (params : (t option, (t, t -> t) momentary_params list) Params.p)
+      ?(tangent = false)
+      common_info
+      (params : (t option, (t, t -> t) momentary_params list) Params.p)
   =
   let _v =
     match List.last params.params with
@@ -166,6 +167,7 @@ let backward
       params_except_last
       ~init:(_v, [])
       ~f:(fun z p (_v, info_list) ->
+        Stdlib.Gc.major ();
         let _qu, _qx = _qu_qx ~tangent ~z ~p _v in
         (* compute LQR gain parameters to be used in the subsequent fwd pass *)
         let _k = _k ~tangent ~z ~p _qu in
@@ -195,6 +197,7 @@ let forward ?(tangent = false) params backward_info =
       backward_info
       ~init:(params.x0, [])
       ~f:(fun (x, accu) p b ->
+        Stdlib.Gc.major ();
         (* compute the optimal control inputs *)
         let u = _u ~tangent ~b ~x in
         (* fold them into the state update *)
@@ -205,7 +208,10 @@ let forward ?(tangent = false) params backward_info =
 
 let _solve p =
   let common_info = backward_common (List.map p.Params.params ~f:(fun x -> x.common)) in
-  backward common_info p
+  Stdlib.Gc.major ();
+  let bck = backward common_info p in
+  Stdlib.Gc.major ();
+  bck
   |> forward p
   |> List.map ~f:(fun s ->
     Solution.{ x = Option.value_exn s.x; u = Option.value_exn s.u })
@@ -213,8 +219,8 @@ let _solve p =
 (* surrogate rhs for the tangent problem; s is the solution obtained from lqr through the primals and p is the full set
    of parameters *)
 let surrogate_rhs
-  (s : t option Solution.p list)
-  (p : (t option, (t, t prod) momentary_params list) Params.p)
+      (s : t option Solution.p list)
+      (p : (t option, (t, t prod) momentary_params list) Params.p)
   : (t option, (t, t -> t) momentary_params list) Params.p
   =
   let _p_implicit_primal = Option.map ~f:(fun x -> x.primal) in
@@ -353,13 +359,22 @@ let solve p =
   let common_info =
     backward_common (List.map p_primal.Params.params ~f:(fun x -> x.common))
   in
+  Stdlib.Gc.major ();
   (* SOLVE THE PRIMAL PROBLEM *)
-  let s = backward common_info p_primal |> forward p_primal in
+  let s =
+    let bck = backward common_info p_primal in
+    Stdlib.Gc.major ();
+    bck |> forward p_primal
+  in
+  Stdlib.Gc.major ();
   (* SOLVE THE TANGENT PROBLEM, reusing what's common *)
   let surrogate = surrogate_rhs s p in
   let s_tangents =
-    backward common_info surrogate ~tangent:true |> forward ~tangent:true surrogate
+    let bck = backward common_info surrogate ~tangent:true in
+    Stdlib.Gc.major ();
+    bck |> forward ~tangent:true surrogate
   in
+  Stdlib.Gc.major ();
   (* MANUALLY PAIR UP PRIMAL AND TANGENTS OF THE SOLUTION *)
   List.map2_exn s s_tangents ~f:(fun s st ->
     let zip a at =

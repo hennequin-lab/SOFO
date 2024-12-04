@@ -160,6 +160,7 @@ module Default = struct
   let b = 3
   let tmax = 10
   let m = 7
+  let k = 512
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
 end
@@ -171,7 +172,6 @@ module Make_LDS (X : module type of Default) = struct
   let to_device = Tensor.of_bigarray ~device:X.device
   let device = X.device
   let kind = X.kind
-  let sample_x0 () = Tensor.randn ~device ~kind [ X.m; X.a ] |> Maths.const
 
   (* make sure fx is stable *)
   let sample_fx () =
@@ -193,15 +193,37 @@ module Make_LDS (X : module type of Default) = struct
     |> Arr.concatenate ~axis:0
     |> to_device
 
-  let sample_q_xx () = q_of ~reg:0.1 X.a |> Maths.const
-  let sample_q_uu () = q_of ~reg:0.1 X.b |> Maths.const
-  let sample_const shape = Tensor.randn ~device ~kind shape |> Maths.const
-  let sample_fu () = sample_const [ X.m; X.b; X.a ]
-  let sample_q_xu () = sample_const [ X.m; X.a; X.b ]
-  let sample_c_x () = sample_const [ X.m; X.a ]
-  let sample_c_u () = sample_const [ X.m; X.b ]
-  let sample_f () = sample_const [ X.m; X.a ]
-  let sample_u () = sample_const [ X.m; X.b ]
+  let q_tan_of ~reg d =
+    List.init X.k ~f:(fun _ ->
+      Array.init X.m ~f:(fun _ ->
+        let ell = Mat.gaussian d d in
+        Arr.reshape Mat.(add_diag (ell *@ transpose ell) reg) [| 1; 1; d; d |])
+      |> Arr.concatenate ~axis:1
+      |> to_device)
+    |> Tensor.concat ~dim:0
+
+  let sample_q_xx () =
+    let pri = q_of ~reg:0.1 X.a in
+    let tan = q_tan_of ~reg:0.1 X.a in
+    Maths.make_dual pri ~t:(Maths.Direct tan)
+
+  let sample_q_uu () =
+    let pri = q_of ~reg:0.1 X.b in
+    let tan = q_tan_of ~reg:0.1 X.b in
+    Maths.make_dual pri ~t:(Maths.Direct tan)
+
+  let sample_tangent shape =
+    let pri = Tensor.randn ~device ~kind shape in
+    let tan = Tensor.randn ~device ~kind (X.k :: shape) in
+    Maths.make_dual pri ~t:(Maths.Direct tan)
+
+  let sample_x0 () = sample_tangent [ X.m; X.a ]
+  let sample_fu () = sample_tangent [ X.m; X.b; X.a ]
+  let sample_q_xu () = sample_tangent [ X.m; X.a; X.b ]
+  let sample_c_x () = sample_tangent [ X.m; X.a ]
+  let sample_c_u () = sample_tangent [ X.m; X.b ]
+  let sample_f () = sample_tangent [ X.m; X.a ]
+  let sample_u () = sample_tangent [ X.m; X.b ]
 
   let params : (Maths.t option, (Maths.t, Maths.t option) Temp.p list) Params.p =
     Lqr.Params.
