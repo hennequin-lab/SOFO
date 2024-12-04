@@ -7,17 +7,19 @@ Training recurrent neural networks (RNNs) to perform neuroscience tasks can be c
  <img src="https://github.com/hennequin-lab/SOFO/blob/main/sofo_illustrate.png" width="700">
 </p>
 
+## Presentation 
+Checkout our poster and video presentation at [Neurips 2024](https://neurips.cc/virtual/2024/poster/95282)!
+
 ## Installation steps
 
 - install opam : https://opam.ocaml.org/doc/Install.html
 - choose opam switch 5.0.0 
 - install dune (run `opam install dune`) 
-- install owl (run `opam install owl`); you will need to have OpenBLAS installed (see below in case issues with OpenBLAS arise). 
-- install base, torch, owl_ode, bos (`opam install base torch owl-ode bos ppx_accessor ppx_deriving_yojson`)
+- install base, torch, bos (`opam install base torch bos ppx_accessor ppx_deriving_yojson`)
 - clone https://github.com/hennequin-lab/cmdargs and do `dune build @install` followed by `dune install` (after `cd`-ing into the corresponding directory)
 
 ## To run examples
-
+- install owl and owl_ode (run `opam install owl owl-ode`); you will need to have OpenBLAS installed (see below in case issues with OpenBLAS arise). 
 - compile the example by running e.g. `dune build examples/example.exe`. If linking issues arise, please get in touch.
 - run `dune exec _build/default/examples/example.exe -d [results_directory]` (where `[results_directory]` is where you want your results to be saved). Depending on the example file you are trying to execute, there might be additional command line arguments.
 
@@ -28,12 +30,12 @@ Training recurrent neural networks (RNNs) to perform neuroscience tasks can be c
   
 ## Citation
 ```
-@inproceedings{yusecond,
-  title={Second-order forward-mode optimization of recurrent neural networks for neuroscience},
-  author={Yu, Youjing and Xia, Rui and Ma, Qingxi and Lengyel, M{\'a}t{\'e} and Hennequin, Guillaume},
-  booktitle={Advances in Neural Information Processing Systems},
-  volume={37},
-  year={2024},
-  url={https://github.com/hennequin-lab/SOFO}
+@inproceedings{yu2024sofo,
+ author={Yu, Youjing and Xia, Rui and Ma, Qingxi and Lengyel, M{\'a}t{\'e} and Hennequin, Guillaume},
+ booktitle = {Advances in Neural Information Processing Systems},
+ title={Second-order forward-mode optimization of recurrent neural networks for neuroscience},
+ url={https://github.com/hennequin-lab/SOFO},
+ volume = {37},
+ year = {2024}
 }
 ```
