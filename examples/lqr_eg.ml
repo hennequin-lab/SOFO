@@ -1,6 +1,5 @@
 (* memory profiling of lqr naive vs implicit *)
 open Base
-open Torch
 open Forward_torch
 open Sofo
 module Mat = Owl.Dense.Matrix.S
@@ -17,7 +16,7 @@ let _ =
 module Lds_params_dim = struct
   let a = 24
   let b = 10
-  let tmax = 50
+  let tmax = 10
   let m = 64
   let k = 100
   let kind = Torch_core.Kind.(T f64)
@@ -38,7 +37,7 @@ let f_list : Maths.t Lds_data.f_params list =
       ; _f = Some (Data.sample_f ())
       })
 
-let u_targets, x_targets = Data.traj_rollout ~x0 ~f_list
+let _, x_targets = Data.traj_rollout ~x0 ~f_list
 
 (* for the purpose of memory profiling only everything has tangents *)
 let params : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lqr.Params.p

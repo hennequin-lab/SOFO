@@ -84,18 +84,11 @@ let _k ~tangent ~z ~_f _qu =
     match _f with
     | Some _f ->
       (* from [k x m x b] to [m x b x k] *)
-      let _qu_swapped =
-        Option.value_exn _qu
-        |> Maths.transpose ~dim0:0 ~dim1:1
-        |> Maths.transpose ~dim0:1 ~dim1:2
-        |> Some
-      in
-      let _k_swapped =
-        neg_inv_symm ~is_vector:false _qu_swapped (z._Quu_chol, z._Quu_chol_T)
-      in
+      let _qu_swapped = Option.value_exn _qu |> Maths.permute ~dims:[ 1; 2; 0 ] |> Some in
+      neg_inv_symm ~is_vector:false _qu_swapped (z._Quu_chol, z._Quu_chol_T)
       (* from [m x b x k] to [k x m x b] *)
-      Maths.transpose ~dim0:1 ~dim1:2 (Option.value_exn _k_swapped)
-      |> Maths.transpose ~dim0:0 ~dim1:1
+      |> Option.value_exn
+      |> Maths.permute ~dims:[ 2; 0; 1 ]
       |> Some
     | None -> None)
   else (
@@ -198,12 +191,14 @@ let _solve p =
   |> List.map ~f:(fun s ->
     Solution.{ x = Option.value_exn s.x; u = Option.value_exn s.u })
 
-(* backward pass and forward pass with surrogate rhs for the tangent problem; s is the solution obtained from lqr through the primals and p is the full set of parameters *)
+(* backward pass and forward pass with surrogate rhs for the tangent problem;
+   s is the solution obtained from lqr through the primals
+   and p is the full set of parameters *)
 let tangent_solve
   common_info
   (s : t option Solution.p list)
   (p : (t option, (t, t prod) momentary_params list) Params.p)
-    (* : t option Solution.p list *)
+  : t option Solution.p list
   =
   let _p_implicit_primal = Option.map ~f:(fun x -> x.primal) in
   let _p_implicit_tangent x =
