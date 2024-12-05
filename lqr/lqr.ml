@@ -113,16 +113,13 @@ let _k ~tangent ~z ~_f _qu =
       (* from [k x m x b] to [m x b x k] *)
       let _qu_swapped =
         Option.value_exn _qu
-        |> Maths.transpose ~dim0:0 ~dim1:1
-        |> Maths.transpose ~dim0:1 ~dim1:2
+        |> Maths.permute ~dims:[ 1; 2; 0 ]
         |> Some
       in
-      let _k_swapped =
-        neg_inv_symm ~is_vector:false _qu_swapped (z._Quu_chol, z._Quu_chol_T)
-      in
+      neg_inv_symm ~is_vector:false _qu_swapped (z._Quu_chol, z._Quu_chol_T)
       (* from [m x b x k] to [k x m x b] *)
-      Maths.transpose ~dim0:1 ~dim1:2 (Option.value_exn _k_swapped)
-      |> Maths.transpose ~dim0:0 ~dim1:1
+      |> Option.value_exn
+      |> Maths.permute ~dims:[ 2; 0; 1 ]
       |> Some
     | None -> None)
   else (

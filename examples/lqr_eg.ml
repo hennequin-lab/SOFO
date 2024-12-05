@@ -17,9 +17,9 @@ let _ =
 module Lds_params_dim = struct
   let a = 24
   let b = 10
-  let tmax = 50
+  let tmax = 10
   let m = 64
-  let k = 64
+  let k = 350
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
 end
@@ -64,6 +64,7 @@ let params : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lq
    ----------------------------------------- *)
 let f_naive params = Lqr._solve (Data.naive_params params)
 let f_implicit params = Lqr.solve (Data.implicit_params params)
+
 let t0 = Unix.gettimeofday ()
 let naive_result = f_implicit params
 let t1 = Unix.gettimeofday ()
