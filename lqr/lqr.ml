@@ -110,32 +110,20 @@ let _k ~tangent ~z ~_f _qu =
   then (
     match _f with
     | Some _f ->
-      let n_tangents, bs = List.hd_exn (shape _f), List.nth_exn (shape _f) 1 in
-      (* shape [km x b x b ]*)
-      let _quu_chol_expanded =
-        List.init n_tangents ~f:(fun _ -> unsqueeze (Option.value_exn z._Quu_chol) ~dim:0)
-        |> concat_list ~dim:0
+      (* from [k x m x b] to [m x b x k] *)
+      let _qu_swapped =
+        Option.value_exn _qu
+        |> Maths.transpose ~dim0:0 ~dim1:1
+        |> Maths.transpose ~dim0:1 ~dim1:2
+        |> Some
       in
-      let _quu_chol_squeezed =
-        Some
-          (reshape
-             _quu_chol_expanded
-             ~shape:
-               (Int.(n_tangents * bs)
-                :: [ List.last_exn (shape _quu_chol_expanded)
-                   ; List.last_exn (shape _quu_chol_expanded)
-                   ]))
+      let _k_swapped =
+        neg_inv_symm ~is_vector:false _qu_swapped (z._Quu_chol, z._Quu_chol_T)
       in
-      let _quu_chol_squeezed_T = maybe_btr _quu_chol_squeezed in
-      (* shape [km x b] *)
-      let _qu_squeezed = maybe_reshape _qu ~shape:[ Int.(n_tangents * bs); -1 ] in
-      let _k_squeezed =
-        neg_inv_symm
-          ~is_vector:true
-          _qu_squeezed
-          (_quu_chol_squeezed, _quu_chol_squeezed_T)
-      in
-      maybe_reshape _k_squeezed ~shape:[ n_tangents; bs; -1 ]
+      (* from [m x b x k] to [k x m x b] *)
+      Maths.transpose ~dim0:1 ~dim1:2 (Option.value_exn _k_swapped)
+      |> Maths.transpose ~dim0:0 ~dim1:1
+      |> Some
     | None -> None)
   else (
     let _k_unsqueezed = neg_inv_symm ~is_vector:true _qu (z._Quu_chol, z._Quu_chol_T) in
@@ -286,6 +274,7 @@ let surrogate_rhs
     let xu_list = List.map2_exn x_list u_list ~f:(fun x u -> x, u) in
     List.map2_exn params_except_last xu_list ~f:(fun params (x, u) -> { params; x; u })
   in
+  (* backward pass with surrogate params constructed on the fly *)
   let _, _, info_list =
     List.fold_right2_exn
       common_info
@@ -330,7 +319,7 @@ let surrogate_rhs
           let tmp3 = _p_implicit_primal p.params.common._Fx_prod *? lambda_next in
           common +? tmp2 +? tmp3
         in
-        (* if at time step T, do not calculate gain *)
+        (* backward pass *)
         let _qu, _qx =
           let _Fu_prod, _Fx_prod =
             ( _p_implicit_primal p.params.common._Fu_prod_tangent
@@ -352,6 +341,7 @@ let surrogate_rhs
         let _v = v ~tangent:true ~_K:z._K ~_qx ~_qu in
         lambda_curr, _v, { _k; _K = z._K; _f = _f_surro_curr } :: info_list)
   in
+  (* forward pass *)
   let _, solution =
     List.fold2_exn
       params_except_last
