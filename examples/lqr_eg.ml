@@ -19,7 +19,7 @@ module Lds_params_dim = struct
   let b = 10
   let tmax = 50
   let m = 64
-  let k = 64
+  let k = 100
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
 end
@@ -62,13 +62,25 @@ let params : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lq
 (* -----------------------------------------
    ---- Memory Profiling   ------
    ----------------------------------------- *)
-let f_naive params = Lqr._solve (Data.naive_params params)
-let f_implicit params = Lqr.solve (Data.implicit_params params)
-let t0 = Unix.gettimeofday ()
-let naive_result = f_implicit params
-let t1 = Unix.gettimeofday ()
-let _ = Convenience.print [%message "implicit" (t1 -. t0 : float)]
-(* let t0 = Unix.gettimeofday ()
-let naive_result = f_naive params
-let t1 = Unix.gettimeofday ()
-let _ = Convenience.print [%message "naive" (t1 -. t0 : float)] *)
+
+let time_this ~label f =
+  Stdlib.Gc.compact ();
+  let t0 = Unix.gettimeofday () in
+  let result =
+    Array.init 20 ~f:(fun i ->
+      Convenience.print [%message (i : int)];
+      ignore (f ()))
+  in
+  let dt = Unix.gettimeofday () -. t0 in
+  Convenience.print [%message (label : string) (dt : float)];
+  result
+
+let _ =
+  match Cmdargs.get_string "-method" with
+  | Some "implicit" ->
+    let p = Data.implicit_params params in
+    time_this ~label:"implicit" (fun _ -> Lqr.solve p) |> ignore
+  | Some "naive" ->
+    let p = Data.naive_params params in
+    time_this ~label:"naive" (fun _ -> Lqr._solve p) |> ignore
+  | _ -> failwith "use cmdline arg '-method {naive | implicit}'"

@@ -229,7 +229,7 @@ module Make_LDS (X : module type of Default) = struct
     Lqr.Params.
       { x0 = Some (sample_x0 ())
       ; params =
-          (let tmp () =
+          (let tmp =
              Temp.
                { _f = Some (sample_f ())
                ; _Fx_prod = sample_fx ()
@@ -241,7 +241,7 @@ module Make_LDS (X : module type of Default) = struct
                ; _Cuu = sample_q_uu ()
                }
            in
-           List.init (X.tmax + 1) ~f:(fun _ -> tmp ()))
+           List.init (X.tmax + 1) ~f:(fun _ -> tmp))
       }
 
   let print s = Stdio.print_endline (Sexp.to_string_hum s)
@@ -271,20 +271,23 @@ module Make_LDS (X : module type of Default) = struct
 
   let naive_params (x : Input.M.t) =
     let params =
+      let p0 = List.hd_exn x.params in
+      let _Cxx = Some Maths.(p0._Cxx *@ btr p0._Cxx) in
+      let _Cuu = Some Maths.(p0._Cuu *@ btr p0._Cuu) in
       List.map x.params ~f:(fun p ->
         Lqr.
           { common =
-              { _Fx_prod = Some (bmm p._Fx_prod)
-              ; _Fx_prod2 = Some (bmm2 p._Fx_prod)
-              ; _Fu_prod = Some (bmm p._Fu_prod)
-              ; _Fu_prod2 = Some (bmm2 p._Fu_prod)
-              ; _Fx_prod_tangent = Some (bmm_tangent_v p._Fx_prod)
-              ; _Fx_prod2_tangent = Some (bmm2_tangent_v p._Fx_prod)
-              ; _Fu_prod_tangent = Some (bmm_tangent_v p._Fu_prod)
-              ; _Fu_prod2_tangent = Some (bmm2_tangent_v p._Fu_prod)
-              ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
-              ; _Cxu = p._Cxu
-              ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
+              { _Fx_prod = Some (bmm p0._Fx_prod)
+              ; _Fx_prod2 = Some (bmm2 p0._Fx_prod)
+              ; _Fu_prod = Some (bmm p0._Fu_prod)
+              ; _Fu_prod2 = Some (bmm2 p0._Fu_prod)
+              ; _Fx_prod_tangent = Some (bmm_tangent_v p0._Fx_prod)
+              ; _Fx_prod2_tangent = Some (bmm2_tangent_v p0._Fx_prod)
+              ; _Fu_prod_tangent = Some (bmm_tangent_v p0._Fu_prod)
+              ; _Fu_prod2_tangent = Some (bmm2_tangent_v p0._Fu_prod)
+              ; _Cxx
+              ; _Cxu = p0._Cxu
+              ; _Cuu
               }
           ; _f = p._f
           ; _cx = p._cx
@@ -295,20 +298,23 @@ module Make_LDS (X : module type of Default) = struct
 
   let implicit_params (x : Input.M.t) =
     let params =
+      let p0 = List.hd_exn x.params in
+      let _Cxx = Some Maths.(p0._Cxx *@ btr p0._Cxx) in
+      let _Cuu = Some Maths.(p0._Cuu *@ btr p0._Cuu) in
       List.map x.params ~f:(fun p ->
         Lqr.
           { common =
-              { _Fx_prod = Some (_Fx_prod p._Fx_prod)
-              ; _Fx_prod2 = Some (_Fx_prod2 p._Fx_prod)
-              ; _Fu_prod = Some (_Fu_prod p._Fu_prod)
-              ; _Fu_prod2 = Some (_Fu_prod2 p._Fu_prod)
+              { _Fx_prod = Some (_Fx_prod p0._Fx_prod)
+              ; _Fx_prod2 = Some (_Fx_prod2 p0._Fx_prod)
+              ; _Fu_prod = Some (_Fu_prod p0._Fu_prod)
+              ; _Fu_prod2 = Some (_Fu_prod2 p0._Fu_prod)
               ; _Fx_prod_tangent = Some (_Fx_prod_tangent p._Fx_prod)
               ; _Fx_prod2_tangent = Some (_Fx_prod2_tangent p._Fx_prod)
               ; _Fu_prod_tangent = Some (_Fu_prod_tangent p._Fu_prod)
               ; _Fu_prod2_tangent = Some (_Fu_prod2_tangent p._Fu_prod)
-              ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
-              ; _Cxu = p._Cxu
-              ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)
+              ; _Cxx
+              ; _Cxu = p0._Cxu
+              ; _Cuu
               }
           ; _f = p._f
           ; _cx = p._cx

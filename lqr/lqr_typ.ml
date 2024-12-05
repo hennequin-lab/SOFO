@@ -52,3 +52,29 @@ module Solution = struct
     }
   [@@deriving prms]
 end
+
+open Maths
+
+type backward_common_info =
+  { _Quu_chol : t option
+  ; _Quu_chol_T : t option
+  ; _V : t option
+  ; _K : t option
+  }
+
+type backward_info =
+  { _K : t option
+  ; _k : t option
+  }
+
+type backward_info_f =
+  { _K : t option
+  ; _k : t option
+  ; _f : t option
+  }
+
+type backward_surrogate =
+  { x : t option
+  ; u : t option
+  ; params : (t, t prod) momentary_params
+  }
