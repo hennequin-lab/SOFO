@@ -14,11 +14,11 @@ let _ =
    -- Define Control Problem          ------
    ----------------------------------------- *)
 module Lds_params_dim = struct
-  let a = 24
+  let a = 100
   let b = 10
-  let tmax = 10
+  let tmax = 100
   let m = 64
-  let k = 100
+  let k = 128
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
 end
@@ -30,18 +30,19 @@ let x0 = Data.sample_x0 ()
 
 (* need to sample these first to get the trajectory *)
 let f_list : Maths.t Lds_data.f_params list =
+  let a = Data.sample_fx () in
+  let b = Data.sample_fu () in
   List.init (Lds_params_dim.tmax + 1) ~f:(fun _ ->
-    Lds_data.
-      { _Fx_prod = Data.sample_fx ()
-      ; _Fu_prod = Data.sample_fu ()
-      ; _f = Some (Data.sample_f ())
-      })
+    Lds_data.{ _Fx_prod = a; _Fu_prod = b; _f = Some (Data.sample_f ()) })
 
 let _, x_targets = Data.traj_rollout ~x0 ~f_list
 
 (* for the purpose of memory profiling only everything has tangents *)
 let params : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lqr.Params.p
   =
+  let _Cxx = Data.sample_q_xx () in
+  let _Cxu = Some (Data.sample_q_xu ()) in
+  let _Cuu = Data.sample_q_uu () in
   Lqr.Params.
     { x0 = Some x0
     ; params =
@@ -52,9 +53,9 @@ let params : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lq
             ; _Fu_prod = params._Fu_prod
             ; _cx = Some Maths.(neg x)
             ; _cu = Some (Data.sample_c_u ())
-            ; _Cxx = Data.sample_q_xx ()
-            ; _Cxu = Some (Data.sample_q_xu ())
-            ; _Cuu = Data.sample_q_uu ()
+            ; _Cxx
+            ; _Cxu
+            ; _Cuu
             })
     }
 
@@ -66,7 +67,7 @@ let time_this ~label f =
   Stdlib.Gc.compact ();
   let t0 = Unix.gettimeofday () in
   let result =
-    Array.init 20 ~f:(fun i ->
+    Array.init 200 ~f:(fun i ->
       Convenience.print [%message (i : int)];
       ignore (f ()))
   in
