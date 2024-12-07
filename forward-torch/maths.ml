@@ -89,6 +89,11 @@ let unsqueeze (x, dx) ~dim =
   let dy = with_tangent dx ~f:(fun dx -> Tensor.unsqueeze dx ~dim:Int.(dim + 1)) in
   (y, dy) |> assert_right_shape "unsqueeze"
 
+let squeeze (x, dx) ~dim =
+  let y = Tensor.squeeze_dim x ~dim in
+  let dy = with_tangent dx ~f:(fun dx -> Tensor.squeeze_dim dx ~dim:Int.(dim + 1)) in
+  (y, dy) |> assert_right_shape "squeeze"
+
 (* y = -x, dy = -dx *)
 let neg (x, dx) =
   let y = Tensor.neg x in
@@ -422,12 +427,12 @@ let gumbel_softmax (x, dx) ~tau ~with_noise ~discrete =
   (y_final, dy) |> assert_right_shape "gumbel_softmax"
 
 let maxpool2d
-  ?(padding = 0, 0)
-  ?(dilation = 1, 1)
-  ?(ceil_mode = false)
-  ?stride
-  (x, dx)
-  ~ksize
+      ?(padding = 0, 0)
+      ?(dilation = 1, 1)
+      ?(ceil_mode = false)
+      ?stride
+      (x, dx)
+      ~ksize
   =
   let stride =
     match stride with
@@ -817,13 +822,13 @@ let __linsolve_triangular (a, da) (b, db) ~left ~upper =
   (z, dz) |> assert_right_shape "linsolve_triangular"
 
 let conv2d
-  ?(padding = 0, 0)
-  ?(dilation = 1, 1)
-  ?(groups = 1)
-  ~bias:(b, db)
-  ~stride
-  (x, dx)
-  (w, dw)
+      ?(padding = 0, 0)
+      ?(dilation = 1, 1)
+      ?(groups = 1)
+      ~bias:(b, db)
+      ~stride
+      (x, dx)
+      (w, dw)
   =
   (* x has shape [bs x n_channels x w x h], w has shape [out_channels x in_channels x kerl_x x kerl_y] *)
   let z = Tensor.conv2d ~padding ~dilation ~groups x w (Some b) ~stride in
@@ -839,9 +844,9 @@ let conv2d
           db
           ~shape:
             (List.init n_dim ~f:(function
-              | 0 -> num_tangents
-              | 2 -> c_out
-              | _ -> 1))
+               | 0 -> num_tangents
+               | 2 -> c_out
+               | _ -> 1))
       in
       Tensor.(db + dz)
   in

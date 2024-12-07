@@ -50,8 +50,9 @@ let generate_tensor ~shape ~input_constr_list =
   let x =
     if List.mem input_constr_list `positive ~equal:Poly.( = )
     then Tensor.(add_scalar (abs x) (Scalar.f 0.1))
-    else if List.mem input_constr_list `not_all_neg ~equal:Poly.( = )
-            (* guard against the all zero case *)
+    else if
+      List.mem input_constr_list `not_all_neg ~equal:Poly.( = )
+      (* guard against the all zero case *)
     then (
       let x_abs = Tensor.(abs x) in
       let y = Tensor.randint_like_low_dtype x_abs ~low:(-1) ~high:1 in

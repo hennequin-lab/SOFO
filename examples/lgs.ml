@@ -1,25 +1,25 @@
-(* memory profiling of lqr naive vs implicit *)
+(* Linear Gaussian Dynamics, with same state/control/cost parameters across trial (i.e. batch_const=true) *)
 open Base
 open Forward_torch
 open Sofo
 module Mat = Owl.Dense.Matrix.S
 module Arr = Owl.Dense.Ndarray.S
 
-let _ =
+(* let _ =
   Random.init 1999;
   Owl_stats_prng.init (Random.int 100000);
-  Torch_core.Wrapper.manual_seed (Random.int 100000)
+  Torch_core.Wrapper.manual_seed (Random.int 100000) *)
 
 (* -----------------------------------------
    -- Define Control Problem          ------
    ----------------------------------------- *)
 module Lds_params_dim = struct
-  let a = 24
-  let b = 10
+  let a = 6
+  let b = 3
   let tmax = 10
   let m = 64
   let k = 64
-  let batch_const = false
+  let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
 end
@@ -68,7 +68,7 @@ let time_this ~label f =
   Stdlib.Gc.compact ();
   let t0 = Unix.gettimeofday () in
   let result =
-    Array.init 200 ~f:(fun i ->
+    Array.init 20 ~f:(fun i ->
       Convenience.print [%message (i : int)];
       ignore (f ()))
   in

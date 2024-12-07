@@ -19,6 +19,7 @@ val view : t -> size:int list -> t
 val reshape : t -> shape:int list -> t
 val permute : t -> dims:int list -> t
 val unsqueeze : t -> dim:int -> t
+val squeeze : t -> dim:int -> t
 val neg : t -> t
 val trace : t -> t
 val sin : t -> t
