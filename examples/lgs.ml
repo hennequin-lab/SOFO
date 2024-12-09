@@ -1,21 +1,22 @@
-(* Linear Gaussian Dynamics, with same state/control/cost parameters across trial (i.e. batch_const=true) *)
+(* Linear Gaussian Dynamics, with same state/control/cost parameters constant across trials and across time *)
+open Printf
 open Base
 open Forward_torch
+open Torch
 open Sofo
-module Mat = Owl.Dense.Matrix.S
-module Arr = Owl.Dense.Ndarray.S
 
-(* let _ =
+let _ =
   Random.init 1999;
   Owl_stats_prng.init (Random.int 100000);
-  Torch_core.Wrapper.manual_seed (Random.int 100000) *)
+  Torch_core.Wrapper.manual_seed (Random.int 100000)
 
 (* -----------------------------------------
-   -- Define Control Problem          ------
+   -- Control Problem / Data Generation ---
    ----------------------------------------- *)
-module Lds_params_dim = struct
+module Dims = struct
   let a = 6
   let b = 3
+  let o = 4
   let tmax = 10
   let m = 64
   let k = 64
@@ -24,68 +25,300 @@ module Lds_params_dim = struct
   let device = Torch.Device.cuda_if_available ()
 end
 
-module Data = Lds_data.Make_LDS (Lds_params_dim)
+module S = Lds_data.Sample_LDS (Dims)
+module Data = Lds_data.Make_LDS_Tensor (Dims) (Lds_data.Sample_LDS)
 
-(* sample params first to rollout traj for _cx calculation *)
-let x0 = Data.sample_x0 ()
+(* control costs - time invariant *)
+let _Cxx = Data.sample_q_xx ()
+let _Cxu = None
+let _Cuu = Data.sample_q_uu ()
 
-(* need to sample these first to get the trajectory *)
-let f_list : Maths.t Lds_data.f_params list =
-  let a = Data.sample_fx () in
-  let b = Data.sample_fu () in
-  List.init (Lds_params_dim.tmax + 1) ~f:(fun _ ->
-    Lds_data.{ _Fx_prod = a; _Fu_prod = b; _f = Some (Data.sample_f ()) })
+(* TODO: for now we set x0=0? *)
+let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
 
-let _, x_targets = Data.traj_rollout ~x0 ~f_list
-
-(* for the purpose of memory profiling only everything has tangents *)
-let params : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lqr.Params.p
-  =
-  let _Cxx = Data.sample_q_xx () in
-  let _Cxu = Some (Data.sample_q_xu ()) in
-  let _Cuu = Data.sample_q_uu () in
-  Lqr.Params.
-    { x0 = Some x0
-    ; params =
-        List.map2_exn f_list x_targets ~f:(fun params x ->
-          Lds_data.Temp.
-            { _f = params._f
-            ; _Fx_prod = params._Fx_prod
-            ; _Fu_prod = params._Fu_prod
-            ; _cx = Some Maths.(neg x)
-            ; _cu = Some (Data.sample_c_u ())
-            ; _Cxx
-            ; _Cxu
-            ; _Cuu
-            })
-    }
+let sample_data () =
+  (* generate ground truth params and data *)
+  let data_gen ~x0 =
+    (* need to sample these first to get the trajectory *)
+    let f_list : Tensor.t Lds_data.f_params list =
+      (* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
+      let _Fx = Data.sample_fx () in
+      let _Fu = Data.sample_fu () in
+      let c = Data.sample_c () in
+      let b = Data.sample_b () in
+      let cov = Data.sample_output_cov () in
+      List.init (Dims.tmax + 1) ~f:(fun _ ->
+        Lds_data.
+          { _Fx_prod = _Fx
+          ; _Fu_prod = _Fu
+          ; _f = None
+          ; _c = Some c
+          ; _b = Some b
+          ; _cov = Some cov
+          })
+    in
+    let u_list = Data.sample_u_list () in
+    Data.traj_rollout ~x0 ~f_list ~u_list
+  in
+  let x_list, o_list = data_gen ~x0 in
+  let o_list = List.map o_list ~f:(fun o -> Option.value_exn o) in
+  x_list, o_list
 
 (* -----------------------------------------
-   ---- Memory Profiling   ------
+   ----- Utilitiy Functions ------
    ----------------------------------------- *)
 
-let time_this ~label f =
-  Stdlib.Gc.compact ();
-  let t0 = Unix.gettimeofday () in
-  let result =
-    Array.init 20 ~f:(fun i ->
-      Convenience.print [%message (i : int)];
-      ignore (f ()))
+let tmp_einsum a b =
+  if Dims.batch_const
+  then Maths.einsum [ a, "ma"; b, "ab" ] "mb"
+  else Maths.einsum [ a, "ma"; b, "mab" ] "mb"
+
+(* -----------------------------------------
+   -- Model setup and optimizer
+   ----------------------------------------- *)
+let in_dir = Cmdargs.in_dir "-d"
+let _ = Bos.Cmd.(v "rm" % "-f" % in_dir "info") |> Bos.OS.Cmd.run
+
+let base =
+  Optimizer.Config.Base.
+    { default with kind = Torch_core.Kind.(T f64); ba_kind = Bigarray.float64 }
+
+let max_iter = 1000
+
+(* let config ~base_lr ~gamma ~iter:_ =
+  Optimizer.Config.SOFO.
+    { base
+    ; learning_rate = Some base_lr
+    ; n_tangents = 128
+    ; rank_one = false
+    ; damping = gamma
+    ; momentum = None
+    } *)
+
+let config ~base_lr ~gamma:_ ~iter:_ =
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
+
+module LGS = struct
+  module PP = struct
+    type 'a p =
+      { _Fx_prod : 'a
+      ; _Fu_prod : 'a
+      ; _c : 'a
+      ; _b : 'a
+      ; _cov : 'a
+      }
+    [@@deriving prms]
+  end
+
+  module P = PP.Make (Prms.P)
+
+  type args = unit
+  type data = Tensor.t * Tensor.t list
+
+  (* create params for lds from f *)
+  let params_from_f ~(theta : P.M.t) ~x0
+    : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lqr.Params.p
+    =
+    Lqr.Params.
+      { x0 = Some x0
+      ; params =
+          List.init (Dims.tmax + 1) ~f:(fun _ ->
+            Lds_data.Temp.
+              { _f = None
+              ; _Fx_prod = theta._Fx_prod
+              ; _Fu_prod = theta._Fu_prod
+              ; _cx = None
+              ; _cu = None
+              ; _Cxx = Maths.const _Cxx
+              ; _Cxu
+              ; _Cuu = Maths.const _Cuu
+              })
+      }
+
+  let optimal_u ~(theta : P.M.t) ~x0 =
+    (* use lqr to obtain the optimal u*)
+    let p = params_from_f ~x0 ~theta |> S.map_implicit in
+    let sol = Lqr.solve ~batch_const:Dims.batch_const p in
+    (* TODO: Matheron sampling of u *)
+    let u_list = List.map sol ~f:(fun s -> s.u) in
+    let sampled_u_list =
+      List.map u_list ~f:(fun u ->
+        let noise = Tensor.randn_like (Maths.primal u) |> Maths.const in
+        Maths.(noise + u))
+    in
+    sampled_u_list
+
+  (* optimal u determined from lqr *)
+  let pred_u ~data (theta : P.M.t) =
+    let x0, _ = data in
+    optimal_u ~theta ~x0:(Maths.const x0)
+
+  (* rollout x list under sampled u *)
+  let rollout_x ~u_list ~x0 (theta : P.M.t) =
+    let x0_tan = Maths.const x0 in
+    let _, x_list =
+      List.fold u_list ~init:(x0_tan, [ x0_tan ]) ~f:(fun (x, x_list) u ->
+        let new_x = Maths.(tmp_einsum x theta._Fx_prod + tmp_einsum u theta._Fu_prod) in
+        new_x, new_x :: x_list)
+    in
+    List.rev x_list
+
+  (* calculate optimal u *)
+  let f ~update ~data ~init ~args:_ (theta : P.M.t) =
+    let u_list = pred_u ~data theta in
+    let module L = Loss.RL_loss in
+    let x0, o_list = data in
+    let rolled_out_x_list = rollout_x ~u_list ~x0 theta in
+    (* These lists go from 1 to T *)
+    let o_except_first = List.map o_list ~f:(fun o -> Maths.const o) in
+    let x_except_first = List.tl_exn rolled_out_x_list in
+    let x_o_list = List.map2_exn x_except_first o_except_first ~f:(fun x o -> x, o) in
+    let result =
+      List.foldi x_o_list ~init ~f:(fun t accu (x, o) ->
+        if t % 1 = 0 then Stdlib.Gc.major ();
+        let error_term =
+          let output = Maths.(tmp_einsum x theta._c + theta._b) in
+          let error = Maths.(output - o) in
+          let tmp = tmp_einsum error (Maths.inv_sqr theta._cov) in
+          Maths.einsum [ tmp, "ma"; error, "ma" ] "m" |> Maths.reshape ~shape:[ -1; 1 ]
+        in
+        let cov_term =
+          if Dims.batch_const
+          then
+            Maths.(sum (log (diagonal theta._cov ~offset:0)))
+            |> Maths.reshape ~shape:[ 1; 1 ]
+          else
+            Maths.(
+              sum_dim
+                ~dim:(Some [ 0 ])
+                ~keepdim:true
+                (log (diagonal theta._cov ~offset:0)))
+            |> Maths.reshape ~shape:[ -1; 1 ]
+        in
+        let increment =
+          Maths.(error_term + cov_term) |> Maths.squeeze ~dim:(-1) |> Maths.neg
+        in
+        let accu =
+          match update with
+          | `loss_only u -> u accu (Some increment)
+          | `loss_and_ggn u ->
+            let delta_ggn =
+              let vtgt = Maths.tangent increment |> Option.value_exn in
+              L.vtgt_gv ~vtgt
+            in
+            u accu (Some (increment, Some delta_ggn))
+        in
+        accu)
+    in
+    result
+
+  let init : P.tagged =
+    let _Fx_prod =
+      Convenience.gaussian_tensor_2d_normed
+        ~device:Dims.device
+        ~kind:Dims.kind
+        ~a:Dims.a
+        ~b:Dims.a
+        ~sigma:0.1
+      |> Prms.free
+    in
+    let _Fu_prod =
+      Convenience.gaussian_tensor_2d_normed
+        ~device:Dims.device
+        ~kind:Dims.kind
+        ~a:Dims.b
+        ~b:Dims.a
+        ~sigma:0.1
+      |> Prms.free
+    in
+    let _c =
+      Convenience.gaussian_tensor_2d_normed
+        ~device:Dims.device
+        ~kind:Dims.kind
+        ~a:Dims.a
+        ~b:Dims.o
+        ~sigma:0.1
+      |> Prms.free
+    in
+    let _b =
+      Convenience.gaussian_tensor_2d_normed
+        ~device:Dims.device
+        ~kind:Dims.kind
+        ~a:1
+        ~b:Dims.o
+        ~sigma:0.1
+      |> Prms.free
+    in
+    let _cov =
+      Tensor.(square (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.o ]))
+      |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+      |> Prms.free
+    in
+    { _Fx_prod; _Fu_prod; _c; _b; _cov }
+end
+
+(* module O = Optimizer.SOFO (LGS) *)
+module O = Optimizer.Adam (LGS)
+
+let optimise ~max_iter ~f_name config_f =
+  let rec loop ~iter ~state ~time_elapsed running_avg =
+    Stdlib.Gc.major ();
+    let config = config_f ~iter in
+    let data =
+      let _, o_list = sample_data () in
+      x0, o_list
+    in
+    let t0 = Unix.gettimeofday () in
+    let loss, new_state = O.step ~config ~state ~data ~args:() in
+    let t1 = Unix.gettimeofday () in
+    let time_elapsed = Float.(time_elapsed + t1 - t0) in
+    let running_avg =
+      if iter % 1 = 0
+      then (
+        let loss_avg =
+          match running_avg with
+          | [] -> loss
+          | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
+        in
+        (* save params *)
+        if iter % 10 = 0
+        then
+          O.W.P.T.save
+            (LGS.P.value (O.params new_state))
+            ~kind:base.ba_kind
+            ~out:(in_dir f_name ^ "_params");
+        (* avg error *)
+        Convenience.print [%message (iter : int) (loss_avg : float)];
+        [])
+      else running_avg
+    in
+    if iter < max_iter
+    then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
-  let dt = Unix.gettimeofday () -. t0 in
-  Convenience.print [%message (label : string) (dt : float)];
-  result
+  (* ~config:(config_f ~iter:0) *)
+  loop ~iter:0 ~state:(O.init LGS.(init)) ~time_elapsed:0. []
+
+(* let lr_rates = [ 0.05 ]
+let damping_list = [ Some 1e-3 ]
+let meth = "sofo"
 
 let _ =
-  match Cmdargs.get_string "-method" with
-  | Some "implicit" ->
-    let p = Data.implicit_params params in
-    time_this ~label:"implicit" (fun _ ->
-      Lqr.solve ~batch_const:Lds_params_dim.batch_const p)
-    |> ignore
-  | Some "naive" ->
-    let p = Data.naive_params params in
-    time_this ~label:"naive" (fun _ ->
-      Lqr._solve ~batch_const:Lds_params_dim.batch_const p)
-    |> ignore
-  | _ -> failwith "use cmdline arg '-method {naive | implicit}'"
+  List.iter lr_rates ~f:(fun eta ->
+    List.iter damping_list ~f:(fun gamma ->
+      let config_f = config ~base_lr:eta ~gamma in
+      let gamma_name = Option.value_map gamma ~default:"none" ~f:Float.to_string in
+      let f_name = sprintf "lgs_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name in
+      Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
+      Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
+      optimise ~max_iter ~f_name config_f)) *)
+
+let lr_rates = [ 0.0001 ]
+let meth = "adam"
+
+let _ =
+  List.iter lr_rates ~f:(fun eta ->
+    let config_f = config ~base_lr:eta ~gamma:None in
+    let f_name = sprintf "lgs_%s_lr_%s" meth (Float.to_string eta) in
+    Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
+    Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
+    optimise ~max_iter ~f_name config_f)

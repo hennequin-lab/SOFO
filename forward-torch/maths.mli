@@ -50,6 +50,9 @@ val transpose : t -> dim0:int -> dim1:int -> t
 
 (* batched transposition -- always swaps the last two dimensions *)
 val btr : t -> t
+
+(* take the batch diagonal *)
+val diagonal : t -> offset:int -> t
 val tril : t -> diagonal:int -> t
 val cholesky : t -> t
 val logsumexp : t -> dim:int list -> keepdim:bool -> t

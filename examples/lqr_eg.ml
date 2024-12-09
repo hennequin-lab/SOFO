@@ -2,8 +2,6 @@
 open Base
 open Forward_torch
 open Sofo
-module Mat = Owl.Dense.Matrix.S
-module Arr = Owl.Dense.Ndarray.S
 
 let _ =
   Random.init 1999;
@@ -13,9 +11,10 @@ let _ =
 (* -----------------------------------------
    -- Define Control Problem          ------
    ----------------------------------------- *)
-module Lds_params_dim = struct
+module Dims = struct
   let a = 24
   let b = 10
+  let o = 0
   let tmax = 10
   let m = 64
   let k = 64
@@ -24,19 +23,28 @@ module Lds_params_dim = struct
   let device = Torch.Device.cuda_if_available ()
 end
 
-module Data = Lds_data.Make_LDS (Lds_params_dim)
+module S = Lds_data.Sample_LDS (Dims)
+module Data = Lds_data.Make_LDS (Dims) (Lds_data.Sample_LDS)
 
 (* sample params first to rollout traj for _cx calculation *)
 let x0 = Data.sample_x0 ()
 
 (* need to sample these first to get the trajectory *)
 let f_list : Maths.t Lds_data.f_params list =
-  let a = Data.sample_fx () in
-  let b = Data.sample_fu () in
-  List.init (Lds_params_dim.tmax + 1) ~f:(fun _ ->
-    Lds_data.{ _Fx_prod = a; _Fu_prod = b; _f = Some (Data.sample_f ()) })
+  let _Fx = Data.sample_fx () in
+  let _Fu = Data.sample_fu () in
+  List.init (Dims.tmax + 1) ~f:(fun _ ->
+    Lds_data.
+      { _Fx_prod = _Fx
+      ; _Fu_prod = _Fu
+      ; _f = Some (Data.sample_f ())
+      ; _c = None
+      ; _b = None
+      ; _cov = None
+      })
 
-let _, x_targets = Data.traj_rollout ~x0 ~f_list
+let u_list = Data.sample_u_list ()
+let x_list, _ = Data.traj_rollout ~x0 ~f_list ~u_list
 
 (* for the purpose of memory profiling only everything has tangents *)
 let params : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lqr.Params.p
@@ -47,7 +55,7 @@ let params : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lq
   Lqr.Params.
     { x0 = Some x0
     ; params =
-        List.map2_exn f_list x_targets ~f:(fun params x ->
+        List.map2_exn f_list x_list ~f:(fun params x ->
           Lds_data.Temp.
             { _f = params._f
             ; _Fx_prod = params._Fx_prod
@@ -79,13 +87,11 @@ let time_this ~label f =
 let _ =
   match Cmdargs.get_string "-method" with
   | Some "implicit" ->
-    let p = Data.implicit_params params in
-    time_this ~label:"implicit" (fun _ ->
-      Lqr.solve ~batch_const:Lds_params_dim.batch_const p)
+    let p = Data.S.map_implicit params in
+    time_this ~label:"implicit" (fun _ -> Lqr.solve ~batch_const:Dims.batch_const p)
     |> ignore
   | Some "naive" ->
-    let p = Data.naive_params params in
-    time_this ~label:"naive" (fun _ ->
-      Lqr._solve ~batch_const:Lds_params_dim.batch_const p)
+    let p = Data.S.map_naive params in
+    time_this ~label:"naive" (fun _ -> Lqr._solve ~batch_const:Dims.batch_const p)
     |> ignore
   | _ -> failwith "use cmdline arg '-method {naive | implicit}'"

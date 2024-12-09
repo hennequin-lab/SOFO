@@ -86,12 +86,21 @@ let permute (x, dx) ~dims =
 
 let unsqueeze (x, dx) ~dim =
   let y = Tensor.unsqueeze x ~dim in
-  let dy = with_tangent dx ~f:(fun dx -> Tensor.unsqueeze dx ~dim:Int.(dim + 1)) in
+  let dy = with_tangent dx ~f:(fun dx -> 
+    let new_dim = 
+      if dim < 0 then dim else Int.(dim + 1) in
+    
+    Tensor.unsqueeze dx ~dim:new_dim) in
   (y, dy) |> assert_right_shape "unsqueeze"
 
 let squeeze (x, dx) ~dim =
   let y = Tensor.squeeze_dim x ~dim in
-  let dy = with_tangent dx ~f:(fun dx -> Tensor.squeeze_dim dx ~dim:Int.(dim + 1)) in
+  let dy = with_tangent dx ~f:(fun dx -> 
+    let new_dim = 
+      if dim < 0 then dim else Int.(dim + 1) in
+    
+    
+    Tensor.squeeze_dim dx ~dim:new_dim) in
   (y, dy) |> assert_right_shape "squeeze"
 
 (* y = -x, dy = -dx *)
@@ -318,6 +327,13 @@ let btr (x, dx) =
   let y = tr x in
   let dy = with_tangent dx ~f:tr in
   (y, dy) |> assert_right_shape "btr"
+
+let diagonal (x, dx) ~offset =
+  let y = Tensor.diagonal x ~offset ~dim1:(-2) ~dim2:(-1) in
+  let dy =
+    with_tangent dx ~f:(fun dx -> Tensor.diagonal dx ~offset ~dim1:(-2) ~dim2:(-1))
+  in
+  (y, dy) |> assert_right_shape "diagonal"
 
 let tril (x, dx) ~diagonal =
   let y = Tensor.tril x ~diagonal in
