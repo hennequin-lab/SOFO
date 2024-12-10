@@ -23,8 +23,7 @@ module Dims = struct
   let device = Torch.Device.cuda_if_available ()
 end
 
-module S = Lds_data.Sample_LDS (Dims)
-module Data = Lds_data.Make_LDS (Dims) (Lds_data.Sample_LDS)
+module Data = Lds_data.Make_LDS (Dims)
 
 (* sample params first to rollout traj for _cx calculation *)
 let x0 = Data.sample_x0 ()
@@ -87,11 +86,11 @@ let time_this ~label f =
 let _ =
   match Cmdargs.get_string "-method" with
   | Some "implicit" ->
-    let p = Data.S.map_implicit params in
+    let p = Lds_data.map_implicit ~batch_const:Dims.batch_const params in
     time_this ~label:"implicit" (fun _ -> Lqr.solve ~batch_const:Dims.batch_const p)
     |> ignore
   | Some "naive" ->
-    let p = Data.S.map_naive params in
+    let p = Lds_data.map_naive ~batch_const:Dims.batch_const params in
     time_this ~label:"naive" (fun _ -> Lqr._solve ~batch_const:Dims.batch_const p)
     |> ignore
   | _ -> failwith "use cmdline arg '-method {naive | implicit}'"

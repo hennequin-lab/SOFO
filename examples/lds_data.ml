@@ -217,150 +217,134 @@ module Default = struct
   let device = Torch.Device.cuda_if_available ()
 end
 
-module Sample_LDS (X : module type of Default) = struct
-  let to_device = Tensor.of_bigarray ~device:X.device
-  let device_ = X.device
-  let kind_ = X.kind
+(* make sure fx is stable *)
+let sample_stable ~a =
+  let a = Mat.gaussian a a in
+  let r =
+    a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
+  in
+  Mat.(Float.(0.8 / r) $* a)
 
-  (* make sure fx is stable *)
-  let sample_stable () =
-    let a = Mat.gaussian X.a X.a in
-    let r =
-      a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
-    in
-    Mat.(Float.(0.8 / r) $* a)
+let sample_fx_pri ~batch_const ~m ~a =
+  if batch_const
+  then sample_stable ~a
+  else
+    Array.init m ~f:(fun _ ->
+      let a_tmp = sample_stable ~a in
+      Arr.reshape a_tmp [| 1; a; a |])
+    |> Arr.concatenate ~axis:0
 
-  let sample_fx_pri () =
-    let fx_pri =
-      if X.batch_const
-      then sample_stable ()
-      else
-        Array.init X.m ~f:(fun _ ->
-          let a = sample_stable () in
-          Arr.reshape a [| 1; X.a; X.a |])
-        |> Arr.concatenate ~axis:0
-    in
-    to_device fx_pri
+(* make sure cost matrices are positive definite *)
+let pos_sym ~reg d =
+  let ell = Mat.gaussian d d in
+  Mat.(add_diag (ell *@ transpose ell) reg)
 
-  (* make sure cost matrices are positive definite *)
-  let pos_sym ~reg d =
-    let ell = Mat.gaussian d d in
-    Mat.(add_diag (ell *@ transpose ell) reg)
+let q_of ~batch_const ~m ~reg d =
+  if batch_const
+  then pos_sym ~reg d
+  else
+    Array.init m ~f:(fun _ -> Arr.reshape (pos_sym ~reg d) [| 1; d; d |])
+    |> Arr.concatenate ~axis:0
 
-  let q_of ~reg d =
-    let q =
-      if X.batch_const
-      then pos_sym ~reg d
-      else
-        Array.init X.m ~f:(fun _ -> Arr.reshape (pos_sym ~reg d) [| 1; d; d |])
-        |> Arr.concatenate ~axis:0
-    in
-    to_device q
+let map_naive (x : Input.M.t) ~batch_const =
+  let irrelevant = Some (fun _ -> assert false) in
+  let params =
+    List.map x.params ~f:(fun p ->
+      Lqr.
+        { common =
+            { _Fx_prod = Some (bmm ~batch_const p._Fx_prod)
+            ; _Fx_prod2 = Some (bmm2 ~batch_const p._Fx_prod)
+            ; _Fu_prod = Some (bmm ~batch_const p._Fu_prod)
+            ; _Fu_prod2 = Some (bmm2 ~batch_const p._Fu_prod)
+            ; _Fx_prod_tangent = irrelevant
+            ; _Fx_prod2_tangent = irrelevant
+            ; _Fu_prod_tangent = irrelevant
+            ; _Fu_prod2_tangent = irrelevant
+            ; _Cxx = Some p._Cxx
+            ; _Cxu = p._Cxu
+            ; _Cuu = Some p._Cuu
+            }
+        ; _f = p._f
+        ; _cx = p._cx
+        ; _cu = p._cu
+        })
+  in
+  Lqr.Params.{ x with params }
 
-  let map_naive (x : Input.M.t) =
-    let irrelevant = Some (fun _ -> assert false) in
-    let params =
-      List.map x.params ~f:(fun p ->
-        Lqr.
-          { common =
-              { _Fx_prod = Some (bmm ~batch_const:X.batch_const p._Fx_prod)
-              ; _Fx_prod2 = Some (bmm2 ~batch_const:X.batch_const p._Fx_prod)
-              ; _Fu_prod = Some (bmm ~batch_const:X.batch_const p._Fu_prod)
-              ; _Fu_prod2 = Some (bmm2 ~batch_const:X.batch_const p._Fu_prod)
-              ; _Fx_prod_tangent = irrelevant
-              ; _Fx_prod2_tangent = irrelevant
-              ; _Fu_prod_tangent = irrelevant
-              ; _Fu_prod2_tangent = irrelevant
-              ; _Cxx = Some p._Cxx
-              ; _Cxu = p._Cxu
-              ; _Cuu = Some p._Cuu
-              }
-          ; _f = p._f
-          ; _cx = p._cx
-          ; _cu = p._cu
-          })
-    in
-    Lqr.Params.{ x with params }
-
-  let map_implicit (x : Input.M.t) =
-    let params =
-      List.map x.params ~f:(fun p ->
-        Lqr.
-          { common =
-              { _Fx_prod = Some (prod ~batch_const:X.batch_const p._Fx_prod)
-              ; _Fx_prod2 = Some (prod2 ~batch_const:X.batch_const p._Fx_prod)
-              ; _Fu_prod = Some (prod ~batch_const:X.batch_const p._Fu_prod)
-              ; _Fu_prod2 = Some (prod2 ~batch_const:X.batch_const p._Fu_prod)
-              ; _Fx_prod_tangent =
-                  Some (prod_tangent ~batch_const:X.batch_const p._Fx_prod)
-              ; _Fx_prod2_tangent =
-                  Some (prod2_tangent ~batch_const:X.batch_const p._Fx_prod)
-              ; _Fu_prod_tangent =
-                  Some (prod_tangent ~batch_const:X.batch_const p._Fu_prod)
-              ; _Fu_prod2_tangent =
-                  Some (prod2_tangent ~batch_const:X.batch_const p._Fu_prod)
-              ; _Cxx = Some p._Cxx
-              ; _Cxu = p._Cxu
-              ; _Cuu = Some p._Cuu
-              }
-          ; _f = p._f
-          ; _cx = p._cx
-          ; _cu = p._cu
-          })
-    in
-    Lqr.Params.{ x with params }
-end
+let map_implicit (x : Input.M.t) ~batch_const =
+  let params =
+    List.map x.params ~f:(fun p ->
+      Lqr.
+        { common =
+            { _Fx_prod = Some (prod ~batch_const p._Fx_prod)
+            ; _Fx_prod2 = Some (prod2 ~batch_const p._Fx_prod)
+            ; _Fu_prod = Some (prod ~batch_const p._Fu_prod)
+            ; _Fu_prod2 = Some (prod2 ~batch_const p._Fu_prod)
+            ; _Fx_prod_tangent = Some (prod_tangent ~batch_const p._Fx_prod)
+            ; _Fx_prod2_tangent = Some (prod2_tangent ~batch_const p._Fx_prod)
+            ; _Fu_prod_tangent = Some (prod_tangent ~batch_const p._Fu_prod)
+            ; _Fu_prod2_tangent = Some (prod2_tangent ~batch_const p._Fu_prod)
+            ; _Cxx = Some p._Cxx
+            ; _Cxu = p._Cxu
+            ; _Cuu = Some p._Cuu
+            }
+        ; _f = p._f
+        ; _cx = p._cx
+        ; _cu = p._cu
+        })
+  in
+  Lqr.Params.{ x with params }
 
 (* -----------------------------------------
    -- LDS Module with tangents    ------
    ----------------------------------------- *)
 (* this should only be used for memory profiling *)
-module Make_LDS (X : module type of Default) (S : module type of Sample_LDS) = struct
-  module S = S (X)
+module Make_LDS (X : module type of Default) = struct
+  let to_device = Tensor.of_bigarray ~device:X.device
 
   let sample_fx_tan () =
     let fx_tan =
       if X.batch_const
       then
         Array.init X.k ~f:(fun _ ->
-          let a = S.sample_stable () in
+          let a = sample_stable ~a:X.a in
           Arr.reshape a [| 1; X.a; X.a |])
         |> Arr.concatenate ~axis:0
       else
         Array.init X.k ~f:(fun _ ->
           Array.init X.m ~f:(fun _ ->
-            let a = S.sample_stable () in
+            let a = sample_stable ~a:X.a in
             Arr.reshape a [| 1; 1; X.a; X.a |])
           |> Arr.concatenate ~axis:1)
         |> Arr.concatenate ~axis:0
     in
-    S.to_device fx_tan
+    to_device fx_tan
 
   let q_tan_of ~reg d =
     let q_tan =
       if X.batch_const
       then
         Array.init X.k ~f:(fun _ ->
-          let _q_tan = S.pos_sym ~reg d in
+          let _q_tan = pos_sym ~reg d in
           Arr.reshape _q_tan [| 1; d; d |])
         |> Arr.concatenate ~axis:0
       else
         Array.init X.k ~f:(fun _ ->
           Array.init X.m ~f:(fun _ ->
-            let _q_tan = S.pos_sym ~reg d in
+            let _q_tan = pos_sym ~reg d in
             Arr.reshape _q_tan [| 1; 1; d; d |])
           |> Arr.concatenate ~axis:1)
         |> Arr.concatenate ~axis:0
     in
-    S.to_device q_tan
+    to_device q_tan
 
   let sample_q_xx () =
-    let pri = S.q_of ~reg:1. X.a in
+    let pri = q_of ~batch_const:X.batch_const ~m:X.m ~reg:1. X.a |> to_device in
     let tan = q_tan_of ~reg:1. X.a in
     Maths.make_dual pri ~t:(Maths.Direct tan)
 
   let sample_q_uu () =
-    let pri = S.q_of ~reg:1. X.b in
+    let pri = q_of ~batch_const:X.batch_const ~m:X.m ~reg:1. X.b |> to_device in
     let tan = q_tan_of ~reg:1. X.b in
     Maths.make_dual pri ~t:(Maths.Direct tan)
 
@@ -372,7 +356,7 @@ module Make_LDS (X : module type of Default) (S : module type of Sample_LDS) = s
   let sample_x0 () = sample_tangent [ X.m; X.a ]
 
   let sample_fx () =
-    let pri = S.sample_fx_pri () in
+    let pri = sample_fx_pri ~batch_const:X.batch_const ~m:X.m ~a:X.a |> to_device in
     let tan = sample_fx_tan () in
     Maths.make_dual pri ~t:(Maths.Direct tan)
 
@@ -406,8 +390,7 @@ module Make_LDS (X : module type of Default) (S : module type of Sample_LDS) = s
     let diag_embed = Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1) in
     let pri =
       if X.batch_const
-      then
-        Tensor.(abs (Tensor.randn ~device:X.device ~kind:X.kind [ X.o ])) |> diag_embed
+      then Tensor.(abs (Tensor.randn ~device:X.device ~kind:X.kind [ X.o ])) |> diag_embed
       else
         Tensor.(abs (Tensor.randn ~device:X.device ~kind:X.kind [ X.m; X.o ]))
         |> diag_embed
@@ -462,51 +445,29 @@ module Make_LDS (X : module type of Default) (S : module type of Sample_LDS) = s
           new_x, new_x :: x_list, new_o :: o_list)
     in
     List.rev x_list, List.rev o_list
-
-  (* parameters invariant across time*)
-  (* let traj_rollout_const ~x0 ~(f_curr : Maths.t f_params) ~u_list =
-    let tmp_einsum a b =
-      if X.batch_const
-      then Maths.einsum [ a, "ma"; b, "ab" ] "mb"
-      else Maths.einsum [ a, "ma"; b, "mab" ] "mb"
-    in
-    let _, x_list, o_list =
-      List.fold u_list ~init:(x0, [ x0 ], [ None ]) ~f:(fun (x, x_list, o_list) u ->
-        let new_x =
-          let common =
-            Maths.(tmp_einsum x f_curr._Fx_prod + tmp_einsum u f_curr._Fu_prod)
-          in
-          match f_curr._f with
-          | None -> common
-          | Some _f -> Maths.(_f + common)
-        in
-        let new_o =
-          match f_curr._cov with
-          | None -> None
-          | Some _cov ->
-            let noise = sample_gaussian ~cov:_cov in
-            let b = Option.value_exn f_curr._b in
-            let b_reshaped = if X.batch_const then Maths.unsqueeze b ~dim:0 else b in
-            Some
-              Maths.(tmp_einsum new_x (Option.value_exn f_curr._c) + b_reshaped + noise)
-        in
-        new_x, new_x :: x_list, new_o :: o_list)
-    in
-    List.rev x_list, List.rev o_list *)
 end
 
 (* -----------------------------------------
    -- LDS Module but with tensors only  ------
    ----------------------------------------- *)
-module Make_LDS_Tensor (X : module type of Default) (S : module type of Sample_LDS) =
-struct
-  module S = S (X)
+module Default_Tensor = struct
+  let a = 5
+  let b = 3
+  let o = 4
+  let tmax = 10
+  let m = 7
+  let batch_const = false
+  let kind = Torch_core.Kind.(T f64)
+  let device = Torch.Device.cuda_if_available ()
+end
 
-  let sample_q_xx () = S.q_of ~reg:1. X.a
-  let sample_q_uu () = S.q_of ~reg:1. X.b
+module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
+  let to_device = Tensor.of_bigarray ~device:X.device
+  let sample_q_xx () = q_of ~batch_const:X.batch_const ~m:X.m ~reg:1. X.a |> to_device
+  let sample_q_uu () = q_of ~batch_const:X.batch_const ~m:X.m ~reg:1. X.b |> to_device
   let sample_tensor shape = Tensor.randn ~device:X.device ~kind:X.kind shape
   let sample_x0 () = sample_tensor [ X.m; X.a ]
-  let sample_fx () = S.sample_fx_pri ()
+  let sample_fx () = sample_fx_pri ~batch_const:X.batch_const ~m:X.m ~a:X.a |> to_device
 
   let sample_fu () =
     if X.batch_const then sample_tensor [ X.b; X.a ] else sample_tensor [ X.m; X.b; X.a ]

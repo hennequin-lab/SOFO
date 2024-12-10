@@ -19,14 +19,12 @@ module Dims = struct
   let o = 4
   let tmax = 10
   let m = 128
-  let k = 64
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
 end
 
-module S = Lds_data.Sample_LDS (Dims)
-module Data = Lds_data.Make_LDS_Tensor (Dims) (Lds_data.Sample_LDS)
+module Data = Lds_data.Make_LDS_Tensor (Dims)
 
 (* control costs - time invariant *)
 let _Cxx = Data.sample_q_xx ()
@@ -85,7 +83,7 @@ let base =
 
 let max_iter = 1000
 
-let config ~base_lr ~gamma ~iter:_ =
+(* let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
@@ -93,10 +91,10 @@ let config ~base_lr ~gamma ~iter:_ =
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
-    }
+    } *)
 
-(* let config ~base_lr ~gamma:_ ~iter:_ =
-  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr } *)
+let config ~base_lr ~gamma:_ ~iter:_ =
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
 
 module LGS = struct
   module PP = struct
@@ -139,7 +137,9 @@ module LGS = struct
 
   let optimal_u ~(theta : P.M.t) ~x0 =
     (* use lqr to obtain the optimal u*)
-    let p = params_from_f ~x0 ~theta |> S.map_implicit in
+    let p =
+      params_from_f ~x0 ~theta |> Lds_data.map_implicit ~batch_const:Dims.batch_const
+    in
     let sol = Lqr.solve ~batch_const:Dims.batch_const p in
     (* TODO: Matheron sampling of u *)
     let u_list = List.map sol ~f:(fun s -> s.u) in
@@ -299,8 +299,8 @@ module LGS = struct
     { _Fx_prod; _Fu_prod; _c; _b; _cov_noise; _cov_u; _cov_pos }
 end
 
-module O = Optimizer.SOFO (LGS)
-(* module O = Optimizer.Adam (LGS) *)
+(* module O = Optimizer.SOFO (LGS) *)
+module O = Optimizer.Adam (LGS)
 
 let optimise ~max_iter ~f_name config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -344,9 +344,9 @@ let optimise ~max_iter ~f_name config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init LGS.(init)) ~time_elapsed:0. []
 
-let lr_rates = [ 50. ]
+(* let lr_rates = [ 30. ]
 let damping_list = [ Some 1e-3 ]
 let meth = "sofo"
 
@@ -358,9 +358,9 @@ let _ =
       let f_name = sprintf "lgs_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name config_f))
+      optimise ~max_iter ~f_name config_f)) *)
 
-(* let lr_rates = [ 0.0001 ]
+let lr_rates = [ 0.1 ]
 let meth = "adam"
 
 let _ =
@@ -369,4 +369,4 @@ let _ =
     let f_name = sprintf "lgs_%s_lr_%s" meth (Float.to_string eta) in
     Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
     Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name config_f) *)
+    optimise ~max_iter ~f_name config_f)
