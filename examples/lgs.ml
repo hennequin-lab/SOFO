@@ -35,28 +35,28 @@ let _Cuu = Data.sample_q_uu ()
 
 (* TODO: for now we set x0=0? *)
 let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
+let _Fx = Data.sample_fx ()
+let _Fu = Data.sample_fu ()
+let c = Data.sample_c ()
+let b = Data.sample_b ()
+let cov = Data.sample_output_cov ()
+(* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
+
+let f_list : Tensor.t Lds_data.f_params list =
+  List.init (Dims.tmax + 1) ~f:(fun _ ->
+    Lds_data.
+      { _Fx_prod = _Fx
+      ; _Fu_prod = _Fu
+      ; _f = None
+      ; _c = Some c
+      ; _b = Some b
+      ; _cov = Some cov
+      })
 
 let sample_data () =
   (* generate ground truth params and data *)
   let data_gen ~x0 =
     (* need to sample these first to get the trajectory *)
-    let f_list : Tensor.t Lds_data.f_params list =
-      (* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
-      let _Fx = Data.sample_fx () in
-      let _Fu = Data.sample_fu () in
-      let c = Data.sample_c () in
-      let b = Data.sample_b () in
-      let cov = Data.sample_output_cov () in
-      List.init (Dims.tmax + 1) ~f:(fun _ ->
-        Lds_data.
-          { _Fx_prod = _Fx
-          ; _Fu_prod = _Fu
-          ; _f = None
-          ; _c = Some c
-          ; _b = Some b
-          ; _cov = Some cov
-          })
-    in
     let u_list = Data.sample_u_list () in
     Data.traj_rollout ~x0 ~f_list ~u_list
   in
@@ -85,7 +85,7 @@ let base =
 
 let max_iter = 1000
 
-(* let config ~base_lr ~gamma ~iter:_ =
+let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
@@ -93,19 +93,21 @@ let max_iter = 1000
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
-    } *)
+    }
 
-let config ~base_lr ~gamma:_ ~iter:_ =
-  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
+(* let config ~base_lr ~gamma:_ ~iter:_ =
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr } *)
 
 module LGS = struct
   module PP = struct
     type 'a p =
-      { _Fx_prod : 'a
+      { _Fx_prod : 'a (* generative model *)
       ; _Fu_prod : 'a
       ; _c : 'a
       ; _b : 'a
-      ; _cov : 'a
+      ; _cov_noise : 'a (* covariance of emission noise *)
+      ; _cov_u : 'a (* covariance of prior over u *)
+      ; _cov_pos : 'a (* recognition model; covariance of posterior *)
       }
     [@@deriving prms]
   end
@@ -146,7 +148,7 @@ module LGS = struct
         let noise = Tensor.randn_like (Maths.primal u) |> Maths.const in
         Maths.(noise + u))
     in
-    sampled_u_list
+    u_list, sampled_u_list
 
   (* optimal u determined from lqr *)
   let pred_u ~data (theta : P.M.t) =
@@ -163,9 +165,61 @@ module LGS = struct
     in
     List.rev x_list
 
+  (* gaussian llh with diagonal covariance *)
+  let gaussian_llh ~g_mean ~g_cov ~x =
+    let error_term =
+      let error = Maths.(x - g_mean) in
+      let tmp = tmp_einsum error (Maths.inv_sqr g_cov) in
+      Maths.einsum [ tmp, "ma"; error, "ma" ] "m" |> Maths.reshape ~shape:[ -1; 1 ]
+    in
+    let cov_term =
+      if Dims.batch_const
+      then Maths.(sum (log (diagonal g_cov ~offset:0))) |> Maths.reshape ~shape:[ 1; 1 ]
+      else
+        Maths.(sum_dim ~dim:(Some [ 0 ]) ~keepdim:true (log (diagonal g_cov ~offset:0)))
+        |> Maths.reshape ~shape:[ -1; 1 ]
+    in
+    Maths.(0.5 $* error_term + cov_term) |> Maths.squeeze ~dim:(-1) |> Maths.neg
+
+  let elbo ~u_list ~x_o_list ~optimal_u_list (theta : P.M.t) =
+    (* calculate the likelihood term *)
+    let llh =
+      List.foldi x_o_list ~init:None ~f:(fun t accu (x, o) ->
+        if t % 1 = 0 then Stdlib.Gc.major ();
+        let increment =
+          gaussian_llh
+            ~g_mean:o
+            ~g_cov:theta._cov_noise
+            ~x:Maths.(tmp_einsum x theta._c + theta._b)
+        in
+        match accu with
+        | None -> Some increment
+        | Some accu -> Some Maths.(accu + increment))
+      |> Option.value_exn
+    in
+    let prior =
+      List.foldi u_list ~init:None ~f:(fun t accu u ->
+        if t % 1 = 0 then Stdlib.Gc.major ();
+        let u_zeros = Tensor.zeros_like (Maths.primal u) |> Maths.const in
+        let increment = gaussian_llh ~g_mean:u_zeros ~g_cov:theta._cov_u ~x:u in
+        match accu with
+        | None -> Some increment
+        | Some accu -> Some Maths.(accu + increment))
+      |> Option.value_exn
+    in
+    let entropy =
+      List.fold2_exn optimal_u_list u_list ~init:None ~f:(fun accu u_opt u ->
+        let increment = gaussian_llh ~g_mean:u_opt ~g_cov:theta._cov_pos ~x:u in
+        match accu with
+        | None -> Some increment
+        | Some accu -> Some Maths.(accu + increment))
+      |> Option.value_exn
+    in
+    Maths.((llh + prior - entropy) /$  Float.of_int (List.length u_list))
+
   (* calculate optimal u *)
   let f ~update ~data ~init ~args:_ (theta : P.M.t) =
-    let u_list = pred_u ~data theta in
+    let optimal_u_list, u_list = pred_u ~data theta in
     let module L = Loss.RL_loss in
     let x0, o_list = data in
     let rolled_out_x_list = rollout_x ~u_list ~x0 theta in
@@ -173,44 +227,15 @@ module LGS = struct
     let o_except_first = List.map o_list ~f:(fun o -> Maths.const o) in
     let x_except_first = List.tl_exn rolled_out_x_list in
     let x_o_list = List.map2_exn x_except_first o_except_first ~f:(fun x o -> x, o) in
-    let result =
-      List.foldi x_o_list ~init ~f:(fun t accu (x, o) ->
-        if t % 1 = 0 then Stdlib.Gc.major ();
-        let error_term =
-          let output = Maths.(tmp_einsum x theta._c + theta._b) in
-          let error = Maths.(output - o) in
-          let tmp = tmp_einsum error (Maths.inv_sqr theta._cov) in
-          Maths.einsum [ tmp, "ma"; error, "ma" ] "m" |> Maths.reshape ~shape:[ -1; 1 ]
-        in
-        let cov_term =
-          if Dims.batch_const
-          then
-            Maths.(sum (log (diagonal theta._cov ~offset:0)))
-            |> Maths.reshape ~shape:[ 1; 1 ]
-          else
-            Maths.(
-              sum_dim
-                ~dim:(Some [ 0 ])
-                ~keepdim:true
-                (log (diagonal theta._cov ~offset:0)))
-            |> Maths.reshape ~shape:[ -1; 1 ]
-        in
-        let increment =
-          Maths.(error_term + cov_term) |> Maths.squeeze ~dim:(-1) |> Maths.neg
-        in
-        let accu =
-          match update with
-          | `loss_only u -> u accu (Some increment)
-          | `loss_and_ggn u ->
-            let delta_ggn =
-              let vtgt = Maths.tangent increment |> Option.value_exn in
-              L.vtgt_gv ~vtgt
-            in
-            u accu (Some (increment, Some delta_ggn))
-        in
-        accu)
-    in
-    result
+    let neg_elbo = elbo ~u_list ~x_o_list ~optimal_u_list theta |> Maths.neg in
+    match update with
+    | `loss_only u -> u init (Some neg_elbo)
+    | `loss_and_ggn u ->
+      let delta_ggn =
+        let vtgt = Maths.tangent neg_elbo |> Option.value_exn in
+        L.vtgt_gv ~vtgt
+      in
+      u init (Some (neg_elbo, Some delta_ggn))
 
   let init : P.tagged =
     let _Fx_prod =
@@ -249,16 +274,26 @@ module LGS = struct
         ~sigma:0.1
       |> Prms.free
     in
-    let _cov =
+    let _cov_noise =
       Tensor.(square (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.o ]))
       |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
       |> Prms.free
     in
-    { _Fx_prod; _Fu_prod; _c; _b; _cov }
+    let _cov_u =
+      Tensor.(square (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ]))
+      |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+      |> Prms.free
+    in
+    let _cov_pos =
+      Tensor.(square (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ]))
+      |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+      |> Prms.free
+    in
+    { _Fx_prod; _Fu_prod; _c; _b; _cov_noise; _cov_u; _cov_pos }
 end
 
-(* module O = Optimizer.SOFO (LGS) *)
-module O = Optimizer.Adam (LGS)
+module O = Optimizer.SOFO (LGS)
+(* module O = Optimizer.Adam (LGS) *)
 
 let optimise ~max_iter ~f_name config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -282,13 +317,19 @@ let optimise ~max_iter ~f_name config_f =
         in
         (* save params *)
         if iter % 10 = 0
-        then
+        then (
+          (* avg error *)
+          Convenience.print [%message (iter : int) (loss_avg : float)];
           O.W.P.T.save
             (LGS.P.value (O.params new_state))
             ~kind:base.ba_kind
             ~out:(in_dir f_name ^ "_params");
-        (* avg error *)
-        Convenience.print [%message (iter : int) (loss_avg : float)];
+          let t = iter in
+          Owl.Mat.(
+            save_txt
+              ~append:true
+              ~out:(in_dir f_name)
+              (of_array [| Float.of_int t; time_elapsed; loss_avg |] 1 3)));
         [])
       else running_avg
     in
@@ -296,9 +337,9 @@ let optimise ~max_iter ~f_name config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init LGS.(init)) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
 
-(* let lr_rates = [ 0.05 ]
+let lr_rates = [ 100. ]
 let damping_list = [ Some 1e-3 ]
 let meth = "sofo"
 
@@ -310,9 +351,9 @@ let _ =
       let f_name = sprintf "lgs_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name config_f)) *)
+      optimise ~max_iter ~f_name config_f))
 
-let lr_rates = [ 0.0001 ]
+(* let lr_rates = [ 0.0001 ]
 let meth = "adam"
 
 let _ =
@@ -321,4 +362,4 @@ let _ =
     let f_name = sprintf "lgs_%s_lr_%s" meth (Float.to_string eta) in
     Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
     Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name config_f)
+    optimise ~max_iter ~f_name config_f) *)

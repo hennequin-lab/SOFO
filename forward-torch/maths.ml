@@ -523,6 +523,7 @@ let maxpool2d
   in
   (y, dy) |> assert_right_shape "maxpool2d"
 
+
 (** Binary operations *)
 
 (* apply fx to tangents dx. and fy to tangents dy and fxy to tangents dx, dy. *)
