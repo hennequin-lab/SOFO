@@ -401,23 +401,24 @@ module Make_LDS (X : module type of Default) (S : module type of Sample_LDS) = s
   let sample_b () =
     if X.batch_const then sample_tangent [ X.o ] else sample_tangent [ X.m; X.o ]
 
+  (* sqrt of output covariance *)
   let sample_output_cov () =
     let diag_embed = Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1) in
     let pri =
       if X.batch_const
       then
-        Tensor.(square (Tensor.randn ~device:X.device ~kind:X.kind [ X.o ])) |> diag_embed
+        Tensor.(abs (Tensor.randn ~device:X.device ~kind:X.kind [ X.o ])) |> diag_embed
       else
-        Tensor.(square (Tensor.randn ~device:X.device ~kind:X.kind [ X.m; X.o ]))
+        Tensor.(abs (Tensor.randn ~device:X.device ~kind:X.kind [ X.m; X.o ]))
         |> diag_embed
     in
     let tan =
       if X.batch_const
       then
-        Tensor.(square (Tensor.randn ~device:X.device ~kind:X.kind [ X.k; X.o ]))
+        Tensor.(abs (Tensor.randn ~device:X.device ~kind:X.kind [ X.k; X.o ]))
         |> diag_embed
       else
-        Tensor.(square (Tensor.randn ~device:X.device ~kind:X.kind [ X.k; X.m; X.o ]))
+        Tensor.(abs (Tensor.randn ~device:X.device ~kind:X.kind [ X.k; X.m; X.o ]))
         |> diag_embed
     in
     Maths.make_dual pri ~t:(Maths.Direct tan)

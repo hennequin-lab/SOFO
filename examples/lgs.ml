@@ -18,7 +18,7 @@ module Dims = struct
   let b = 3
   let o = 4
   let tmax = 10
-  let m = 64
+  let m = 128
   let k = 64
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
@@ -35,14 +35,14 @@ let _Cuu = Data.sample_q_uu ()
 
 (* TODO: for now we set x0=0? *)
 let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
-let _Fx = Data.sample_fx ()
-let _Fu = Data.sample_fu ()
-let c = Data.sample_c ()
-let b = Data.sample_b ()
-let cov = Data.sample_output_cov ()
-(* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
 
+(* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
 let f_list : Tensor.t Lds_data.f_params list =
+  let _Fx = Data.sample_fx () in
+  let _Fu = Data.sample_fu () in
+  let c = Data.sample_c () in
+  let b = Data.sample_b () in
+  let cov = Data.sample_output_cov () in
   List.init (Dims.tmax + 1) ~f:(fun _ ->
     Lds_data.
       { _Fx_prod = _Fx
@@ -105,9 +105,9 @@ module LGS = struct
       ; _Fu_prod : 'a
       ; _c : 'a
       ; _b : 'a
-      ; _cov_noise : 'a (* covariance of emission noise *)
-      ; _cov_u : 'a (* covariance of prior over u *)
-      ; _cov_pos : 'a (* recognition model; covariance of posterior *)
+      ; _cov_noise : 'a (* sqrt of covariance of emission noise *)
+      ; _cov_u : 'a (* sqrt of covariance of prior over u *)
+      ; _cov_pos : 'a (* sqrt of recognition model; covariance of posterior *)
       }
     [@@deriving prms]
   end
@@ -145,7 +145,13 @@ module LGS = struct
     let u_list = List.map sol ~f:(fun s -> s.u) in
     let sampled_u_list =
       List.map u_list ~f:(fun u ->
-        let noise = Tensor.randn_like (Maths.primal u) |> Maths.const in
+        let noise =
+          let eps =
+            Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.b ]
+            |> Maths.const
+          in
+          Maths.einsum [ eps, "ma"; theta._cov_pos, "ab" ] "mb"
+        in
         Maths.(noise + u))
     in
     u_list, sampled_u_list
@@ -167,6 +173,7 @@ module LGS = struct
 
   (* gaussian llh with diagonal covariance *)
   let gaussian_llh ~g_mean ~g_cov ~x =
+    let g_cov = Maths.sqr g_cov in
     let error_term =
       let error = Maths.(x - g_mean) in
       let tmp = tmp_einsum error (Maths.inv_sqr g_cov) in
@@ -215,7 +222,7 @@ module LGS = struct
         | Some accu -> Some Maths.(accu + increment))
       |> Option.value_exn
     in
-    Maths.((llh + prior - entropy) /$  Float.of_int (List.length u_list))
+    Maths.((llh + prior - entropy) /$ Float.of_int (List.length u_list))
 
   (* calculate optimal u *)
   let f ~update ~data ~init ~args:_ (theta : P.M.t) =
@@ -275,17 +282,17 @@ module LGS = struct
       |> Prms.free
     in
     let _cov_noise =
-      Tensor.(square (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.o ]))
+      Tensor.(abs (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.o ]))
       |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
       |> Prms.free
     in
     let _cov_u =
-      Tensor.(square (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ]))
+      Tensor.(abs (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ]))
       |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
       |> Prms.free
     in
     let _cov_pos =
-      Tensor.(square (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ]))
+      Tensor.(abs (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ]))
       |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
       |> Prms.free
     in
@@ -339,7 +346,7 @@ let optimise ~max_iter ~f_name config_f =
   (* ~config:(config_f ~iter:0) *)
   loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
 
-let lr_rates = [ 100. ]
+let lr_rates = [ 50. ]
 let damping_list = [ Some 1e-3 ]
 let meth = "sofo"
 
