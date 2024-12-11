@@ -67,6 +67,8 @@ val maxpool2d
   -> ksize:int * int
   -> t
 
+val diag_embed : t -> offset:int -> dim1:int -> dim2:int -> t
+
 (** Binary operations *)
 val ( + ) : t -> t -> t
 

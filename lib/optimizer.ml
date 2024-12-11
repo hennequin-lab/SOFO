@@ -171,6 +171,7 @@ module SOFO (W : Wrapper.T) = struct
     let batch_size = final_losses |> Maths.primal |> Convenience.first_dim in
     let loss = final_losses |> Maths.primal |> Tensor.mean |> Tensor.to_float0_exn in
     (* normalise ggn by batch size *)
+    (* Tensor.print final_ggn; *)
     let final_ggn = Tensor.div_scalar_ final_ggn (Scalar.f Float.(of_int batch_size)) in
     let loss_tangents = final_losses |> Maths.tangent |> Option.value_exn in
     let vtg =

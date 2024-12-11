@@ -86,21 +86,20 @@ let permute (x, dx) ~dims =
 
 let unsqueeze (x, dx) ~dim =
   let y = Tensor.unsqueeze x ~dim in
-  let dy = with_tangent dx ~f:(fun dx -> 
-    let new_dim = 
-      if dim < 0 then dim else Int.(dim + 1) in
-    
-    Tensor.unsqueeze dx ~dim:new_dim) in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let new_dim = if dim < 0 then dim else Int.(dim + 1) in
+      Tensor.unsqueeze dx ~dim:new_dim)
+  in
   (y, dy) |> assert_right_shape "unsqueeze"
 
 let squeeze (x, dx) ~dim =
   let y = Tensor.squeeze_dim x ~dim in
-  let dy = with_tangent dx ~f:(fun dx -> 
-    let new_dim = 
-      if dim < 0 then dim else Int.(dim + 1) in
-    
-    
-    Tensor.squeeze_dim dx ~dim:new_dim) in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let new_dim = if dim < 0 then dim else Int.(dim + 1) in
+      Tensor.squeeze_dim dx ~dim:new_dim)
+  in
   (y, dy) |> assert_right_shape "squeeze"
 
 (* y = -x, dy = -dx *)
@@ -523,6 +522,14 @@ let maxpool2d
   in
   (y, dy) |> assert_right_shape "maxpool2d"
 
+let diag_embed (x, dx) ~offset ~dim1 ~dim2 =
+  let y = Tensor.diag_embed x ~offset ~dim1 ~dim2 in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let dim1_tan, dim2_tan = if dim1 < 0 then dim1, dim2 else dim1 + 1, dim2 + 1 in
+      Tensor.diag_embed dx ~offset ~dim1:dim1_tan ~dim2:dim2_tan)
+  in
+  (y, dy) |> assert_right_shape "diag_embed"
 
 (** Binary operations *)
 
