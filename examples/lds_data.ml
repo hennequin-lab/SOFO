@@ -482,7 +482,7 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
   let sample_u () = sample_tensor [ X.m; X.b ]
   let sample_u_list () = List.init X.tmax ~f:(fun _ -> sample_u ())
 
-  (* output follows a Gaussian with mean= z c + b and diagonal cov *)
+  (* output follows a Gaussian with mean = z c + b and diagonal cov *)
   let sample_c () =
     if X.batch_const then sample_tensor [ X.a; X.o ] else sample_tensor [ X.m; X.a; X.o ]
 
