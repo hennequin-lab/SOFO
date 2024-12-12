@@ -21,6 +21,7 @@ val permute : t -> dims:int list -> t
 val unsqueeze : t -> dim:int -> t
 val squeeze : t -> dim:int -> t
 val neg : t -> t
+val abs : t -> t
 val trace : t -> t
 val sin : t -> t
 val cos : t -> t
@@ -53,6 +54,9 @@ val btr : t -> t
 
 (* take the batch diagonal *)
 val diagonal : t -> offset:int -> t
+
+(* diagonal of certain 2d planes are filled by input *)
+val diag_embed : t -> offset:int -> dim1:int -> dim2:int -> t
 val tril : t -> diagonal:int -> t
 val cholesky : t -> t
 val logsumexp : t -> dim:int list -> keepdim:bool -> t
@@ -66,8 +70,6 @@ val maxpool2d
   -> t
   -> ksize:int * int
   -> t
-
-val diag_embed : t -> offset:int -> dim1:int -> dim2:int -> t
 
 (** Binary operations *)
 val ( + ) : t -> t -> t

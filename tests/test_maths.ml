@@ -219,6 +219,12 @@ let unary_tests =
           in
           Maths.transpose ~dim0 ~dim1 )
     ; ("btr", [ `order_greater_than 2 ], fun _ -> Maths.btr)
+    ; ( "diagonal"
+      , [ `order_greater_than 2 ]
+      , fun _ -> Maths.diagonal ~offset:(Random.int 2) )
+    ; ( "diag_embed"
+      , [ `order_greater_than 2 ]
+      , fun _ -> Maths.diag_embed ~offset:(Random.int 2) ~dim1:(-2) ~dim2:(-1) )
     ; "cholesky", [ `specified_unary [ 14; 14 ] ], any_shape cholesky_test
     ; "batch_cholesky", [ `specified_unary [ 3; 14; 14 ] ], any_shape batch_cholesky_test
     ; ( "logsumexp"

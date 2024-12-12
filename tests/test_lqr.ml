@@ -46,12 +46,12 @@ let () =
             "Naive batch const true"
             `Quick
             (test_LQR (f_naive ~batch_const:true) ~batch_const:true)) )
-     ; ( "niave_false"
+    ; ( "niave_false"
       , List.init n_tests ~f:(fun _ ->
           Alcotest.test_case
             "Naive batch const false"
             `Quick
-            (test_LQR (f_naive ~batch_const:false) ~batch_const:false)) ) 
+            (test_LQR (f_naive ~batch_const:false) ~batch_const:false)) )
     ; ( "implicit_true"
       , List.init n_tests ~f:(fun _ ->
           Alcotest.test_case

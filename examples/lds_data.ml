@@ -246,6 +246,7 @@ let q_of ~batch_const ~m ~reg d =
     Array.init m ~f:(fun _ -> Arr.reshape (pos_sym ~reg d) [| 1; d; d |])
     |> Arr.concatenate ~axis:0
 
+
 let map_naive (x : Input.M.t) ~batch_const =
   let irrelevant = Some (fun _ -> assert false) in
   let params =

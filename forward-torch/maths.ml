@@ -108,6 +108,12 @@ let neg (x, dx) =
   let dy = with_tangent dx ~f:Tensor.neg in
   (y, dy) |> assert_right_shape "neg"
 
+(* y = -x, dy = -dx *)
+let abs (x, dx) =
+  let y = Tensor.abs x in
+  let dy = with_tangent dx ~f:Tensor.abs in
+  (y, dy) |> assert_right_shape "abs"
+
 let trace (x, dx) =
   assert (
     match Tensor.shape x with
@@ -334,6 +340,15 @@ let diagonal (x, dx) ~offset =
   in
   (y, dy) |> assert_right_shape "diagonal"
 
+let diag_embed (x, dx) ~offset ~dim1 ~dim2 =
+  let y = Tensor.diag_embed x ~offset ~dim1 ~dim2 in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let dim1_tan, dim2_tan = if dim1 < 0 then dim1, dim2 else dim1 + 1, dim2 + 1 in
+      Tensor.diag_embed dx ~offset ~dim1:dim1_tan ~dim2:dim2_tan)
+  in
+  (y, dy) |> assert_right_shape "diag_embed"
+
 let tril (x, dx) ~diagonal =
   let y = Tensor.tril x ~diagonal in
   let dy = with_tangent dx ~f:(Tensor.tril ~diagonal) in
@@ -521,15 +536,6 @@ let maxpool2d
       Tensor.reshape dy ~shape:(num_tangents :: y_shape))
   in
   (y, dy) |> assert_right_shape "maxpool2d"
-
-let diag_embed (x, dx) ~offset ~dim1 ~dim2 =
-  let y = Tensor.diag_embed x ~offset ~dim1 ~dim2 in
-  let dy =
-    with_tangent dx ~f:(fun dx ->
-      let dim1_tan, dim2_tan = if dim1 < 0 then dim1, dim2 else dim1 + 1, dim2 + 1 in
-      Tensor.diag_embed dx ~offset ~dim1:dim1_tan ~dim2:dim2_tan)
-  in
-  (y, dy) |> assert_right_shape "diag_embed"
 
 (** Binary operations *)
 

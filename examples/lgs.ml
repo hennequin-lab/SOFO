@@ -87,8 +87,6 @@ let config ~base_lr ~gamma ~iter:_ =
 (* let config ~base_lr ~gamma:_ ~iter:_ =
   Optimizer.Config.Adam.{ default with learning_rate = Some base_lr } *)
 
-let beta = 0.001
-
 module LGS = struct
   module PP = struct
     type 'a p =
@@ -96,9 +94,10 @@ module LGS = struct
       ; _Fu_prod : 'a
       ; _c : 'a
       ; _b : 'a
-      ; _cov_noise : 'a (* sqrt of the diagonal of covariance of emission noise *)
-      ; _cov_u : 'a (* sqrt of the diagonal of covariance of prior over u *)
-      ; _cov_pos : 'a
+      ; _cov_o : 'a (* sqrt of the diagonal of covariance of emission noise *)
+      ; _cov_u : 'a
+        (* sqrt of the diagonal of covariance of prior over u *)
+        (* ; _cov_pos : 'a *)
         (* recognition model; sqrt of the diagonal of covariance of posterior *)
       }
     [@@deriving prms]
@@ -109,10 +108,13 @@ module LGS = struct
   type args = unit
   type data = Tensor.t * Tensor.t list
 
-  (* special care to be taken when dealing with elbo loss *)
-  module ELBO_loss = struct
-    type 'a with_args = 'a
+  let remove_tangent x = x |> Maths.primal |> Maths.const
 
+  let inv_cov x =
+    x |> Maths.sqr |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1) |> Maths.inv_sqr
+
+  (* special care to be taken when dealing with elbo loss *)
+  module Joint_llh_loss = struct
     let vtgt_hessian_gv ~rolled_out_x_list ~u_list (theta : P.M.t) =
       (* fold ggn across time *)
       let ggn_final ~o_list ~like_hess =
@@ -128,73 +130,40 @@ module LGS = struct
       in
       let llh_ggn =
         let like_hess =
-          let cov_inv =
-            theta._cov_noise
-            |> Maths.sqr
-            |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
-            |> Maths.inv_sqr
-          in
+          let cov_inv = theta._cov_o |> inv_cov in
           let tmp = Maths.einsum [ theta._c, "ab"; cov_inv, "bc" ] "ac" in
           Maths.einsum [ tmp, "ac"; theta._c, "bc" ] "ab" |> Maths.primal
         in
         ggn_final ~o_list:rolled_out_x_list ~like_hess
       in
-      let prior_ggn =
-        let like_hess =
-          theta._cov_u
-          |> Maths.sqr
-          |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
-          |> Maths.inv_sqr
-          |> Maths.primal
-        in
+      (* let prior_ggn =
+        let like_hess = theta._cov_u |> inv_cov |> Maths.primal in
         ggn_final ~o_list:u_list ~like_hess
-      in
-      let entropy_ggn =
-        let like_hess =
-          theta._cov_pos
-          |> Maths.sqr
-          |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
-          |> Maths.inv_sqr
-          |> Maths.primal
-        in
-        ggn_final ~o_list:u_list ~like_hess
-      in
-      let final =
-        Tensor.(llh_ggn + mul_scalar (prior_ggn - entropy_ggn) (Scalar.f beta))
-      in
+      in *)
+      let final = Tensor.(llh_ggn) in
       final
   end
 
-  (* create params for lds from f *)
+  (* create params for lds from f; no parameters carry tangents *)
   let params_from_f ~(theta : P.M.t) ~x0 ~o_list
     : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lqr.Params.p
     =
     (* set o at time 0 as 0 *)
     let o_list_tmp = Tensor.zeros_like (List.hd_exn o_list) :: o_list in
-    let _cov_noise_inv =
-      theta._cov_noise
-      |> Maths.sqr
-      |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
-      |> Maths.inv_sqr
-    in
-    let _cov_u_inv =
-      theta._cov_u
-      |> Maths.sqr
-      |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
-      |> Maths.inv_sqr
-    in
-    let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 in
-    let _cx_common = Maths.(theta._b *@ _cov_noise_inv *@ c_trans) in
+    let _cov_o_inv = theta._cov_o |> inv_cov |> remove_tangent in
+    let _cov_u_inv = theta._cov_u |> inv_cov |> remove_tangent in
+    let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 |> remove_tangent in
+    let _cx_common = Maths.(theta._b *@ _cov_o_inv *@ c_trans) |> remove_tangent in
     Lqr.Params.
       { x0 = Some x0
       ; params =
           List.map o_list_tmp ~f:(fun o ->
-            let _Cxx = Maths.(theta._c *@ _cov_noise_inv *@ c_trans) in
-            let _cx = Maths.(_cx_common - (const o *@ c_trans)) in
+            let _Cxx = Maths.(theta._c *@ _cov_o_inv *@ c_trans) |> remove_tangent in
+            let _cx = Maths.(_cx_common - (const o *@ c_trans)) |> remove_tangent in
             Lds_data.Temp.
               { _f = None
-              ; _Fx_prod = theta._Fx_prod
-              ; _Fu_prod = theta._Fu_prod
+              ; _Fx_prod = theta._Fx_prod |> remove_tangent
+              ; _Fu_prod = theta._Fu_prod |> remove_tangent
               ; _cx = Some _cx
               ; _cu = None
               ; _Cxx
@@ -202,37 +171,6 @@ module LGS = struct
               ; _Cuu = _cov_u_inv
               })
       }
-
-  (* optimal u determined from lqr *)
-  let pred_u ~data (theta : P.M.t) =
-    let x0, o_list = data in
-    let x0_tan = Maths.const x0 in
-    (* use lqr to obtain the optimal u *)
-    let p =
-      params_from_f ~x0:x0_tan ~theta ~o_list
-      |> Lds_data.map_implicit ~batch_const:Dims.batch_const
-    in
-    let sol = Lqr.solve ~batch_const:Dims.batch_const p in
-    let optimal_u_list = List.map sol ~f:(fun s -> s.u) in
-    let cov_pos =
-      theta._cov_pos
-      |> Maths.sqr
-      |> Maths.sqrt
-      |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
-    in
-    let u_list =
-      List.map optimal_u_list ~f:(fun u ->
-        let noise =
-          let eps =
-            Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.b ]
-            |> Maths.const
-          in
-          Maths.einsum [ eps, "ma"; cov_pos, "ab" ] "mb"
-        in
-        Maths.(noise + u))
-    in
-    optimal_u_list, u_list
-  (* optimal_u ~theta ~x0:(Maths.const x0) ~o_list *)
 
   (* rollout x list under sampled u *)
   let rollout_x ~u_list ~x0 (theta : P.M.t) =
@@ -243,6 +181,75 @@ module LGS = struct
         new_x, new_x :: x_list)
     in
     List.rev x_list
+
+  (* optimal u determined from lqr *)
+  let pred_u ~data (theta : P.M.t) =
+    let x0, o_list = data in
+    let x0_tan = Maths.const x0 in
+    (* use lqr to obtain the optimal u *)
+    (* optimal u and sampled u do not carry tangents! *)
+    let optimal_u_list =
+      let p =
+        params_from_f ~x0:x0_tan ~theta ~o_list
+        |> Lds_data.map_naive ~batch_const:Dims.batch_const
+      in
+      let sol = Lqr._solve ~batch_const:Dims.batch_const p in
+      List.map sol ~f:(fun s -> s.u)
+    in
+    Stdlib.Gc.major ();
+    let sample_gauss ~_mean ~_cov ~dim =
+      let eps = Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; dim ] in
+      Tensor.(einsum ~equation:"ma,ab->mb" [ eps; _cov ] ~path:None + _mean)
+    in
+    (* sample u from their priors *)
+    let sampled_u =
+      let cov_u =
+        theta._cov_u
+        |> Maths.abs
+        |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+        |> Maths.primal
+      in
+      List.init Dims.tmax ~f:(fun _ ->
+        sample_gauss ~_mean:(Tensor.f 0.) ~_cov:cov_u ~dim:Dims.b)
+    in
+    (* sample o with obsrevation noise *)
+    let o_sampled =
+      (* propagate prior sampled u through dynamics *)
+      let x_rolled_out =
+        let sampled_u_tan = List.map sampled_u ~f:Maths.const in
+        rollout_x ~u_list:sampled_u_tan ~x0 theta |> List.tl_exn
+      in
+      let cov_o =
+        theta._cov_o
+        |> Maths.abs
+        |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+        |> Maths.primal
+      in
+      List.map x_rolled_out ~f:(fun x ->
+        let _mean =
+          Tensor.(matmul (Maths.primal x) (Maths.primal theta._c) + Maths.primal theta._b)
+        in
+        sample_gauss ~_mean ~_cov:cov_o ~dim:Dims.o)
+    in
+    (* lqr on (o - o_sampled) *)
+    let sol_delta_o =
+      let delta_o_list = List.map2_exn o_list o_sampled ~f:(fun a b -> Tensor.(a - b)) in
+      let p =
+        params_from_f ~x0:x0_tan ~theta ~o_list:delta_o_list
+        |> Lds_data.map_naive ~batch_const:Dims.batch_const
+      in
+      Lqr._solve ~batch_const:Dims.batch_const p
+    in
+    Stdlib.Gc.major ();
+    (* final u samples *)
+    let u_list =
+      let optimal_u_list_delta_o =
+        List.map sol_delta_o ~f:(fun s -> s.u |> Maths.primal)
+      in
+      List.map2_exn sampled_u optimal_u_list_delta_o ~f:(fun u delta_u ->
+        Tensor.(u + delta_u) |> Maths.const)
+    in
+    optimal_u_list, u_list
 
   (* gaussian llh with diagonal covariance *)
   let gaussian_llh ~g_mean ~g_cov ~x =
@@ -265,7 +272,7 @@ module LGS = struct
     |> Maths.(mean_dim ~keepdim:false ~dim:(Some [ 1 ]))
     |> Maths.neg
 
-  let elbo ~u_list ~x_o_list ~optimal_u_list (theta : P.M.t) =
+  let joint_llh ~u_list ~x_o_list (theta : P.M.t) =
     (* calculate the likelihood term *)
     let llh =
       List.foldi x_o_list ~init:None ~f:(fun t accu (x, o) ->
@@ -273,7 +280,7 @@ module LGS = struct
         let increment =
           gaussian_llh
             ~g_mean:o
-            ~g_cov:(Maths.sqr theta._cov_noise)
+            ~g_cov:(Maths.sqr theta._cov_o)
             ~x:Maths.(tmp_einsum x theta._c + theta._b)
         in
         match accu with
@@ -293,34 +300,24 @@ module LGS = struct
         | Some accu -> Some Maths.(accu + increment))
       |> Option.value_exn
     in
-    let entropy =
-      List.fold2_exn optimal_u_list u_list ~init:None ~f:(fun accu u_opt u ->
-        let increment =
-          gaussian_llh ~g_mean:u_opt ~g_cov:(Maths.sqr theta._cov_pos) ~x:u
-        in
-        match accu with
-        | None -> Some increment
-        | Some accu -> Some Maths.(accu + increment))
-      |> Option.value_exn
-    in
-    Maths.(llh + (beta $* prior - entropy))
+    Maths.(llh + prior)
 
   (* calculate optimal u *)
   let f ~update ~data ~init ~args:_ (theta : P.M.t) =
-    let module L = ELBO_loss in
+    let module L = Joint_llh_loss in
     let x0, o_list = data in
-    let optimal_u_list, u_list = pred_u ~data theta in
+    let _, u_list = pred_u ~data theta in
     let rolled_out_x_list = rollout_x ~u_list ~x0 theta in
     (* These lists go from 1 to T *)
     let o_except_first = List.map o_list ~f:(fun o -> Maths.const o) in
     let x_except_first = List.tl_exn rolled_out_x_list in
     let x_o_list = List.map2_exn x_except_first o_except_first ~f:(fun x o -> x, o) in
-    let neg_elbo = Maths.(neg (elbo ~u_list ~x_o_list ~optimal_u_list theta)) in
+    let neg_joint_llh = Maths.(neg (joint_llh ~u_list ~x_o_list theta)) in
     match update with
-    | `loss_only u -> u init (Some neg_elbo)
+    | `loss_only u -> u init (Some neg_joint_llh)
     | `loss_and_ggn u ->
       let ggn = L.vtgt_hessian_gv ~rolled_out_x_list:x_except_first ~u_list theta in
-      u init (Some (neg_elbo, Some ggn))
+      u init (Some (neg_joint_llh, Some ggn))
 
   let init : P.tagged =
     let _Fx_prod =
@@ -359,22 +356,19 @@ module LGS = struct
         ~sigma:0.1
       |> Prms.free
     in
-    let _cov_noise =
+    let _cov_o =
       Tensor.(abs (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.o ]))
-      (* |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1) *)
       |> Prms.free
     in
     let _cov_u =
       Tensor.(abs (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ]))
-      (* |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1) *)
       |> Prms.free
     in
     let _cov_pos =
       Tensor.(abs (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ]))
-      (* |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1) *)
       |> Prms.free
     in
-    { _Fx_prod; _Fu_prod; _c; _b; _cov_noise; _cov_u; _cov_pos }
+    { _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u }
 
   let simulate ~theta ~data =
     (* infer the optimal u *)
@@ -444,7 +438,7 @@ let optimise ~max_iter ~f_name config_f =
   (* ~config:(config_f ~iter:0) *)
   loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
 
-let lr_rates = [ 1e-5 ]
+let lr_rates = [ 1e-8 ]
 let damping_list = [ Some 1e-1 ]
 let meth = "sofo"
 
@@ -458,7 +452,7 @@ let _ =
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
       optimise ~max_iter ~f_name config_f))
 
-(* let lr_rates = [ 0.01 ]
+(* let lr_rates = [ 0.1 ]
 let meth = "adam"
 
 let _ =
