@@ -751,8 +751,20 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
   in
   (x, dx) |> assert_right_shape "linsolve_triangular"
 
+let kron (a, da) (b, db) =
+  let x = Tensor.kron a b in
+  let dz =
+    with_tangents
+      da
+      db
+      ~fx:(fun da -> Tensor.kron da b)
+      ~fy:(fun db -> Tensor.kron a db)
+      ~fxy:(fun da db -> Tensor.(kron da b + kron a db))
+  in
+  (x, dz) |> assert_right_shape "kron"
+
 (* solve for ax=b (if left true) or xa = b (if left false). Note that b must be 3D (i.e. m x p x n) and a needs to be triangular. *)
-let __linsolve_triangular (a, da) (b, db) ~left ~upper =
+(* let __linsolve_triangular (a, da) (b, db) ~left ~upper =
   let unitriangular = false in
   let z = Tensor.linalg_solve_triangular a ~b ~upper ~left ~unitriangular in
   let a_shape = Tensor.shape a in
@@ -849,7 +861,7 @@ let __linsolve_triangular (a, da) (b, db) ~left ~upper =
         in
         final)
   in
-  (z, dz) |> assert_right_shape "linsolve_triangular"
+  (z, dz) |> assert_right_shape "linsolve_triangular" *)
 
 let conv2d
       ?(padding = 0, 0)

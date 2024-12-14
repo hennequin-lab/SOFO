@@ -426,6 +426,7 @@ let binary_tests =
     ; ( "linsolve_tri_left_false_upper_false"
       , [ `linsolve_left_false ]
       , any_shape (linsolve_tri ~left:false ~upper:false) )
+    ; "kron", [ `specified_binary ([ 3; 4 ], [ 5; 7 ]) ], any_shape Maths.kron
     ; ( "concat"
       , []
       , fun shape ->

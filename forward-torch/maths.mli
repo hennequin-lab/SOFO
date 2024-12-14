@@ -28,7 +28,7 @@ val cos : t -> t
 val sqr : t -> t
 val sqrt : t -> t
 val log : t -> t
-val exp : t -> t
+val exp : t -> t  
 val tanh : t -> t
 val inv_sqr : t -> t
 val inv_rectangle : ?rcond:float -> t -> t
@@ -97,6 +97,8 @@ val einsum : (t * string) list -> string -> t
 (* ax = b, find x*)
 val linsolve : t -> t -> left:bool -> t
 val linsolve_triangular : t -> t -> left:bool -> upper:bool -> t
+
+val kron: t -> t -> t
 
 val conv2d
   :  ?padding:int * int
