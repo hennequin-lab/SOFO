@@ -73,7 +73,6 @@ let base =
     { default with kind = Torch_core.Kind.(T f64); ba_kind = Bigarray.float64 }
 
 let max_iter = 10000
-let beta_init = 0.01
 
 let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
@@ -86,7 +85,7 @@ let config ~base_lr ~gamma ~iter:_ =
     }
 
 (* let config ~base_lr ~gamma:_ ~iter:_ =
-  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }  *)
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr } *)
 
 module LGS = struct
   module PP = struct
@@ -108,8 +107,6 @@ module LGS = struct
 
   type args = float (* beta *)
   type data = Tensor.t * Tensor.t list
-
-  let remove_tangent x = x |> Maths.primal |> Maths.const
 
   let sqr_inv x =
     let x_sqr = Maths.sqr x in
@@ -196,7 +193,7 @@ module LGS = struct
       { x0 = Some x0
       ; params =
           List.map o_list_tmp ~f:(fun o ->
-            let _cx = Maths.(_cx_common - (const o *@ c_trans)) |> remove_tangent in
+            let _cx = Maths.(_cx_common - (const o *@ c_trans)) in
             Lds_data.Temp.
               { _f = None
               ; _Fx_prod = theta._Fx_prod
@@ -373,7 +370,7 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:Dims.a
         ~b:Dims.o
-        ~sigma:10.
+        ~sigma:0.1
       |> Prms.free
     in
     let _b =
@@ -382,7 +379,7 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:1
         ~b:Dims.o
-        ~sigma:10.
+        ~sigma:0.1
       |> Prms.free
     in
     let _cov_o =
@@ -429,7 +426,7 @@ let optimise ~max_iter ~f_name config_f =
       x0, o_list
     in
     let t0 = Unix.gettimeofday () in
-    let beta = Float.(((1. - beta_init) / of_int max_iter * of_int iter) + beta_init) in
+    let beta = 1. in
     let loss, new_state = O.step ~config ~state ~data ~args:beta in
     let t1 = Unix.gettimeofday () in
     let time_elapsed = Float.(time_elapsed + t1 - t0) in
@@ -468,7 +465,7 @@ let optimise ~max_iter ~f_name config_f =
   (* ~config:(config_f ~iter:0) *)
   loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
 
-let lr_rates = [ 0.5; 0.1; 0.01 ]
+let lr_rates = [ 1e-4 ]
 let damping_list = [ Some 0.01 ]
 let meth = "sofo"
 
@@ -478,16 +475,12 @@ let _ =
       let config_f = config ~base_lr:eta ~gamma in
       let gamma_name = Option.value_map gamma ~default:"none" ~f:Float.to_string in
       let f_name =
-        sprintf
-          "lgs_elbo_%s_lr_%s_damp_%s_sample_false"
-          meth
-          (Float.to_string eta)
-          gamma_name
+        sprintf "lgs_elbo_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
       optimise ~max_iter ~f_name config_f))
-(* let lr_rates = [ 0.1; 0.05; 0.01]
+(* let lr_rates = [ 0.05; 0.01; 0.005 ]
 let meth = "adam"
 
 let _ =
@@ -496,4 +489,4 @@ let _ =
     let f_name = sprintf "lgs_elbo_%s_lr_%s" meth (Float.to_string eta) in
     Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
     Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name config_f)  *)
+    optimise ~max_iter ~f_name config_f) *)

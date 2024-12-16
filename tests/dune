@@ -1,5 +1,5 @@
 (executables
- (names test_maths test_lqr test_lqr_implicit)
+ (names test_maths test_lqr test_lqr_implicit test_lqr_vae test_lqr_vae_elbo)
  (libraries framework lqr owl alcotest)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))

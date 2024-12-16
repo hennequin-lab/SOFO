@@ -74,7 +74,7 @@ let base =
 
 let max_iter = 10000
 
-let config ~base_lr ~gamma ~iter:_ =
+(* let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
@@ -82,10 +82,10 @@ let config ~base_lr ~gamma ~iter:_ =
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
-    }
+    } *)
 
-(* let config ~base_lr ~gamma:_ ~iter:_ =
-  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }  *)
+let config ~base_lr ~gamma:_ ~iter:_ =
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
 
 module LGS = struct
   module PP = struct
@@ -95,9 +95,7 @@ module LGS = struct
       ; _c : 'a
       ; _b : 'a
       ; _cov_o : 'a (* sqrt of the diagonal of covariance of emission noise *)
-      ; _cov_u : 'a
-        (* sqrt of the diagonal of covariance of prior over u *)
-        (* ; _cov_pos : 'a *)
+      ; _cov_u : 'a (* sqrt of the diagonal of covariance of prior over u *)
       }
     [@@deriving prms]
   end
@@ -109,7 +107,7 @@ module LGS = struct
 
   let remove_tangent x = x |> Maths.primal |> Maths.const
 
-  let inv_cov x =
+  let sqr_inv x =
     let x_sqr = Maths.sqr x in
     let tmp = Tensor.of_float0 1. |> Maths.const in
     Maths.(tmp / x_sqr)
@@ -131,7 +129,7 @@ module LGS = struct
       in
       let llh_ggn =
         let like_hess =
-          let cov_inv = theta._cov_o |> inv_cov in
+          let cov_inv = theta._cov_o |> sqr_inv in
           let tmp = Maths.(einsum [ theta._c, "ab"; cov_inv, "b" ] "ab") in
           Maths.(tmp *@ transpose theta._c ~dim0:1 ~dim1:0) |> Maths.primal
         in
@@ -148,12 +146,12 @@ module LGS = struct
     let o_list_tmp = Tensor.zeros_like (List.hd_exn o_list) :: o_list in
     let _cov_u_inv =
       theta._cov_u
-      |> inv_cov
+      |> sqr_inv
       |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
       |> remove_tangent
     in
     let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 |> remove_tangent in
-    let _cov_o_inv = inv_cov theta._cov_o in
+    let _cov_o_inv = sqr_inv theta._cov_o in
     let _Cxx =
       let tmp = Maths.(einsum [ theta._c, "ab"; _cov_o_inv, "b" ] "ab") in
       Maths.(tmp *@ c_trans) |> remove_tangent
@@ -179,6 +177,44 @@ module LGS = struct
               })
       }
 
+  (* create params for lds from f; all parameters carry tangents *)
+  let params_from_f_diff ~(theta : P.M.t) ~x0 ~o_list
+    : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lqr.Params.p
+    =
+    (* set o at time 0 as 0 *)
+    let o_list_tmp =
+      Maths.const (Tensor.zeros_like (Maths.primal (List.hd_exn o_list))) :: o_list
+    in
+    let _cov_u_inv =
+      theta._cov_u |> sqr_inv |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+    in
+    let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 in
+    let _cov_o_inv = sqr_inv theta._cov_o in
+    let _Cxx =
+      let tmp = Maths.(einsum [ theta._c, "ab"; _cov_o_inv, "b" ] "ab") in
+      Maths.(tmp *@ c_trans)
+    in
+    let _cx_common =
+      let tmp = Maths.(einsum [ theta._b, "ab"; _cov_o_inv, "b" ] "ab") in
+      Maths.(tmp *@ c_trans)
+    in
+    Lqr.Params.
+      { x0 = Some x0
+      ; params =
+          List.map o_list_tmp ~f:(fun o ->
+            let _cx = Maths.(_cx_common - (o *@ c_trans)) in
+            Lds_data.Temp.
+              { _f = None
+              ; _Fx_prod = theta._Fx_prod
+              ; _Fu_prod = theta._Fu_prod
+              ; _cx = Some _cx
+              ; _cu = None
+              ; _Cxx
+              ; _Cxu = None
+              ; _Cuu = _cov_u_inv
+              })
+      }
+
   (* rollout x list under sampled u *)
   let rollout_x ~u_list ~x0 (theta : P.M.t) =
     let x0_tan = Maths.const x0 in
@@ -190,7 +226,7 @@ module LGS = struct
     List.rev x_list
 
   (* optimal u determined from lqr *)
-  let pred_u ~data (theta : P.M.t) =
+  (* let pred_u ~data (theta : P.M.t) =
     let x0, o_list = data in
     let x0_tan = Maths.const x0 in
     (* use lqr to obtain the optimal u *)
@@ -255,6 +291,66 @@ module LGS = struct
       in
       List.map2_exn sampled_u optimal_u_list_delta_o ~f:(fun u delta_u ->
         Tensor.(u + delta_u) |> Maths.const)
+    in
+    optimal_u_list, u_list *)
+
+  (* optimal u determined from lqr; carry tangents *)
+  let pred_u ~data (theta : P.M.t) =
+    let x0, o_list = data in
+    let x0_tan = Maths.const x0 in
+    (* use lqr to obtain the optimal u *)
+    (* optimal u and sampled u do not carry tangents! *)
+    let optimal_u_list =
+      let p =
+        params_from_f_diff ~x0:x0_tan ~theta ~o_list:(List.map o_list ~f:Maths.const)
+        |> Lds_data.map_naive ~batch_const:Dims.batch_const
+      in
+      let sol = Lqr._solve ~batch_const:Dims.batch_const p in
+      List.map sol ~f:(fun s -> s.u)
+    in
+    Stdlib.Gc.major ();
+    let sample_gauss ~_mean ~_cov ~dim =
+      let eps =
+        Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; dim ] |> Maths.const
+      in
+      Maths.(einsum [ eps, "ma"; _cov, "ab" ] "mb" + _mean)
+    in
+    (* sample u from their priors *)
+    let sampled_u =
+      let cov_u =
+        theta._cov_u |> Maths.abs |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+      in
+      List.init Dims.tmax ~f:(fun _ ->
+        sample_gauss ~_mean:(Maths.const (Tensor.f 0.)) ~_cov:cov_u ~dim:Dims.b)
+    in
+    (* sample o with obsrevation noise *)
+    let o_sampled =
+      (* propagate prior sampled u through dynamics *)
+      let x_rolled_out = rollout_x ~u_list:sampled_u ~x0 theta |> List.tl_exn in
+      let cov_o =
+        theta._cov_o |> Maths.abs |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+      in
+      List.map x_rolled_out ~f:(fun x ->
+        let _mean = Maths.((x *@ theta._c) + theta._b) in
+        sample_gauss ~_mean ~_cov:cov_o ~dim:Dims.o)
+    in
+    (* lqr on (o - o_sampled) *)
+    let sol_delta_o =
+      let delta_o_list =
+        List.map2_exn o_list o_sampled ~f:(fun a b -> Maths.(const a - b))
+      in
+      let p =
+        params_from_f_diff ~x0:x0_tan ~theta ~o_list:delta_o_list
+        |> Lds_data.map_naive ~batch_const:Dims.batch_const
+      in
+      Lqr._solve ~batch_const:Dims.batch_const p
+    in
+    Stdlib.Gc.major ();
+    (* final u samples *)
+    let u_list =
+      let optimal_u_list_delta_o = List.map sol_delta_o ~f:(fun s -> s.u) in
+      List.map2_exn sampled_u optimal_u_list_delta_o ~f:(fun u delta_u ->
+        Maths.(u + delta_u))
     in
     optimal_u_list, u_list
 
@@ -339,7 +435,7 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:Dims.a
         ~b:Dims.o
-        ~sigma:10.
+        ~sigma:0.1
       |> Prms.free
     in
     let _b =
@@ -348,7 +444,7 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:1
         ~b:Dims.o
-        ~sigma:10.
+        ~sigma:0.1
       |> Prms.free
     in
     let _cov_o =
@@ -380,8 +476,8 @@ module LGS = struct
     o_error
 end
 
-module O = Optimizer.SOFO (LGS)
-(* module O = Optimizer.Adam (LGS) *)
+(* module O = Optimizer.SOFO (LGS) *)
+module O = Optimizer.Adam (LGS)
 
 let optimise ~max_iter ~f_name config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -428,9 +524,9 @@ let optimise ~max_iter ~f_name config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init  ~config:(config_f ~iter:0)  LGS.(init)) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init LGS.(init)) ~time_elapsed:0. []
 
-let lr_rates = [  0.05; 0.01; 0.005 ]
+(* let lr_rates = [ 0.05; 0.01; 0.005 ]
 let damping_list = [ Some 0.01 ]
 let meth = "sofo"
 
@@ -442,9 +538,9 @@ let _ =
       let f_name = sprintf "lgs_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name config_f)) 
+      optimise ~max_iter ~f_name config_f)) *)
 
-(* let lr_rates = [ 0.005; 0.001 ]
+let lr_rates = [ 0.05; 0.01; 0.005 ]
 let meth = "adam"
 
 let _ =
@@ -453,4 +549,4 @@ let _ =
     let f_name = sprintf "lgs_%s_lr_%s" meth (Float.to_string eta) in
     Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
     Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name config_f)  *)
+    optimise ~max_iter ~f_name config_f)
