@@ -309,30 +309,30 @@ module LGS = struct
       List.map sol ~f:(fun s -> s.u)
     in
     Stdlib.Gc.major ();
-    let sample_gauss ~_mean ~_cov ~dim =
+    let sample_gauss ~_mean ~_std ~dim =
       let eps =
         Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; dim ] |> Maths.const
       in
-      Maths.(einsum [ eps, "ma"; _cov, "ab" ] "mb" + _mean)
+      Maths.(einsum [ eps, "ma"; _std, "ab" ] "mb" + _mean)
     in
     (* sample u from their priors *)
     let sampled_u =
-      let cov_u =
+      let std_u =
         theta._cov_u |> Maths.abs |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
       in
       List.init Dims.tmax ~f:(fun _ ->
-        sample_gauss ~_mean:(Maths.const (Tensor.f 0.)) ~_cov:cov_u ~dim:Dims.b)
+        sample_gauss ~_mean:(Maths.const (Tensor.f 0.)) ~_std:std_u ~dim:Dims.b)
     in
     (* sample o with obsrevation noise *)
     let o_sampled =
       (* propagate prior sampled u through dynamics *)
       let x_rolled_out = rollout_x ~u_list:sampled_u ~x0 theta |> List.tl_exn in
-      let cov_o =
+      let std_o =
         theta._cov_o |> Maths.abs |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
       in
       List.map x_rolled_out ~f:(fun x ->
         let _mean = Maths.((x *@ theta._c) + theta._b) in
-        sample_gauss ~_mean ~_cov:cov_o ~dim:Dims.o)
+        sample_gauss ~_mean ~_std:std_o ~dim:Dims.o)
     in
     (* lqr on (o - o_sampled) *)
     let sol_delta_o =
