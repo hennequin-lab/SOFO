@@ -26,10 +26,10 @@ end
 
 module Data = Lds_data.Make_LDS_Tensor (Dims)
 
-(* TODO: for now we set x0=0? *)
 let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
 
 (* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
+
 let f_list : Tensor.t Lds_data.f_params list =
   let _Fx = Data.sample_fx () in
   let _Fu = Data.sample_fu () in
@@ -48,7 +48,10 @@ let f_list : Tensor.t Lds_data.f_params list =
 
 let sample_data () =
   (* generate ground truth params and data *)
-  let u_list = Data.sample_u_list () in
+  let u_list =
+    let _cov_u = Tensor.eye ~n:Dims.b ~options:(Dims.kind, Dims.device) in
+    Data.sample_u_list ~cov_u:_cov_u
+  in
   let x_list, o_list = Data.traj_rollout ~x0 ~f_list ~u_list in
   let o_list = List.map o_list ~f:(fun o -> Option.value_exn o) in
   u_list, x_list, o_list
@@ -134,12 +137,13 @@ module LGS = struct
           Tensor.(accu + increment))
       in
       let llh_ggn =
-        let like_hess =
-          let cov_inv = theta._cov_o |> sqr_inv in
-          let tmp = Maths.(einsum [ theta._c, "ab"; cov_inv, "b" ] "ab") in
-          Maths.(tmp *@ transpose theta._c ~dim0:1 ~dim1:0) |> Maths.primal
+        let like_hess = theta._cov_o |> sqr_inv |> Maths.primal in
+        (* y = cx + b *)
+        let y_list =
+          List.map rolled_out_x_list ~f:(fun x ->
+            Maths.(einsum [ x, "ma"; theta._c, "ab" ] "mb" + theta._b))
         in
-        ggn_final ~o_list:rolled_out_x_list ~like_hess ~diagonal:false
+        ggn_final ~o_list:y_list ~like_hess ~diagonal:true
       in
       let prior_ggn =
         let like_hess = theta._cov_u |> sqr_inv |> Maths.primal in
@@ -370,7 +374,7 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:Dims.a
         ~b:Dims.o
-        ~sigma:0.1
+        ~sigma:1.
       |> Prms.free
     in
     let _b =
@@ -379,20 +383,28 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:1
         ~b:Dims.o
-        ~sigma:0.1
+        ~sigma:1.
       |> Prms.free
     in
     let _cov_o =
-      Tensor.(abs (randn ~device:Dims.device ~kind:Dims.kind [ Dims.o ])) |> Prms.free
+      Tensor.(
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) (Scalar.f 10.))
+      |> Prms.free
     in
     let _cov_u =
-      Tensor.(abs (randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ])) |> Prms.free
+      Tensor.(
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 10.))
+      |> Prms.free
     in
     let _cov_space =
-      Tensor.(abs (randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ])) |> Prms.free
+      Tensor.(
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) (Scalar.f 10.))
+      |> Prms.free
     in
     let _cov_time =
-      Tensor.(abs (randn ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ])) |> Prms.free
+      Tensor.(
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 10.))
+      |> Prms.free
     in
     { _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u; _cov_space; _cov_time }
 
@@ -465,7 +477,7 @@ let optimise ~max_iter ~f_name config_f =
   (* ~config:(config_f ~iter:0) *)
   loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
 
-let lr_rates = [ 1e-4 ]
+let lr_rates = [ 1. ]
 let damping_list = [ Some 0.01 ]
 let meth = "sofo"
 
@@ -480,7 +492,7 @@ let _ =
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
       optimise ~max_iter ~f_name config_f))
-(* let lr_rates = [ 0.05; 0.01; 0.005 ]
+(* let lr_rates = [ 0.01 ]
 let meth = "adam"
 
 let _ =

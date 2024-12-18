@@ -122,7 +122,6 @@ module SOFO (W : Wrapper.T) = struct
     let u, s, _ = Tensor.svd ~some:true ~compute_uv:true ggn in
     (* how each V should be weighted, as a row array *)
     let weights =
-
       let tmp = Convenience.a_trans_b u vtg in
       let s =
         match damping with

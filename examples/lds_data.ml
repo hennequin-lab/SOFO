@@ -7,6 +7,8 @@ module Mat = Owl.Dense.Matrix.D
 module Arr = Owl.Dense.Ndarray.D
 module Linalg = Owl.Linalg.D
 
+let print s = Stdio.print_endline (Sexp.to_string_hum s)
+
 type 'a f_params =
   { _Fx_prod : 'a
   ; _Fu_prod : 'a
@@ -246,7 +248,6 @@ let q_of ~batch_const ~m ~reg d =
     Array.init m ~f:(fun _ -> Arr.reshape (pos_sym ~reg d) [| 1; d; d |])
     |> Arr.concatenate ~axis:0
 
-
 let map_naive (x : Input.M.t) ~batch_const =
   let irrelevant = Some (fun _ -> assert false) in
   let params =
@@ -479,8 +480,12 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
   let sample_c_x () = sample_tensor [ X.m; X.a ]
   let sample_c_u () = sample_tensor [ X.m; X.b ]
   let sample_f () = sample_tensor [ X.m; X.a ]
-  let sample_u () = sample_tensor [ X.m; X.b ]
-  let sample_u_list () = List.init X.tmax ~f:(fun _ -> sample_u ())
+
+  let sample_u ~cov_u =
+    let sqrt_u = Tensor.sqrt cov_u in
+    Tensor.(matmul (sample_tensor [ X.m; X.b ]) sqrt_u)
+
+  let sample_u_list ~cov_u = List.init X.tmax ~f:(fun _ -> sample_u ~cov_u)
 
   (* output follows a Gaussian with mean = z c + b and diagonal cov *)
   let sample_c () =
@@ -495,12 +500,6 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
     then Tensor.(abs (Tensor.randn ~device:X.device ~kind:X.kind [ X.o ])) |> diag_embed
     else
       Tensor.(abs (Tensor.randn ~device:X.device ~kind:X.kind [ X.m; X.o ])) |> diag_embed
-
-  let sample_gaussian ~cov =
-    let eps = sample_tensor [ X.m; X.o ] in
-    let cov_sqrt = Tensor.sqrt cov in
-    let eqn = if X.batch_const then "ma,ab->mb" else "ma,mab->mb" in
-    Tensor.einsum ~equation:eqn [ eps; cov_sqrt ] ~path:None
 
   (* given parameters such as f_x, f_u and f, returns u list and x list; u list goes from 0 to T-1 and x_list goes from 0 to T and o list goes from 1 to T. *)
   let traj_rollout ~x0 ~(f_list : Tensor.t f_params list) ~u_list =
@@ -525,11 +524,27 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
             match f_p._cov with
             | None -> None
             | Some _cov ->
-              let noise = sample_gaussian ~cov:_cov in
-              let b = Option.value_exn f_p._b in
-              let b_reshaped = if X.batch_const then Tensor.unsqueeze b ~dim:0 else b in
-              Some
-                Tensor.(tmp_einsum new_x (Option.value_exn f_p._c) + b_reshaped + noise)
+              let noise =
+                let eps = sample_tensor [ X.m; X.o ] in
+                let cov_sqrt = Tensor.sqrt _cov in
+                let eqn = if X.batch_const then "ma,ab->mb" else "ma,mab->mb" in
+                Tensor.einsum ~equation:eqn [ eps; cov_sqrt ] ~path:None
+              in
+              let with_emission =
+                match f_p._c with
+                | Some c -> Tensor.(noise + tmp_einsum new_x c)
+                | None -> noise
+              in
+              let with_b =
+                match f_p._b with
+                | None -> with_emission
+                | Some b ->
+                  let b_reshaped =
+                    if X.batch_const then Tensor.unsqueeze b ~dim:0 else b
+                  in
+                  Tensor.(with_emission + b_reshaped)
+              in
+              Some with_b
           in
           new_x, new_x :: x_list, new_o :: o_list)
     in

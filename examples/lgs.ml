@@ -18,7 +18,7 @@ module Dims = struct
   let b = 10
   let o = 48
   let tmax = 10
-  let m = 128
+  let m = 512
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
@@ -26,7 +26,6 @@ end
 
 module Data = Lds_data.Make_LDS_Tensor (Dims)
 
-(* TODO: for now we set x0=0? *)
 let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
 
 (* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
@@ -48,7 +47,10 @@ let f_list : Tensor.t Lds_data.f_params list =
 
 let sample_data () =
   (* generate ground truth params and data *)
-  let u_list = Data.sample_u_list () in
+  let u_list =
+    let _cov_u = Tensor.eye ~n:Dims.b ~options:(Dims.kind, Dims.device) in
+    Data.sample_u_list ~cov_u:_cov_u
+  in
   let x_list, o_list = Data.traj_rollout ~x0 ~f_list ~u_list in
   let o_list = List.map o_list ~f:(fun o -> Option.value_exn o) in
   u_list, x_list, o_list
@@ -74,7 +76,7 @@ let base =
 
 let max_iter = 10000
 
-(* let config ~base_lr ~gamma ~iter:_ =
+let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
@@ -82,10 +84,10 @@ let max_iter = 10000
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
-    } *)
+    }
 
-let config ~base_lr ~gamma:_ ~iter:_ =
-  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
+(* let config ~base_lr ~gamma:_ ~iter:_ =
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr } *)
 
 module LGS = struct
   module PP = struct
@@ -116,11 +118,12 @@ module LGS = struct
   module Joint_llh_loss = struct
     let vtgt_hessian_gv ~rolled_out_x_list (theta : P.M.t) =
       (* fold ggn across time *)
-      let ggn_final ~o_list ~like_hess =
+      let ggn_final ~o_list ~like_hess ~diagonal =
+        let vtgt_hess_eqn = if diagonal then "kma,a->kma" else "kma,ab->kmb" in
         List.fold o_list ~init:(Tensor.f 0.) ~f:(fun accu o ->
           let vtgt = Maths.tangent o |> Option.value_exn in
           let vtgt_hess =
-            Tensor.einsum ~equation:"kma,ab->kmb" [ vtgt; like_hess ] ~path:None
+            Tensor.einsum ~equation:vtgt_hess_eqn [ vtgt; like_hess ] ~path:None
           in
           let increment =
             Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_hess; vtgt ] ~path:None
@@ -128,12 +131,12 @@ module LGS = struct
           Tensor.(accu + increment))
       in
       let llh_ggn =
-        let like_hess =
-          let cov_inv = theta._cov_o |> sqr_inv in
-          let tmp = Maths.(einsum [ theta._c, "ab"; cov_inv, "b" ] "ab") in
-          Maths.(tmp *@ transpose theta._c ~dim0:1 ~dim1:0) |> Maths.primal
+        let like_hess = theta._cov_o |> sqr_inv |> Maths.primal in
+        let c_x_list =
+          List.map rolled_out_x_list ~f:(fun x ->
+            Maths.(einsum [ x, "ma"; theta._c, "ab" ] "mb" + theta._b))
         in
-        ggn_final ~o_list:rolled_out_x_list ~like_hess
+        ggn_final ~o_list:c_x_list ~like_hess ~diagonal:true
       in
       llh_ggn
   end
@@ -435,7 +438,7 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:Dims.a
         ~b:Dims.o
-        ~sigma:0.1
+        ~sigma:1.
       |> Prms.free
     in
     let _b =
@@ -444,17 +447,18 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:1
         ~b:Dims.o
-        ~sigma:0.1
+        ~sigma:1.
       |> Prms.free
     in
     let _cov_o =
-      Tensor.(abs (randn ~device:Dims.device ~kind:Dims.kind [ Dims.o ])) |> Prms.free
+      Tensor.(
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) (Scalar.f 10.))
+      |> Prms.free
     in
     let _cov_u =
-      Tensor.(abs (randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ])) |> Prms.free
-    in
-    let _cov_pos =
-      Tensor.(abs (randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ])) |> Prms.free
+      Tensor.(
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 10.))
+      |> Prms.free
     in
     { _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u }
 
@@ -476,8 +480,8 @@ module LGS = struct
     o_error
 end
 
-(* module O = Optimizer.SOFO (LGS) *)
-module O = Optimizer.Adam (LGS)
+module O = Optimizer.SOFO (LGS)
+(* module O = Optimizer.Adam (LGS) *)
 
 let optimise ~max_iter ~f_name config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -498,7 +502,7 @@ let optimise ~max_iter ~f_name config_f =
         | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
       in
       (* save params *)
-      if iter % 10 = 0
+      if iter % 1 = 0
       then (
         (* simulation error *)
         let o_error =
@@ -524,9 +528,9 @@ let optimise ~max_iter ~f_name config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init LGS.(init)) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
 
-(* let lr_rates = [ 0.05; 0.01; 0.005 ]
+let lr_rates = [ 1. ]
 let damping_list = [ Some 0.01 ]
 let meth = "sofo"
 
@@ -538,9 +542,9 @@ let _ =
       let f_name = sprintf "lgs_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name config_f)) *)
+      optimise ~max_iter ~f_name config_f))
 
-let lr_rates = [ 0.05; 0.01; 0.005 ]
+(* let lr_rates = [ 0.01;0.001 ]
 let meth = "adam"
 
 let _ =
@@ -549,4 +553,4 @@ let _ =
     let f_name = sprintf "lgs_%s_lr_%s" meth (Float.to_string eta) in
     Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
     Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name config_f)
+    optimise ~max_iter ~f_name config_f) *)
