@@ -475,8 +475,10 @@ let config ~base_lr ~gamma ~iter:_ =
     ; rank_one = false
     ; damping = gamma
     ; momentum = Some 0.9
-    } 
- module O = Optimizer.SOFO (LGS) 
+    ; lm = false
+    }
+
+module O = Optimizer.SOFO (LGS)
 
 (* let config ~base_lr ~gamma:_ ~iter:_ =
   Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
@@ -528,9 +530,9 @@ let optimise ~max_iter ~f_name config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init  ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
 
- let lr_rates = [  1e-5; 1e-6; 1e-7]
+let lr_rates = [ 1e-5; 1e-6; 1e-7 ]
 let damping_list = [ Some 0.1 ]
 let meth = "sofo"
 
@@ -542,7 +544,7 @@ let _ =
       let f_name = sprintf "lgs_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name config_f)) 
+      optimise ~max_iter ~f_name config_f))
 
 (* let lr_rates = [ 0.01 ]
 let meth = "adam"

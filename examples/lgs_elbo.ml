@@ -413,7 +413,7 @@ module LGS = struct
     o_error
 end
 
-(* let config ~base_lr ~gamma ~iter:_ =
+let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
@@ -421,14 +421,15 @@ end
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
+    ; lm = false
     }
 
-module O = Optimizer.SOFO (LGS) *)
+module O = Optimizer.SOFO (LGS)
 
-let config ~base_lr ~gamma:_ ~iter:_ =
-  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
+(* let config ~base_lr ~gamma:_ ~iter:_ =
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr } *)
 
-module O = Optimizer.Adam (LGS)
+(* module O = Optimizer.Adam (LGS) *)
 
 let optimise ~max_iter ~f_name ~init config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -450,7 +451,7 @@ let optimise ~max_iter ~f_name ~init config_f =
         | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
       in
       (* save params *)
-      if iter % 10 = 0
+      if iter % 1 = 0
       then (
         (* simulation error *)
         let o_error =
@@ -476,11 +477,12 @@ let optimise ~max_iter ~f_name ~init config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init init) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
 
-let checkpoint_name = Some "lgs_elbo_sofo_lr_0.01_damp_0.1"
+(* let checkpoint_name = Some "lgs_elbo_sofo_lr_0.01_damp_0.1" *)
 
-(* let lr_rates = [ 1e-2; 1e-3; 1e-4 ]
+let checkpoint_name = None
+let lr_rates = [ 0.01 ]
 let damping_list = [ Some 0.1 ]
 let meth = "sofo"
 
@@ -489,22 +491,31 @@ let _ =
     List.iter damping_list ~f:(fun gamma ->
       let config_f = config ~base_lr:eta ~gamma in
       let gamma_name = Option.value_map gamma ~default:"none" ~f:Float.to_string in
-      let f_name =
-        sprintf "lgs_elbo_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name
+      let init, f_name =
+        match checkpoint_name with
+        | None ->
+          ( LGS.(init)
+          , sprintf "lgs_elbo_%s_lr_%s_damp_%s_test" meth (Float.to_string eta) gamma_name )
+        | Some checkpoint_name ->
+          let params_ba =
+            O.W.P.T.load ~device:Dims.device (in_dir checkpoint_name ^ "_params")
+          in
+          ( LGS.P.map params_ba ~f:(fun x ->
+              (* randomly perturb to escape local minimum *)
+              let x_perturbed = Tensor.(x + mul_scalar (rand_like x) (Scalar.f 0.01)) in
+              Prms.free x_perturbed)
+          , sprintf
+              "lgs_elbo_%s_lr_%s_damp_%s_%s"
+              meth
+              (Float.to_string eta)
+              gamma_name
+              checkpoint_name )
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
- let init =
-      match checkpoint_name with
-      | None -> LGS.(init)
-      | Some checkpoint_name ->
-        let params_ba = O.W.P.T.load (in_dir checkpoint_name ^ "_params") in
-        LGS.P.map params_ba ~f:(fun x -> Prms.free x)
-    in
-      
-      optimise ~max_iter ~f_name ~init config_f)) *)
+      optimise ~max_iter ~f_name ~init config_f))
 
-let lr_rates = [ 0.1 ]
+(* let lr_rates = [ 0.1 ]
 let meth = "adam"
 
 let _ =
@@ -518,4 +529,6 @@ let _ =
         ( LGS.P.map params_ba ~f:(fun x -> Prms.free x)
         , sprintf "lgs_elbo_%s_lr_%s_%s" meth (Float.to_string eta) checkpoint_name )
     in
-    optimise ~max_iter ~f_name ~init config_f)
+      Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
+      Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
+    optimise ~max_iter ~f_name ~init config_f) *)
