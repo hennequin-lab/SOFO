@@ -18,7 +18,7 @@ module Dims = struct
   let b = 10
   let o = 48
   let tmax = 10
-  let m = 128
+  let m = 512
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
@@ -75,20 +75,7 @@ let base =
   Optimizer.Config.Base.
     { default with kind = Torch_core.Kind.(T f64); ba_kind = Bigarray.float64 }
 
-let max_iter = 10000
-
-let config ~base_lr ~gamma ~iter:_ =
-  Optimizer.Config.SOFO.
-    { base
-    ; learning_rate = Some base_lr
-    ; n_tangents = 256
-    ; rank_one = false
-    ; damping = gamma
-    ; momentum = None
-    }
-
-(* let config ~base_lr ~gamma:_ ~iter:_ =
-  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr } *)
+let max_iter = 2000
 
 module LGS = struct
   module PP = struct
@@ -388,22 +375,22 @@ module LGS = struct
     in
     let _cov_o =
       Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) (Scalar.f 10.))
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) (Scalar.f 0.1))
       |> Prms.free
     in
     let _cov_u =
       Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 10.))
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
       |> Prms.free
     in
     let _cov_space =
       Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) (Scalar.f 10.))
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) (Scalar.f 0.1))
       |> Prms.free
     in
     let _cov_time =
       Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 10.))
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
       |> Prms.free
     in
     { _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u; _cov_space; _cov_time }
@@ -426,10 +413,24 @@ module LGS = struct
     o_error
 end
 
-module O = Optimizer.SOFO (LGS)
-(* module O = Optimizer.Adam (LGS) *)
+(* let config ~base_lr ~gamma ~iter:_ =
+  Optimizer.Config.SOFO.
+    { base
+    ; learning_rate = Some base_lr
+    ; n_tangents = 256
+    ; rank_one = false
+    ; damping = gamma
+    ; momentum = None
+    }
 
-let optimise ~max_iter ~f_name config_f =
+module O = Optimizer.SOFO (LGS) *)
+
+let config ~base_lr ~gamma:_ ~iter:_ =
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
+
+module O = Optimizer.Adam (LGS)
+
+let optimise ~max_iter ~f_name ~init config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
     Stdlib.Gc.major ();
     let config = config_f ~iter in
@@ -475,10 +476,12 @@ let optimise ~max_iter ~f_name config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init init) ~time_elapsed:0. []
 
-let lr_rates = [ 1. ]
-let damping_list = [ Some 0.01 ]
+let checkpoint_name = Some "lgs_elbo_sofo_lr_0.01_damp_0.1"
+
+(* let lr_rates = [ 1e-2; 1e-3; 1e-4 ]
+let damping_list = [ Some 0.1 ]
 let meth = "sofo"
 
 let _ =
@@ -491,14 +494,28 @@ let _ =
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name config_f))
-(* let lr_rates = [ 0.01 ]
+ let init =
+      match checkpoint_name with
+      | None -> LGS.(init)
+      | Some checkpoint_name ->
+        let params_ba = O.W.P.T.load (in_dir checkpoint_name ^ "_params") in
+        LGS.P.map params_ba ~f:(fun x -> Prms.free x)
+    in
+      
+      optimise ~max_iter ~f_name ~init config_f)) *)
+
+let lr_rates = [ 0.1 ]
 let meth = "adam"
 
 let _ =
   List.iter lr_rates ~f:(fun eta ->
     let config_f = config ~base_lr:eta ~gamma:None in
-    let f_name = sprintf "lgs_elbo_%s_lr_%s" meth (Float.to_string eta) in
-    Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
-    Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name config_f) *)
+    let init, f_name =
+      match checkpoint_name with
+      | None -> LGS.(init), sprintf "lgs_elbo_%s_lr_%s" meth (Float.to_string eta)
+      | Some checkpoint_name ->
+        let params_ba = O.W.P.T.load ~device:Dims.device (in_dir checkpoint_name ^ "_params") in
+        ( LGS.P.map params_ba ~f:(fun x -> Prms.free x)
+        , sprintf "lgs_elbo_%s_lr_%s_%s" meth (Float.to_string eta) checkpoint_name )
+    in
+    optimise ~max_iter ~f_name ~init config_f)

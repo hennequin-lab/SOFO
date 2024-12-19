@@ -74,20 +74,7 @@ let base =
   Optimizer.Config.Base.
     { default with kind = Torch_core.Kind.(T f64); ba_kind = Bigarray.float64 }
 
-let max_iter = 10000
-
-let config ~base_lr ~gamma ~iter:_ =
-  Optimizer.Config.SOFO.
-    { base
-    ; learning_rate = Some base_lr
-    ; n_tangents = 256
-    ; rank_one = false
-    ; damping = gamma
-    ; momentum = None
-    }
-
-(* let config ~base_lr ~gamma:_ ~iter:_ =
-  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr } *)
+let max_iter = 2000
 
 module LGS = struct
   module PP = struct
@@ -243,20 +230,20 @@ module LGS = struct
       List.map sol ~f:(fun s -> s.u)
     in
     Stdlib.Gc.major ();
-    let sample_gauss ~_mean ~_cov ~dim =
+    let sample_gauss ~_mean ~_std ~dim =
       let eps = Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; dim ] in
-      Tensor.(einsum ~equation:"ma,ab->mb" [ eps; _cov ] ~path:None + _mean)
+      Tensor.(einsum ~equation:"ma,ab->mb" [ eps; _std ] ~path:None + _mean)
     in
     (* sample u from their priors *)
     let sampled_u =
-      let cov_u =
+      let std_u =
         theta._cov_u
-        |> Maths.abs
-        |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
         |> Maths.primal
+        |> Tensor.abs
+        |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
       in
       List.init Dims.tmax ~f:(fun _ ->
-        sample_gauss ~_mean:(Tensor.f 0.) ~_cov:cov_u ~dim:Dims.b)
+        sample_gauss ~_mean:(Tensor.f 0.) ~_std:std_u ~dim:Dims.b)
     in
     (* sample o with obsrevation noise *)
     let o_sampled =
@@ -265,17 +252,17 @@ module LGS = struct
         let sampled_u_tan = List.map sampled_u ~f:Maths.const in
         rollout_x ~u_list:sampled_u_tan ~x0 theta |> List.tl_exn
       in
-      let cov_o =
+      let std_o =
         theta._cov_o
-        |> Maths.abs
-        |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
         |> Maths.primal
+        |> Tensor.abs
+        |> Tensor.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
       in
       List.map x_rolled_out ~f:(fun x ->
         let _mean =
           Tensor.(matmul (Maths.primal x) (Maths.primal theta._c) + Maths.primal theta._b)
         in
-        sample_gauss ~_mean ~_cov:cov_o ~dim:Dims.o)
+        sample_gauss ~_mean ~_std:std_o ~dim:Dims.o)
     in
     (* lqr on (o - o_sampled) *)
     let sol_delta_o =
@@ -302,7 +289,7 @@ module LGS = struct
     let x0, o_list = data in
     let x0_tan = Maths.const x0 in
     (* use lqr to obtain the optimal u *)
-    (* optimal u and sampled u do not carry tangents! *)
+    (* optimal u and sampled u do carry tangents! *)
     let optimal_u_list =
       let p =
         params_from_f_diff ~x0:x0_tan ~theta ~o_list:(List.map o_list ~f:Maths.const)
@@ -452,12 +439,12 @@ module LGS = struct
     in
     let _cov_o =
       Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) (Scalar.f 10.))
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) (Scalar.f 0.1))
       |> Prms.free
     in
     let _cov_u =
       Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 10.))
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
       |> Prms.free
     in
     { _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u }
@@ -480,8 +467,21 @@ module LGS = struct
     o_error
 end
 
-module O = Optimizer.SOFO (LGS)
-(* module O = Optimizer.Adam (LGS) *)
+let config ~base_lr ~gamma ~iter:_ =
+  Optimizer.Config.SOFO.
+    { base
+    ; learning_rate = Some base_lr
+    ; n_tangents = 256
+    ; rank_one = false
+    ; damping = gamma
+    ; momentum = Some 0.9
+    } 
+ module O = Optimizer.SOFO (LGS) 
+
+(* let config ~base_lr ~gamma:_ ~iter:_ =
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
+
+module O = Optimizer.Adam (LGS) *)
 
 let optimise ~max_iter ~f_name config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -528,10 +528,10 @@ let optimise ~max_iter ~f_name config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init  ~config:(config_f ~iter:0) LGS.(init)) ~time_elapsed:0. []
 
-let lr_rates = [ 1. ]
-let damping_list = [ Some 0.01 ]
+ let lr_rates = [  1e-5; 1e-6; 1e-7]
+let damping_list = [ Some 0.1 ]
 let meth = "sofo"
 
 let _ =
@@ -542,9 +542,9 @@ let _ =
       let f_name = sprintf "lgs_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name config_f))
+      optimise ~max_iter ~f_name config_f)) 
 
-(* let lr_rates = [ 0.01;0.001 ]
+(* let lr_rates = [ 0.01 ]
 let meth = "adam"
 
 let _ =

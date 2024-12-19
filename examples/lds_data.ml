@@ -9,15 +9,6 @@ module Linalg = Owl.Linalg.D
 
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
 
-type 'a f_params =
-  { _Fx_prod : 'a
-  ; _Fu_prod : 'a
-  ; _f : 'a option
-  ; _c : 'a option (* output/emission parameters *)
-  ; _b : 'a option
-  ; _cov : 'a option
-  }
-
 (* -----------------------------------------
    -- Some utility functions         ------
    ----------------------------------------- *)
@@ -188,6 +179,15 @@ let maybe_prod f v =
    -- Parameter specification     ------
    ----------------------------------------- *)
 
+type 'a f_params =
+  { _Fx_prod : 'a
+  ; _Fu_prod : 'a
+  ; _f : 'a option
+  ; _c : 'a option (* output/emission parameters *)
+  ; _b : 'a option
+  ; _cov : 'a option
+  }
+
 module Temp = struct
   type ('a, 'o) p =
     { _f : 'o
@@ -206,7 +206,7 @@ module O = Prms.Option (Prms.P)
 module Input = Lqr.Params.Make (O) (Prms.List (Temp.Make (Prms.P) (O)))
 module Output = Prms.List (Lqr.Solution.Make (O))
 
-(* a is the state dimension, b is the control dimension, o is the output dimension, tmax is the horizon length, m is the batch size and k is number of tangents. if batch_constant, F_x, F_u, C_uu, C_xx and C_xu are all the same across trials and hence do not have a leading batch dimension. *)
+(* a is the state dimension, b is the control dimension, o is the output dimension, tmax is the horizon length and m is the batch size. if batch_constant, F_x, F_u, C_uu, C_xx and C_xu are all the same across trials and hence do not have a leading batch dimension. *)
 module Default = struct
   let a = 5
   let b = 3
