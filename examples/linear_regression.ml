@@ -44,6 +44,8 @@ let config =
     ; rank_one = false
     ; damping = None
     ; momentum = None
+    ; lm = false
+    ; perturb_thresh = None
     }
 
 (* -----------------------------------------

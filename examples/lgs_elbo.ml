@@ -422,6 +422,7 @@ let config ~base_lr ~gamma ~iter:_ =
     ; damping = gamma
     ; momentum = None
     ; lm = false
+    ; perturb_thresh = None
     }
 
 module O = Optimizer.SOFO (LGS)
@@ -495,7 +496,11 @@ let _ =
         match checkpoint_name with
         | None ->
           ( LGS.(init)
-          , sprintf "lgs_elbo_%s_lr_%s_damp_%s_test" meth (Float.to_string eta) gamma_name )
+          , sprintf
+              "lgs_elbo_%s_lr_%s_damp_%s_perturbed"
+              meth
+              (Float.to_string eta)
+              gamma_name )
         | Some checkpoint_name ->
           let params_ba =
             O.W.P.T.load ~device:Dims.device (in_dir checkpoint_name ^ "_params")

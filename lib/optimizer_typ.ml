@@ -44,6 +44,7 @@ module Config = struct
       ; damping : float option
       ; momentum : float option
       ; lm : bool
+      ; perturb_thresh : float option
       }
 
     let default =
@@ -54,6 +55,7 @@ module Config = struct
       ; damping = None
       ; momentum = None
       ; lm = false
+      ; perturb_thresh = None
       }
   end
 

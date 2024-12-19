@@ -73,6 +73,7 @@ module SOFO (W : Wrapper.T) = struct
     ; g_avg : Tensor.t W.P.p option
     ; beta_t : float option
     ; damping : float option
+    ; prev_losses : float list
     }
 
   let params state = state.theta
@@ -82,6 +83,7 @@ module SOFO (W : Wrapper.T) = struct
     ; g_avg = None
     ; beta_t = Option.map config.momentum ~f:(fun _ -> 1.)
     ; damping = config.damping
+    ; prev_losses = []
     }
 
   (* initialise tangents, where each tangent is normalised. *)
@@ -270,9 +272,48 @@ module SOFO (W : Wrapper.T) = struct
       M.apply ?momentum:config.momentum ~avg:state.g_avg natural_g
     in
     let new_theta = update_theta ?learning_rate ~theta natural_g_avg in
+    let prev_losses =
+      if List.length state.prev_losses < 100
+      then loss :: state.prev_losses
+      else loss :: List.drop_last_exn state.prev_losses
+    in
+    (* perturb with noise if stuck in local minima *)
+    let perturbed =
+      match config.perturb_thresh with
+      | None -> false
+      | Some thresh ->
+        if List.length prev_losses = 100
+        then (
+          let recent =
+            List.fold ~init:0. (List.take prev_losses 50) ~f:(fun acc x -> x +. acc)
+          in
+          let old =
+            List.fold
+              ~init:0.
+              (List.take (List.rev prev_losses) 50)
+              ~f:(fun acc x -> x +. acc)
+          in
+          let diff = Float.(abs ((old - recent) / old)) in
+          Float.(diff < thresh))
+        else false
+    in
+    let new_theta =
+      if perturbed
+      then (
+        let _ = Convenience.print [%message "perturbed"] in
+        let open W.P.Let_syntax in
+        let+ new_theta = new_theta in
+        Tensor.(new_theta + mul_scalar (rand_like new_theta) (Scalar.f 0.01)))
+      else new_theta
+    in
+    let prev_losses = if perturbed then [] else prev_losses in
     ( loss
-    , { theta = new_theta; g_avg = Some natural_g_avg; beta_t; damping = updated_damping }
-    )
+    , { theta = new_theta
+      ; g_avg = Some natural_g_avg
+      ; beta_t
+      ; damping = updated_damping
+      ; prev_losses
+      } )
 end
 
 (* forward gradient descent;: g = V V^T g where V^Tg is obtained with forward AD (Kozak 2021) *)
