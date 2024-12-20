@@ -14,11 +14,11 @@ let _ =
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
 module Dims = struct
-  let a = 24
-  let b = 10
-  let o = 48
+  let a = 4
+  let b = 2
+  let o = 7
   let tmax = 10
-  let m = 512
+  let m = 12
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
@@ -76,6 +76,7 @@ let base =
     { default with kind = Torch_core.Kind.(T f64); ba_kind = Bigarray.float64 }
 
 let max_iter = 2000
+let laplace = true
 
 module LGS = struct
   module PP = struct
@@ -214,9 +215,9 @@ module LGS = struct
     (* use lqr to obtain the optimal u *)
     let p =
       params_from_f ~x0:x0_tan ~theta ~o_list
-      |> Lds_data.map_implicit ~batch_const:Dims.batch_const
+      |> Lds_data.map_naive ~batch_const:Dims.batch_const
     in
-    let sol = Lqr.solve ~batch_const:Dims.batch_const p in
+    let sol, u_cov_list = Lqr._solve ~laplace ~batch_const:Dims.batch_const p in
     let optimal_u_list = List.map sol ~f:(fun s -> s.u) in
     (* sample u from the kronecker formation *)
     let u_list =
@@ -385,12 +386,12 @@ module LGS = struct
     in
     let _cov_space =
       Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) (Scalar.f 0.1))
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
       |> Prms.free
     in
     let _cov_time =
       Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) (Scalar.f 0.1))
       |> Prms.free
     in
     { _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u; _cov_space; _cov_time }

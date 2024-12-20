@@ -5,6 +5,7 @@ open Maths
 
 let cleanup () = Stdlib.Gc.major ()
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
+let zeros_like a = Torch.Tensor.zeros_like (Maths.primal a) |> Maths.const
 
 let ( *@ ) a b =
   match List.length (shape b) with
@@ -13,6 +14,18 @@ let ( *@ ) a b =
   | _ -> failwith "not batch multipliable"
 
 let maybe_btr = Option.map ~f:btr
+let maybe_inv_sqr = Option.map ~f:inv_sqr
+
+let maybe_batch_matmul a b ~batch_const =
+  if batch_const
+  then (
+    match a, b with
+    | Some a, Some b -> Some (einsum [ a, "ab"; b, "bc" ] "ac")
+    | _ -> None)
+  else (
+    match a, b with
+    | Some a, Some b -> Some (einsum [ a, "mab"; b, "mbc" ] "mac")
+    | _ -> None)
 
 let ( +? ) a b =
   match a, b with
@@ -61,8 +74,12 @@ let neg_inv_symm ~is_vector _b (ell, ell_T) =
     Option.map _y ~f:(fun x -> linsolve_triangular ~left:true ~upper:true ell_T x |> neg)
   | _ -> None
 
-(* backward recursion: all the (most expensive) common bits *)
-let backward_common ~batch_const (common : (t, t -> t) momentary_params_common list) =
+(* backward recursion: all the (most expensive) common bits. common goes from 0 to T *)
+let backward_common
+      ~laplace
+      ~batch_const
+      (common : (t, t -> t) momentary_params_common list)
+  =
   let _V =
     match List.last common with
     | None -> failwith "LQR needs a time horizon >= 1"
@@ -102,6 +119,7 @@ let backward_common ~batch_const (common : (t, t -> t) momentary_params_common l
       in
       (* compute LQR gain parameters to be used in the subsequent fwd pass *)
       (* Torch.Tensor.print (Maths.primal (Option.value_exn _Quu));  *)
+      let _Quu_inv = Option.map _Quu ~f:inv_sqr in
       let _Quu_chol = Option.map _Quu ~f:cholesky in
       let _Quu_chol_T = maybe_btr _Quu_chol in
       let _K = neg_inv_symm ~is_vector:false _Qux (_Quu_chol, _Quu_chol_T) in
@@ -114,7 +132,15 @@ let backward_common ~batch_const (common : (t, t -> t) momentary_params_common l
         in
         _Qxx +? tmp2
       in
-      _V_new, { _Quu_chol; _Quu_chol_T; _V; _K } :: info_list)
+      (* only save Quu_inv if laplace *)
+      ( _V_new
+      , { _Quu_chol
+        ; _Quu_chol_T
+        ; _V
+        ; _K
+        ; _Quu_inv = (if laplace then _Quu_inv else None)
+        }
+        :: info_list ))
   in
   info
 
@@ -275,18 +301,85 @@ let forward ?(tangent = false) ~batch_const params (backward_info : backward_inf
   in
   List.rev solution
 
+(* TODO: covariances over u only *)
+let covariances
+      ?(batch_const = false)
+      ~(common_info : backward_common_info list)
+      (p : (t option, (t, t -> t) momentary_params list) Params.p)
+  =
+  let common_info_eg = List.hd_exn common_info in
+  let _P_init = Some (zeros_like (Option.value_exn common_info_eg._V)) in
+  (* both params and backward_common need to go from 0 to T-1 *)
+  let params = List.drop_last_exn p.params in
+  (* The sigma list goes from 0 to T-1 *)
+  let _, _Sigma_uu_list =
+    List.fold2_exn
+      params
+      common_info
+      ~init:(_P_init, [])
+      ~f:(fun (_P, _Sigma_uu_list) params common ->
+        let _Sigma_xx = maybe_inv_sqr (_P +? common._V) in
+        let _Sigma_uu =
+          let tmp1 = maybe_batch_matmul common._K _Sigma_xx ~batch_const in
+          let tmp2 = maybe_batch_matmul tmp1 (maybe_btr common._K) ~batch_const in
+          let _Quu_inv =
+            let _Quu =
+              maybe_batch_matmul common._Quu_chol common._Quu_chol_T ~batch_const
+            in
+            maybe_inv_sqr _Quu
+          in
+          tmp2 +? _Quu_inv
+        in
+        let _Px =
+          let tmp1 = params.common._Fx_prod_inv *? (_P +? params.common._Cxx) in
+          params.common._Fx_prod2_inv_trans *? tmp1
+        in
+        let _Pu =
+          (* since producted with _F_prod always has a leading batch dim, need to trasnform Px *)
+          let _Px_tmp = if batch_const then maybe_unsqueeze _Px ~dim:0 else _Px in
+          let tmp1 = params.common._Fu_prod *? _Px_tmp in
+          let tmp2 = params.common._Fu_prod2_trans *? tmp1 in
+          let tmp2_squeezed = if batch_const then maybe_squeeze tmp2 ~dim:0 else tmp2 in
+          params.common._Cuu +? tmp2_squeezed
+        in
+        let _P =
+          let _Px_tmp = if batch_const then maybe_unsqueeze _Px ~dim:0 else _Px in
+          let tmp1 = params.common._Fu_prod2_trans *? _Px_tmp in
+          let _Pu_inv = maybe_inv_sqr _Pu in
+          let _Pu_inv_tmp =
+            if batch_const then maybe_unsqueeze _Pu_inv ~dim:0 else _Pu_inv
+          in
+          let tmp2 = maybe_batch_matmul tmp1 (maybe_inv_sqr _Pu_inv_tmp) ~batch_const:false in
+          let tmp3 = params.common._Fu_prod *? _Px_tmp in
+          let tmp4 = maybe_batch_matmul tmp2 tmp3 ~batch_const:false in
+          if batch_const then maybe_squeeze tmp4 ~dim:0 else tmp4
+        in
+        _P, _Sigma_uu :: _Sigma_uu_list)
+  in
+  List.rev _Sigma_uu_list
+
 (* when batch_const is true, _Fx_prods, _Fu_prods, _Cxx, _Cxu, _Cuu has no leading batch dimension and special care needs to be taken to deal with these *)
-let _solve ?(batch_const = false) p =
+let _solve ?(batch_const = false) ?(laplace = false) p =
   let common_info =
-    backward_common ~batch_const (List.map p.Params.params ~f:(fun x -> x.common))
+    backward_common
+      ~batch_const
+      ~laplace
+      (List.map p.Params.params ~f:(fun x -> x.common))
   in
   cleanup ();
   let bck = backward ~batch_const common_info p in
   cleanup ();
-  bck
-  |> forward ~batch_const p
-  |> List.map ~f:(fun s ->
-    Solution.{ x = Option.value_exn s.x; u = Option.value_exn s.u })
+  let sol =
+    bck
+    |> forward ~batch_const p
+    |> List.map ~f:(fun s ->
+      Solution.{ x = Option.value_exn s.x; u = Option.value_exn s.u })
+  in
+  if laplace
+  then (
+    let covariances = covariances ~batch_const ~common_info p in
+    sol, Some (List.map covariances ~f:(fun x -> Option.value_exn x)))
+  else sol, None
 
 (* backward pass and forward pass with surrogate rhs for the tangent problem;
    s is the solution obtained from lqr through the primals
@@ -443,7 +536,7 @@ let tangent_solve
   in
   List.rev solution
 
-let solve ?(batch_const = false) p =
+let solve ?(batch_const = false) ?(laplace = false) p =
   (* solve the primal problem first *)
   let _p = Option.map ~f:(fun x -> Maths.const (Maths.primal x)) in
   let _p_implicit = Option.map ~f:(fun x -> x.primal) in
@@ -461,6 +554,12 @@ let solve ?(batch_const = false) p =
                 ; _Fx_prod2_tangent = _p_implicit p.common._Fx_prod2_tangent
                 ; _Fu_prod_tangent = _p_implicit p.common._Fu_prod_tangent
                 ; _Fu_prod2_tangent = _p_implicit p.common._Fu_prod2_tangent
+                ; _Fx_prod_inv = _p_implicit p.common._Fx_prod_inv
+                ; _Fx_prod2_inv = _p_implicit p.common._Fx_prod2_inv
+                ; _Fu_prod_trans = _p_implicit p.common._Fu_prod_trans
+                ; _Fu_prod2_trans = _p_implicit p.common._Fu_prod2_trans
+                ; _Fx_prod_inv_trans = _p_implicit p.common._Fx_prod_inv_trans
+                ; _Fx_prod2_inv_trans = _p_implicit p.common._Fx_prod2_inv_trans
                 ; _Cxx = _p p.common._Cxx
                 ; _Cuu = _p p.common._Cuu
                 ; _Cxu = _p p.common._Cxu
@@ -472,7 +571,10 @@ let solve ?(batch_const = false) p =
       }
   in
   let common_info =
-    backward_common ~batch_const (List.map p_primal.Params.params ~f:(fun x -> x.common))
+    backward_common
+      ~batch_const
+      ~laplace
+      (List.map p_primal.Params.params ~f:(fun x -> x.common))
   in
   cleanup ();
   (* SOLVE THE PRIMAL PROBLEM *)
@@ -486,14 +588,23 @@ let solve ?(batch_const = false) p =
   let s_tangents = tangent_solve ~batch_const common_info s p in
   cleanup ();
   (* MANUALLY PAIR UP PRIMAL AND TANGENTS OF THE SOLUTION *)
-  List.map2_exn s s_tangents ~f:(fun s st ->
-    let zip a at =
-      match a with
-      | Some a ->
-        (match at with
-         | None -> Maths.const
-         | Some at -> Maths.make_dual ~t:(Direct (primal at)))
-          (Maths.primal a)
-      | None -> failwith "for some reason, no solution in there"
-    in
-    Solution.{ u = zip s.u st.u; x = zip s.x st.x })
+  let sol =
+    List.map2_exn s s_tangents ~f:(fun s st ->
+      let zip a at =
+        match a with
+        | Some a ->
+          (match at with
+           | None -> Maths.const
+           | Some at -> Maths.make_dual ~t:(Direct (primal at)))
+            (Maths.primal a)
+        | None -> failwith "for some reason, no solution in there"
+      in
+      Solution.{ u = zip s.u st.u; x = zip s.x st.x })
+  in
+  if laplace
+  then (
+    (* TODO: if we need covariances to carry tangents we need to compute everything with tangents, hence cannot be used in this separable method *)
+    (* TODO: for now we assume we do not need the covariances to carry tangents i.e. do not differentiate through the samples *)
+    let covariances = covariances ~batch_const ~common_info p_primal in
+    sol, Some (List.map covariances ~f:(fun x -> Option.value_exn x)))
+  else sol, None

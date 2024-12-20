@@ -3,6 +3,7 @@ open Base
 open Torch
 open Forward_torch
 open Lqr
+open Lqr_common
 module Mat = Owl.Dense.Matrix.D
 module Arr = Owl.Dense.Ndarray.D
 module Linalg = Owl.Linalg.D
@@ -247,6 +248,12 @@ let map_naive (x : Input.M.t) ~batch_const =
             ; _Fx_prod2_tangent = irrelevant
             ; _Fu_prod_tangent = irrelevant
             ; _Fu_prod2_tangent = irrelevant
+            ; _Fx_prod_inv = Some (bmm_inv ~batch_const p._Fx_prod)
+            ; _Fx_prod2_inv = Some (bmm2_inv ~batch_const p._Fx_prod)
+            ; _Fu_prod_trans = Some (bmm_trans ~batch_const p._Fu_prod)
+            ; _Fu_prod2_trans = Some (bmm2_trans ~batch_const p._Fu_prod)
+            ; _Fx_prod_inv_trans = Some (bmm_inv_trans ~batch_const p._Fx_prod)
+            ; _Fx_prod2_inv_trans = Some (bmm2_inv_trans ~batch_const p._Fx_prod)
             ; _Cxx = Some p._Cxx
             ; _Cxu = p._Cxu
             ; _Cuu = Some p._Cuu
@@ -271,6 +278,12 @@ let map_implicit (x : Input.M.t) ~batch_const =
             ; _Fx_prod2_tangent = Some (prod2_tangent ~batch_const p._Fx_prod)
             ; _Fu_prod_tangent = Some (prod_tangent ~batch_const p._Fu_prod)
             ; _Fu_prod2_tangent = Some (prod2_tangent ~batch_const p._Fu_prod)
+            ; _Fx_prod_inv = Some (prod_inv ~batch_const p._Fx_prod)
+            ; _Fx_prod2_inv = Some (prod2_inv ~batch_const p._Fx_prod)
+            ; _Fu_prod_trans = Some (prod_trans ~batch_const p._Fu_prod)
+            ; _Fu_prod2_trans = Some (prod2_trans ~batch_const p._Fu_prod)
+            ; _Fx_prod_inv_trans = Some (prod_inv_trans ~batch_const p._Fx_prod)
+            ; _Fx_prod2_inv_trans = Some (prod2_inv_trans ~batch_const p._Fx_prod)
             ; _Cxx = Some p._Cxx
             ; _Cxu = p._Cxu
             ; _Cuu = Some p._Cuu

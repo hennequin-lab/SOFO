@@ -226,7 +226,7 @@ module LGS = struct
         params_from_f ~x0:x0_tan ~theta ~o_list
         |> Lds_data.map_naive ~batch_const:Dims.batch_const
       in
-      let sol = Lqr._solve ~batch_const:Dims.batch_const p in
+      let sol, u_cov_list = Lqr._solve ~batch_const:Dims.batch_const p in
       List.map sol ~f:(fun s -> s.u)
     in
     Stdlib.Gc.major ();
@@ -265,7 +265,7 @@ module LGS = struct
         sample_gauss ~_mean ~_std:std_o ~dim:Dims.o)
     in
     (* lqr on (o - o_sampled) *)
-    let sol_delta_o =
+    let sol_delta_o, u_cov_list =
       let delta_o_list = List.map2_exn o_list o_sampled ~f:(fun a b -> Tensor.(a - b)) in
       let p =
         params_from_f ~x0:x0_tan ~theta ~o_list:delta_o_list
@@ -295,7 +295,7 @@ module LGS = struct
         params_from_f_diff ~x0:x0_tan ~theta ~o_list:(List.map o_list ~f:Maths.const)
         |> Lds_data.map_naive ~batch_const:Dims.batch_const
       in
-      let sol = Lqr._solve ~batch_const:Dims.batch_const p in
+      let sol, _ = Lqr._solve ~batch_const:Dims.batch_const p in
       List.map sol ~f:(fun s -> s.u)
     in
     Stdlib.Gc.major ();
@@ -325,7 +325,7 @@ module LGS = struct
         sample_gauss ~_mean ~_std:std_o ~dim:Dims.o)
     in
     (* lqr on (o - o_sampled) *)
-    let sol_delta_o =
+    let sol_delta_o, u_cov_list =
       let delta_o_list =
         List.map2_exn o_list o_sampled ~f:(fun a b -> Maths.(const a - b))
       in

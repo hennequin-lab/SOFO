@@ -6,7 +6,6 @@ module Arr = Owl.Arr
 module Mat = Owl.Mat
 module Linalg = Owl.Linalg.D
 
-let print s = Stdio.printf "%s\n%!" (Base.Sexp.to_string_hum s)
 let rel_tol = Alcotest.float 1e-4
 let n_tests = 10
 
@@ -48,16 +47,6 @@ let f_list : Tensor.t Lds_data.f_params list =
 (* -----------------------------------------
    ----- Utilitiy Functions ------
    ----------------------------------------- *)
-let with_given_seed_torch seed f =
-  (* generate a random key to later restore the state of the RNG *)
-  let key = Random.int Int.max_value in
-  (* now force the state of the RNG under which f will be evaluated *)
-  Torch_core.Wrapper.manual_seed seed;
-  let result = f () in
-  (* restore the RGN using key *)
-  Torch_core.Wrapper.manual_seed key;
-  (* return the result *)
-  result
 
 let sample_data =
   (* generate ground truth params and data *)
@@ -156,7 +145,7 @@ let pred_u ~data (theta : P.M.t) =
     params_from_f ~x0:x0_tan ~theta ~o_list
     |> Lds_data.map_implicit ~batch_const:Dims.batch_const
   in
-  let sol = Lqr.solve ~batch_const:Dims.batch_const p in
+  let sol, _ = Lqr.solve ~batch_const:Dims.batch_const p in
   let optimal_u_list = List.map sol ~f:(fun s -> s.u) in
   (* sample u from the kronecker formation *)
   let u_list =

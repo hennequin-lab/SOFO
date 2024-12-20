@@ -21,6 +21,12 @@ type ('a, 'prod) momentary_params_common =
   ; _Fx_prod2_tangent : 'prod option (* vA product *)
   ; _Fu_prod_tangent : 'prod option (* Bv produt *)
   ; _Fu_prod2_tangent : 'prod option (* vB product *)
+  ; _Fx_prod_inv : 'prod option (* A^-1 v product *)
+  ; _Fx_prod2_inv : 'prod option (* vA^-1 product *)
+  ; _Fu_prod_trans : 'prod option (* B^T v product *)
+  ; _Fu_prod2_trans : 'prod option (* vB^T product *)
+  ; _Fx_prod_inv_trans : 'prod option (* A^-T v product *)
+  ; _Fx_prod2_inv_trans : 'prod option (* vA^-T product *)
   ; _Cxx : 'a option
   ; _Cxu : 'a option
   ; _Cuu : 'a option
@@ -58,6 +64,7 @@ open Maths
 type backward_common_info =
   { _Quu_chol : t option
   ; _Quu_chol_T : t option
+  ; _Quu_inv : t option
   ; _V : t option
   ; _K : t option
   }
