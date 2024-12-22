@@ -387,6 +387,9 @@ let linsolve_tri ~left ~upper a b =
   in
   Maths.linsolve_triangular a b ~left ~upper
 
+let concat_list a b = Maths.concat_list [ a; b ] ~dim:0
+let block_diag a b = Maths.block_diag [ a; b ]
+
 let binary_tests =
   let test_list : binary list =
     [ "plus", [], any_shape Maths.( + )
@@ -433,6 +436,8 @@ let binary_tests =
           let n_dims = List.length shape in
           let dim = Random.int n_dims in
           Maths.concat ~dim )
+    ; "concat_list", [], any_shape concat_list
+    ; "block_diag", [ `order_equal_to 2 ], any_shape block_diag
     ; ( "conv2d"
       , [ `order_equal_to 4 ]
       , fun shape ->

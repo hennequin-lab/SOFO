@@ -1,4 +1,4 @@
-(* Linear Gaussian Dynamics, with same state/control/cost parameters constant across trials and across time *)
+(* Linear Gaussian Dynamics, with same state/control/cost parameters constant across trials and across time; use Laplace approximation in recognition model *)
 open Printf
 open Base
 open Forward_torch
@@ -16,9 +16,9 @@ let _ =
 module Dims = struct
   let a = 24
   let b = 10
-  let o = 48
+  let o = 28
   let tmax = 10
-  let m = 512
+  let m = 256
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
@@ -76,10 +76,24 @@ let base =
     { default with kind = Torch_core.Kind.(T f64); ba_kind = Bigarray.float64 }
 
 let max_iter = 2000
-let laplace = true
 
 module LGS = struct
-  module PP = struct
+  (* spectral mixture model *)
+  (* simple case - two components mixure*)
+  module SM = struct
+    type 'a p =
+      { _w_1 : 'a
+      ; _nu_1 : 'a
+      ; _mu_1 : 'a
+      ; _w_2 : 'a
+      ; _nu_2 : 'a
+      ; _mu_2 : 'a
+      }
+    [@@deriving prms]
+  end
+
+  (* generative model *)
+  module Gen = struct
     type 'a p =
       { _Fx_prod : 'a (* generative model *)
       ; _Fu_prod : 'a
@@ -87,14 +101,19 @@ module LGS = struct
       ; _b : 'a
       ; _cov_o : 'a (* sqrt of the diagonal of covariance of emission noise *)
       ; _cov_u : 'a (* sqrt of the diagonal of covariance of prior over u *)
-      ; _cov_space : 'a
-        (* recognition model; sqrt of the diagonal of covariance of space factor *)
-      ; _cov_time : 'a (* sqrt of the diagonal of covariance of the time factor *)
       }
     [@@deriving prms]
   end
 
-  module P = PP.Make (Prms.P)
+  module PP = struct
+    type ('a, 'p) p =
+      { gen : 'a
+      ; sm : 'p
+      }
+    [@@deriving prms]
+  end
+
+  module P = PP.Make (Gen.Make (Prms.P)) (Prms.List (SM.Make (Prms.P)))
 
   type args = unit (* beta *)
   type data = Tensor.t * Tensor.t list
@@ -110,7 +129,7 @@ module LGS = struct
 
   (* special care to be taken when dealing with elbo loss *)
   module Elbo_loss = struct
-    let vtgt_hessian_gv ~rolled_out_x_list ~u_list (theta : P.M.t) =
+    let vtgt_hessian_gv ~rolled_out_x_list ~u_list ~_Phi_T ~_Phi_M_chol (theta : P.M.t) =
       (* fold ggn across time *)
       let ggn_final ~o_list ~like_hess ~diagonal =
         let vtgt_hess_eqn = if diagonal then "kma,a->kma" else "kma,ab->kmb" in
@@ -125,38 +144,40 @@ module LGS = struct
           Tensor.(accu + increment))
       in
       let llh_ggn =
-        let like_hess = theta._cov_o |> sqr_inv |> Maths.primal in
+        let like_hess = theta.gen._cov_o |> sqr_inv |> Maths.primal in
         (* y = cx + b *)
         let y_list =
           List.map rolled_out_x_list ~f:(fun x ->
-            Maths.(einsum [ x, "ma"; theta._c, "ab" ] "mb" + theta._b))
+            Maths.(einsum [ x, "ma"; theta.gen._c, "ab" ] "mb" + theta.gen._b))
         in
         ggn_final ~o_list:y_list ~like_hess ~diagonal:true
       in
       let prior_ggn =
-        let like_hess = theta._cov_u |> sqr_inv |> Maths.primal in
+        let like_hess = theta.gen._cov_u |> sqr_inv |> Maths.primal in
         ggn_final ~o_list:u_list ~like_hess ~diagonal:true
       in
       let entropy_ggn =
-        let _cov_space_inv = theta._cov_space |> sqr_inv |> Maths.primal in
-        let _cov_time_inv = theta._cov_time |> sqr_inv |> Maths.primal in
+        let cov2_inv =
+          let _Phi_T_chol = Tensor.linalg_cholesky (Maths.primal _Phi_T) ~upper:false in
+          let cov2_chol = Tensor.matmul (Maths.primal _Phi_M_chol) _Phi_T_chol in
+          let cov2_chol_inv = Tensor.linalg_inv ~a:cov2_chol in
+          Tensor.(matmul cov2_chol_inv (transpose cov2_chol_inv ~dim0:1 ~dim1:0))
+        in
         let vtgt =
           let vtgt_list =
             List.map u_list ~f:(fun u ->
               let vtgt = Maths.tangent u |> Option.value_exn in
               Tensor.unsqueeze vtgt ~dim:(-1))
           in
-          Tensor.concat vtgt_list ~dim:(-1)
+          (* [k x m x b x T] *)
+          Tensor.concat vtgt_list ~dim:(-1) (* [k x m x T x b] *)
+          |> Tensor.transpose ~dim0:2 ~dim1:3
+          |> Tensor.reshape ~shape:[ -1; Dims.m; Dims.tmax * Dims.b ]
         in
-        let tmp1 =
-          Tensor.einsum ~equation:"kmbt,b->kmbt" [ vtgt; _cov_space_inv ] ~path:None
-        in
-        let tmp2 =
-          Tensor.einsum ~equation:"t,kmbt->tbmk" [ _cov_time_inv; vtgt ] ~path:None
-        in
-        Tensor.einsum ~equation:"kmbt,tbmj->kj" [ tmp1; tmp2 ] ~path:None |> Tensor.neg
+        let tmp1 = Tensor.einsum ~equation:"kmc,cd->kmd" [ vtgt; cov2_inv ] ~path:None in
+        Tensor.einsum ~equation:"kmd,jmd->kj" [ tmp1; vtgt ] ~path:None |> Tensor.neg
       in
-      let final = Tensor.(llh_ggn + (prior_ggn + entropy_ggn)) in
+      let final = Tensor.(llh_ggn + prior_ggn + entropy_ggn) in
       final
   end
 
@@ -167,16 +188,16 @@ module LGS = struct
     (* set o at time 0 as 0 *)
     let o_list_tmp = Tensor.zeros_like (List.hd_exn o_list) :: o_list in
     let _cov_u_inv =
-      theta._cov_u |> sqr_inv |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+      theta.gen._cov_u |> sqr_inv |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
     in
-    let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 in
-    let _cov_o_inv = sqr_inv theta._cov_o in
+    let c_trans = Maths.transpose theta.gen._c ~dim0:1 ~dim1:0 in
+    let _cov_o_inv = sqr_inv theta.gen._cov_o in
     let _Cxx =
-      let tmp = Maths.(einsum [ theta._c, "ab"; _cov_o_inv, "b" ] "ab") in
+      let tmp = Maths.(einsum [ theta.gen._c, "ab"; _cov_o_inv, "b" ] "ab") in
       Maths.(tmp *@ c_trans)
     in
     let _cx_common =
-      let tmp = Maths.(einsum [ theta._b, "ab"; _cov_o_inv, "b" ] "ab") in
+      let tmp = Maths.(einsum [ theta.gen._b, "ab"; _cov_o_inv, "b" ] "ab") in
       Maths.(tmp *@ c_trans)
     in
     Lqr.Params.
@@ -186,8 +207,8 @@ module LGS = struct
             let _cx = Maths.(_cx_common - (const o *@ c_trans)) in
             Lds_data.Temp.
               { _f = None
-              ; _Fx_prod = theta._Fx_prod
-              ; _Fu_prod = theta._Fu_prod
+              ; _Fx_prod = theta.gen._Fx_prod
+              ; _Fu_prod = theta.gen._Fu_prod
               ; _cx = Some _cx
               ; _cu = None
               ; _Cxx
@@ -201,10 +222,56 @@ module LGS = struct
     let x0_tan = Maths.const x0 in
     let _, x_list =
       List.fold u_list ~init:(x0_tan, [ x0_tan ]) ~f:(fun (x, x_list) u ->
-        let new_x = Maths.(tmp_einsum x theta._Fx_prod + tmp_einsum u theta._Fu_prod) in
+        let new_x =
+          Maths.(tmp_einsum x theta.gen._Fx_prod + tmp_einsum u theta.gen._Fu_prod)
+        in
         new_x, new_x :: x_list)
     in
     List.rev x_list
+
+  (* b by b diagonal matrix *)
+  let _K ~tau (theta : P.M.t) =
+    let const1 =
+      Float.(-2. * square Float.pi * square (of_int tau))
+      |> Tensor.of_float0 ~device:Dims.device
+      |> Tensor.to_kind ~kind:Dims.kind
+      |> Maths.const
+    in
+    let const2 =
+      Float.(2. * Float.pi * of_int tau)
+      |> Tensor.of_float0 ~device:Dims.device
+      |> Tensor.to_kind ~kind:Dims.kind
+      |> Maths.const
+    in
+    let k_array =
+      List.map theta.sm ~f:(fun sm ->
+        let comp1 = Maths.(sm._w_1 * exp (const1 * sm._nu_1) * cos (const2 * sm._mu_1)) in
+        let comp2 = Maths.(sm._w_2 * exp (const1 * sm._nu_2) * cos (const2 * sm._mu_2)) in
+        Maths.(comp1 + comp2) |> Maths.reshape ~shape:[ 1; 1 ])
+      |> Maths.concat_list ~dim:1
+      |> Maths.squeeze ~dim:0
+    in
+    Maths.diag_embed k_array ~offset:0 ~dim1:(-2) ~dim2:(-1)
+
+  (* build the correlation matrix *)
+  let _Phi_T (theta : P.M.t) =
+    let _K_array = Array.init Dims.tmax ~f:(fun tau -> _K ~tau theta) in
+    let corr =
+      List.init Dims.tmax ~f:(fun i ->
+        (* the ith row of the correlation matrix *)
+        List.init Dims.tmax ~f:(fun j ->
+          let tmp = Array.get _K_array Int.(abs (j - i)) in
+          tmp |> Maths.unsqueeze ~dim:0)
+        |> Maths.concat_list ~dim:0
+        |> Maths.unsqueeze ~dim:0)
+      |> Maths.concat_list ~dim:0
+      |> Maths.transpose ~dim0:1 ~dim1:2
+      |> Maths.reshape ~shape:[ Dims.b * Dims.tmax; Dims.b * Dims.tmax ]
+    in
+    corr
+
+  (* build the u covariance matrix. TODO: assume batch const so u_cov are 2 by 2 matrices (no batch dim in front); otherwise need special care to block diag them *)
+  let _Phi_M u_cov_list = Maths.block_diag u_cov_list
 
   (* optimal u determined from lqr *)
   let pred_u ~data (theta : P.M.t) =
@@ -215,25 +282,31 @@ module LGS = struct
       params_from_f ~x0:x0_tan ~theta ~o_list
       |> Lds_data.map_naive ~batch_const:Dims.batch_const
     in
-    let sol, u_cov_list = Lqr._solve ~laplace ~batch_const:Dims.batch_const p in
+    let sol, u_cov_list = Lqr._solve ~laplace:true ~batch_const:Dims.batch_const p in
     let optimal_u_list = List.map sol ~f:(fun s -> s.u) in
-    (* sample u from the kronecker formation *)
+    (* both _Phi_T and _Phi_M have shape [Tb x Tb ] *)
+    let _Phi_T, _Phi_M = _Phi_T theta, _Phi_M (Option.value_exn u_cov_list) in
+    let _Phi_M_chol = Maths.cholesky _Phi_M in
+    (* sample u from the laplace covariance *)
     let u_list =
       let optimal_u = concat_time optimal_u_list in
+      let _Phi_T_chol = Maths.cholesky _Phi_T in
       let xi =
-        Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.b; Dims.tmax ]
+        Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.tmax * Dims.b ]
         |> Maths.const
       in
-      let _chol_space = Maths.abs theta._cov_space in
-      let _chol_time = Maths.abs theta._cov_time in
-      let xi_space = Maths.einsum [ xi, "mbt"; _chol_space, "b" ] "mbt" in
-      let xi_time = Maths.einsum [ xi_space, "mat"; _chol_time, "t" ] "mat" in
-      let meaned = Maths.(xi_time + optimal_u) in
+      let xi_time = Maths.einsum [ xi, "mt"; _Phi_T_chol, "tb" ] "mb" in
+      let xi_time_space = Maths.einsum [ xi_time, "mb"; _Phi_M_chol, "bt" ] "mt" in
+      let xi_reshaped =
+        Maths.reshape xi_time_space ~shape:[ Dims.m; Dims.tmax; Dims.b ]
+        |> Maths.transpose ~dim0:1 ~dim1:2
+      in
+      let meaned = Maths.(xi_reshaped + optimal_u) in
       List.init Dims.tmax ~f:(fun i ->
         Maths.slice ~dim:2 ~start:(Some i) ~end_:(Some (i + 1)) ~step:1 meaned
         |> Maths.reshape ~shape:[ Dims.m; Dims.b ])
     in
-    optimal_u_list, u_list
+    optimal_u_list, u_list, _Phi_T, _Phi_M_chol
 
   (* gaussian llh with diagonal covariance *)
   let gaussian_llh ~g_mean ~g_cov ~x =
@@ -254,7 +327,7 @@ module LGS = struct
     |> Maths.(mean_dim ~keepdim:false ~dim:(Some [ 1 ]))
     |> Maths.neg
 
-  let elbo ~x_o_list ~u_list ~optimal_u_list ~sample (theta : P.M.t) =
+  let elbo ~x_o_list ~optimal_u_list ~_Phi_T ~_Phi_M_chol ~sample (theta : P.M.t) =
     (* calculate the likelihood term *)
     let llh =
       List.foldi x_o_list ~init:None ~f:(fun t accu (x, o) ->
@@ -262,77 +335,73 @@ module LGS = struct
         let increment =
           gaussian_llh
             ~g_mean:o
-            ~g_cov:theta._cov_o
-            ~x:Maths.(tmp_einsum x theta._c + theta._b)
+            ~g_cov:theta.gen._cov_o
+            ~x:Maths.(tmp_einsum x theta.gen._c + theta.gen._b)
         in
         match accu with
         | None -> Some increment
         | Some accu -> Some Maths.(accu + increment))
       |> Option.value_exn
     in
-    (* M1: calculate the kl term using samples *)
     let optimal_u = concat_time optimal_u_list in
+    (* calculate kl term analytically *)
     let kl =
-      if sample
-      then (
-        let prior =
-          List.foldi u_list ~init:None ~f:(fun t accu u ->
-            if t % 1 = 0 then Stdlib.Gc.major ();
-            let u_zeros = Tensor.zeros_like (Maths.primal u) |> Maths.const in
-            let increment = gaussian_llh ~g_mean:u_zeros ~g_cov:theta._cov_u ~x:u in
-            match accu with
-            | None -> Some increment
-            | Some accu -> Some Maths.(accu + increment))
-          |> Option.value_exn
+      let cov2 = Maths.(_Phi_M_chol *@ _Phi_T *@ transpose _Phi_M_chol ~dim0:1 ~dim1:0) in
+      (* determinant of a positive symmetric matrix is the sum of diagonals of its cholesky *)
+      let det1 =
+        let cov2_chol = Maths.cholesky cov2 in
+        Maths.(diagonal cov2_chol ~offset:0) |> Maths.sum |> Maths.log
+      in
+      let det2 =
+        Maths.(Float.(2. * of_int Dims.tmax) $* sum (log (abs theta.gen._cov_u)))
+      in
+      let _const = Tensor.of_float0 (Float.of_int Dims.b) |> Maths.const in
+      let tr =
+        let id =
+          Tensor.eye ~n:Dims.tmax ~options:(Dims.kind, Dims.device) |> Maths.const
         in
-        let entropy =
-          let u = concat_time u_list |> Maths.reshape ~shape:[ Dims.m; -1 ] in
-          let optimal_u = Maths.reshape optimal_u ~shape:[ Dims.m; -1 ] in
-          let g_cov = Maths.kron theta._cov_space theta._cov_time in
-          gaussian_llh ~g_mean:optimal_u ~g_cov ~x:u
+        let _cov_u_embedded =
+          Maths.diag_embed theta.gen._cov_u ~offset:0 ~dim2:(-1) ~dim1:(-2)
         in
-        Maths.(entropy - prior))
-      else (
-        (* M2: calculate the kl term analytically *)
-        let cov2 = Maths.kron theta._cov_space theta._cov_time in
-        let det1 = Maths.(2. $* sum (log (abs cov2))) in
-        let det2 =
-          Maths.(Float.(2. * of_int Dims.tmax) $* sum (log (abs theta._cov_u)))
-        in
-        let _const = Tensor.of_float0 (Float.of_int Dims.b) |> Maths.const in
-        let tr =
-          let tmp1 = theta._cov_u |> sqr_inv in
-          let tmp2 = Maths.(tmp1 * sqr theta._cov_space) in
-          let tmp3 = Maths.(kron tmp2 (sqr theta._cov_time)) in
-          Maths.sum tmp3
-        in
-        let quad =
-          let _cov_u = theta._cov_u |> sqr_inv in
-          let tmp1 = Maths.einsum [ optimal_u, "mbt"; _cov_u, "b" ] "mbt" in
-          Maths.einsum [ tmp1, "mbt"; optimal_u, "mbt" ] "m" |> Maths.unsqueeze ~dim:1
-        in
-        let tmp = Maths.(det2 - det1 - _const + tr) |> Maths.reshape ~shape:[ 1; 1 ] in
-        Maths.(tmp + quad) |> Maths.squeeze ~dim:1)
+        let sigma2 = Maths.(kron _cov_u_embedded id) in
+        let sigma2_inv = Maths.inv_sqr sigma2 in
+        Maths.(sigma2_inv *@ cov2) |> Maths.diagonal ~offset:0 |> Maths.sum
+      in
+      let quad =
+        let _cov_u = theta.gen._cov_u |> sqr_inv in
+        let tmp1 = Maths.einsum [ optimal_u, "mbt"; _cov_u, "b" ] "mbt" in
+        Maths.einsum [ tmp1, "mbt"; optimal_u, "mbt" ] "m" |> Maths.unsqueeze ~dim:1
+      in
+      let tmp = Maths.(det2 - det1 - _const + tr) |> Maths.reshape ~shape:[ 1; 1 ] in
+      Maths.(tmp + quad) |> Maths.squeeze ~dim:1
     in
     Maths.(llh - kl)
 
   (* calculate optimal u *)
-  let f ~update ~data ~init ~args:() (theta : P.M.t) =
+  let f ~update ~data ~init ~args:_ (theta : P.M.t) =
     let module L = Elbo_loss in
     let x0, o_list = data in
-    let optimal_u_list, u_list = pred_u ~data theta in
+    let optimal_u_list, u_list, _Phi_T, _Phi_M_chol = pred_u ~data theta in
     let rolled_out_x_list = rollout_x ~u_list ~x0 theta in
     (* These lists go from 1 to T *)
     let o_except_first = List.map o_list ~f:(fun o -> Maths.const o) in
     let x_except_first = List.tl_exn rolled_out_x_list in
     let x_o_list = List.map2_exn x_except_first o_except_first ~f:(fun x o -> x, o) in
     let neg_elbo =
-      Maths.(neg (elbo ~x_o_list ~u_list ~optimal_u_list theta ~sample:false))
+      Maths.(
+        neg (elbo ~x_o_list ~optimal_u_list theta ~sample:false ~_Phi_T ~_Phi_M_chol))
     in
     match update with
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
-      let ggn = L.vtgt_hessian_gv ~rolled_out_x_list:x_except_first ~u_list theta in
+      let ggn =
+        L.vtgt_hessian_gv
+          ~rolled_out_x_list:x_except_first
+          ~u_list
+          ~_Phi_T
+          ~_Phi_M_chol
+          theta
+      in
       u init (Some (neg_elbo, Some ggn))
 
   let init : P.tagged =
@@ -360,7 +429,7 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:Dims.a
         ~b:Dims.o
-        ~sigma:1.
+        ~sigma:0.1
       |> Prms.free
     in
     let _b =
@@ -369,39 +438,42 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:1
         ~b:Dims.o
-        ~sigma:1.
+        ~sigma:0.1
       |> Prms.free
     in
     let _cov_o =
       Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) (Scalar.f 0.1))
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) (Scalar.f 1.))
       |> Prms.free
     in
     let _cov_u =
       Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 1.))
       |> Prms.free
     in
-    let _cov_space =
-      Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
-      |> Prms.free
-    in
-    let _cov_time =
-      Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) (Scalar.f 0.1))
-      |> Prms.free
-    in
-    { _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u; _cov_space; _cov_time }
+    let one = Tensor.of_float0 1. |> Tensor.to_type ~type_:Dims.kind |> Prms.free in
+    PP.
+      { gen = { _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u }
+      ; sm =
+          List.init Dims.b ~f:(fun _ ->
+            SM.
+              { _w_1 = one
+              ; _nu_1 = one
+              ; _mu_1 = one
+              ; _w_2 = one
+              ; _nu_2 = one
+              ; _mu_2 = one
+              })
+      }
 
   let simulate ~theta ~data =
     (* infer the optimal u *)
-    let optimal_u_list, _ = pred_u ~data theta in
+    let optimal_u_list, _, _, _ = pred_u ~data theta in
     (* rollout to obtain x *)
     let rolled_out_x_list = rollout_x ~u_list:optimal_u_list ~x0 theta in
     (* noiseless observation *)
     let noiseless_o_list =
-      List.map rolled_out_x_list ~f:(fun x -> Maths.((x *@ theta._c) + theta._b))
+      List.map rolled_out_x_list ~f:(fun x -> Maths.((x *@ theta.gen._c) + theta.gen._b))
       |> List.tl_exn
     in
     let o_error =
@@ -416,7 +488,7 @@ let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
-    ; n_tangents = 256
+    ; n_tangents = 256 * 2
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
@@ -424,12 +496,12 @@ let config ~base_lr ~gamma ~iter:_ =
     ; perturb_thresh = None
     }
 
-module O = Optimizer.SOFO (LGS)
+module O = Optimizer.SOFO (LGS) 
 
 (* let config ~base_lr ~gamma:_ ~iter:_ =
-  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr } *)
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
 
-(* module O = Optimizer.Adam (LGS) *)
+module O = Optimizer.Adam (LGS) *)
 
 let optimise ~max_iter ~f_name ~init config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -476,13 +548,13 @@ let optimise ~max_iter ~f_name ~init config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init  ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
 
 (* let checkpoint_name = Some "lgs_elbo_sofo_lr_0.01_damp_0.1" *)
 
 let checkpoint_name = None
 let lr_rates = [ 0.01 ]
-let damping_list = [ Some 0.1 ]
+let damping_list = [ Some 1e-1 ]
 let meth = "sofo"
 
 let _ =
@@ -495,7 +567,7 @@ let _ =
         | None ->
           ( LGS.(init)
           , sprintf
-              "lgs_elbo_%s_lr_%s_damp_%s_perturbed"
+              "lgs_elbo_laplace_%s_lr_%s_damp_%s"
               meth
               (Float.to_string eta)
               gamma_name )
@@ -508,7 +580,7 @@ let _ =
               let x_perturbed = Tensor.(x + mul_scalar (rand_like x) (Scalar.f 0.01)) in
               Prms.free x_perturbed)
           , sprintf
-              "lgs_elbo_%s_lr_%s_damp_%s_%s"
+              "lgs_elbo_laplace_%s_lr_%s_damp_%s_%s"
               meth
               (Float.to_string eta)
               gamma_name
@@ -516,9 +588,9 @@ let _ =
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name ~init config_f))
+      optimise ~max_iter ~f_name ~init config_f)) 
 
-(* let lr_rates = [ 0.1 ]
+(* let lr_rates = [ 0.01 ]
 let meth = "adam"
 
 let _ =
@@ -526,12 +598,14 @@ let _ =
     let config_f = config ~base_lr:eta ~gamma:None in
     let init, f_name =
       match checkpoint_name with
-      | None -> LGS.(init), sprintf "lgs_elbo_%s_lr_%s" meth (Float.to_string eta)
+      | None -> LGS.(init), sprintf "lgs_elbo_laplace_%s_lr_%s" meth (Float.to_string eta)
       | Some checkpoint_name ->
-        let params_ba = O.W.P.T.load ~device:Dims.device (in_dir checkpoint_name ^ "_params") in
+        let params_ba =
+          O.W.P.T.load ~device:Dims.device (in_dir checkpoint_name ^ "_params")
+        in
         ( LGS.P.map params_ba ~f:(fun x -> Prms.free x)
-        , sprintf "lgs_elbo_%s_lr_%s_%s" meth (Float.to_string eta) checkpoint_name )
+        , sprintf "lgs_elbo_laplace_%s_lr_%s_%s" meth (Float.to_string eta) checkpoint_name )
     in
-      Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
-      Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
+    Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
+    Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
     optimise ~max_iter ~f_name ~init config_f) *)

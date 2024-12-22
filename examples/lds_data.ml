@@ -124,10 +124,12 @@ let bmm2_inv_trans ~batch_const b a =
   if batch_const
   then (
     match List.length (shape a) with
+    | 3 -> einsum [ a, "mca"; b_inv, "ba" ] "mcb"
     | 2 -> einsum [ a, "ma"; b_inv, "ba" ] "mb"
     | _ -> failwith "should not happen")
   else (
     match List.length (shape a) with
+    | 3 -> einsum [ a, "mca"; b_inv, "mba" ] "mcb"
     | 2 -> einsum [ a, "ma"; b_inv, "mba" ] "mb"
     | _ -> failwith "should not happen")
 

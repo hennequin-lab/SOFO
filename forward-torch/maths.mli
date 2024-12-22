@@ -28,7 +28,7 @@ val cos : t -> t
 val sqr : t -> t
 val sqrt : t -> t
 val log : t -> t
-val exp : t -> t  
+val exp : t -> t
 val tanh : t -> t
 val inv_sqr : t -> t
 val inv_rectangle : ?rcond:float -> t -> t
@@ -97,8 +97,7 @@ val einsum : (t * string) list -> string -> t
 (* ax = b, find x*)
 val linsolve : t -> t -> left:bool -> t
 val linsolve_triangular : t -> t -> left:bool -> upper:bool -> t
-
-val kron: t -> t -> t
+val kron : t -> t -> t
 
 val conv2d
   :  ?padding:int * int
@@ -112,6 +111,7 @@ val conv2d
 
 val concat : t -> t -> dim:int -> t
 val concat_list : t list -> dim:int -> t
+val block_diag : t list -> t
 
 (* check gradient against finite difference for unary operations. *)
 val check_grad1 : (t -> t) -> Tensor.t -> float

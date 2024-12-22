@@ -972,6 +972,39 @@ let concat_list x_list ~dim =
   in
   (z, dz) |> assert_right_shape "concat_list"
 
+let block_diag x_list =
+  let z = Tensor.block_diag (List.map x_list ~f:fst) in
+  let num_tangents =
+    List.fold x_list ~init:0 ~f:(fun acc (_, dx) ->
+      let num_tangents =
+        match dx with
+        | None -> acc
+        | Some dx ->
+          let dx = tangent' dx in
+          List.hd_exn (Tensor.shape dx)
+      in
+      match acc with
+      | 0 -> num_tangents
+      | acc -> if num_tangents = acc then acc else assert false)
+  in
+  let dz =
+    if num_tangents = 0
+    then None
+    else (
+      let dz =
+        List.init num_tangents ~f:(fun k ->
+          List.map x_list ~f:(fun (_, dx) ->
+            let dx' = tangent' (Option.value_exn dx) in
+            Tensor.slice dx' ~dim:0 ~start:(Some k) ~end_:(Some Int.(k + 1)) ~step:1
+            |> Tensor.squeeze_dim ~dim:0)
+          |> Tensor.block_diag
+          |> Tensor.unsqueeze ~dim:0)
+        |> Tensor.concat ~dim:0
+      in
+      Some (Direct dz))
+  in
+  (z, dz) |> assert_right_shape "block_diag"
+
 let concat (x, dx) (y, dy) ~dim =
   let z = Tensor.concat [ x; y ] ~dim in
   let x_shape, y_shape = Tensor.shape x, Tensor.shape y in

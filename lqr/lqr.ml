@@ -34,6 +34,13 @@ let ( +? ) a b =
   | None, Some b -> Some b
   | Some a, Some b -> Some (a + b)
 
+let ( -? ) a b =
+  match a, b with
+  | None, None -> None
+  | Some a, None -> Some a
+  | None, Some b -> Some b
+  | Some a, Some b -> Some (a - b)
+
 let ( *? ) f v =
   match f, v with
   | Some f, Some v -> Some (f v)
@@ -331,11 +338,16 @@ let covariances
           tmp2 +? _Quu_inv
         in
         let _Px =
-          let tmp1 = params.common._Fx_prod_inv *? (_P +? params.common._Cxx) in
-          params.common._Fx_prod2_inv_trans *? tmp1
+          (* since producted with _F_prod always has a leading batch dim, need to artificially add on some tensors *)
+          let tmp1 = _P +? params.common._Cxx in
+          let tmp1_unsqueezed =
+            if batch_const then maybe_unsqueeze tmp1 ~dim:0 else tmp1
+          in
+          let tmp3 = params.common._Fx_prod_inv *? tmp1_unsqueezed in
+          let tmp4 = params.common._Fx_prod2_inv_trans *? tmp3 in
+          if batch_const then maybe_squeeze tmp4 ~dim:0 else tmp4
         in
         let _Pu =
-          (* since producted with _F_prod always has a leading batch dim, need to trasnform Px *)
           let _Px_tmp = if batch_const then maybe_unsqueeze _Px ~dim:0 else _Px in
           let tmp1 = params.common._Fu_prod *? _Px_tmp in
           let tmp2 = params.common._Fu_prod2_trans *? tmp1 in
@@ -349,10 +361,11 @@ let covariances
           let _Pu_inv_tmp =
             if batch_const then maybe_unsqueeze _Pu_inv ~dim:0 else _Pu_inv
           in
-          let tmp2 = maybe_batch_matmul tmp1 (maybe_inv_sqr _Pu_inv_tmp) ~batch_const:false in
+          let tmp2 = maybe_batch_matmul tmp1 _Pu_inv_tmp ~batch_const:false in
           let tmp3 = params.common._Fu_prod *? _Px_tmp in
           let tmp4 = maybe_batch_matmul tmp2 tmp3 ~batch_const:false in
-          if batch_const then maybe_squeeze tmp4 ~dim:0 else tmp4
+          let tmp5 = if batch_const then maybe_squeeze tmp4 ~dim:0 else tmp4 in
+          _Px -? tmp5
         in
         _P, _Sigma_uu :: _Sigma_uu_list)
   in
@@ -603,8 +616,7 @@ let solve ?(batch_const = false) ?(laplace = false) p =
   in
   if laplace
   then (
-    (* TODO: if we need covariances to carry tangents we need to compute everything with tangents, hence cannot be used in this separable method *)
-    (* TODO: for now we assume we do not need the covariances to carry tangents i.e. do not differentiate through the samples *)
+    (* TODO: if we need covariances to carry tangents we need to compute everything with tangents, hence cannot be used in this separable method. For now we assume we do not need the covariances to carry tangents i.e. do not differentiate through the samples *)
     let covariances = covariances ~batch_const ~common_info p_primal in
     sol, Some (List.map covariances ~f:(fun x -> Option.value_exn x)))
   else sol, None
