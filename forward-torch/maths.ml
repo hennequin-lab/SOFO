@@ -221,6 +221,22 @@ let relu (x, dx) =
   in
   (y, dy) |> assert_right_shape "relu"
 
+let soft_relu (x, dx) =
+  let tmp = Tensor.(square x + f 4.) in
+  let y =
+    let num = Tensor.(sqrt tmp + x) in
+    Tensor.((num / f 2.) - f 1.)
+  in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let values =
+        let tmp2 = Tensor.(f 1. / sqrt tmp) in
+        Tensor.(div_scalar ((tmp2 * x) + f 1.) (Scalar.f 2.))
+      in
+      Tensor.mul dx values)
+  in
+  (y, dy) |> assert_right_shape "relu"
+
 let sigmoid (x, dx) =
   let y = Tensor.sigmoid x in
   let dy = with_tangent dx ~f:(fun dx -> Tensor.(mul dx (mul y (ones_like y - y)))) in

@@ -33,6 +33,8 @@ val tanh : t -> t
 val inv_sqr : t -> t
 val inv_rectangle : ?rcond:float -> t -> t
 val relu : t -> t
+val soft_relu : t -> t
+
 val sigmoid : t -> t
 val softplus : t -> t
 val slice : dim:int -> start:int option -> end_:int option -> step:int -> t -> t

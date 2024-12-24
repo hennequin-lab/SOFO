@@ -1,5 +1,13 @@
 (executables
- (names linear_regression lqr_eg lorenz lgs lgs_elbo lgs_elbo_laplace)
+ (names
+  linear_regression
+  lqr_eg
+  lorenz
+  lgs
+  lgs_elbo
+  lgs_elbo_laplace
+  lgs_elbo_gru
+  test)
  (libraries cmdargs bos sofo owl domainslib owl-ode lqr)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))

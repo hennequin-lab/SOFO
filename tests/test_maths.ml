@@ -171,6 +171,7 @@ let unary_tests =
     ; "softplus", [], any_shape Maths.softplus
     ; "tanh", [], any_shape Maths.tanh
     ; "relu", [ `positive ], any_shape Maths.relu
+    ; "soft_relu", [], any_shape Maths.soft_relu
     ; "sum", [], any_shape Maths.sum
     ; "mean", [], any_shape Maths.mean
       (* ; "max2d_dim1", [ `order_equal_to 2 ], any_shape (Maths.max_2d_dim1 ~keepdim:false) *)
