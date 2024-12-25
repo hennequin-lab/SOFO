@@ -14,11 +14,11 @@ let _ =
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
 module Dims = struct
-  let a = 24
-  let b = 10
-  let o = 48
+  let a = 6
+  let b = 3
+  let o = 8
   let tmax = 10
-  let m = 512
+  let m = 32
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
@@ -59,6 +59,12 @@ let sample_data () =
 (* -----------------------------------------
    ----- Utilitiy Functions ------
    ----------------------------------------- *)
+let ( +? ) a b =
+  match a, b with
+  | None, None -> None
+  | Some a, None -> Some a
+  | None, Some b -> Some b
+  | Some a, Some b -> Some Maths.(a + b)
 
 let tmp_einsum a b =
   if Dims.batch_const
@@ -76,7 +82,8 @@ let base =
     { default with kind = Torch_core.Kind.(T f64); ba_kind = Bigarray.float64 }
 
 let max_iter = 2000
-let laplace = true
+let laplace = false
+let conv_threshold = 0.01
 
 module LGS = struct
   module PP = struct
@@ -175,66 +182,40 @@ module LGS = struct
     Maths.(((tmp2 * x) + f 1.) /$ 2.)
 
   let _Fu ~x (theta : P.M.t) =
-    let pre_sig = Maths.((x *@ theta._U_f) + theta._b_f) in
-    let f_t = Maths.sigmoid pre_sig in
-    Maths.einsum [ f_t, "ma"; theta._W, "ba" ] "mba"
+    match x with
+    | Some x ->
+      let pre_sig = Maths.((x *@ theta._U_f) + theta._b_f) in
+      let f_t = Maths.sigmoid pre_sig in
+      Maths.einsum [ f_t, "ma"; theta._W, "ba" ] "mba"
+    | None ->
+      Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.b; Dims.a ]
+      |> Maths.const
 
   let _Fx ~x ~u (theta : P.M.t) =
-    let pre_sig = Maths.((x *@ theta._U_f) + theta._b_f) in
-    let f_t = Maths.sigmoid pre_sig in
-    let pre_g = Maths.((f_t * x *@ theta._U_h) + theta._b_h) in
-    let x_hat = Maths.(soft_relu pre_g + (u *@ theta._W)) in
-    let tmp_einsum2 a b = Maths.einsum [ a, "ab"; b, "ma" ] "mba" in
-    let term1 = Maths.diag_embed Maths.(f 1. - f_t) ~offset:0 ~dim1:(-2) ~dim2:(-1) in
-    let term2 =
-      let tmp = Maths.(d_sigmoid pre_sig * (x_hat - x)) in
-      tmp_einsum2 theta._U_f tmp
-    in
-    let term3 =
-      let tmp1 = Maths.diag_embed Maths.(f_t) ~offset:0 ~dim1:(-2) ~dim2:(-1) in
-      let tmp2 = tmp_einsum2 theta._U_f (d_sigmoid pre_sig) in
-      let tmp3 = tmp_einsum2 theta._U_h (d_soft_relu pre_g) in
-      let tmp4 = Maths.einsum [ tmp3, "mab"; Maths.(tmp2 + tmp1), "mbc" ] "mac" in
-      Maths.(tmp1 * tmp4)
-    in
-    Maths.(term1 + term2 + term3)
-
-  (* create params for lds from f *)
-  (* TODO: code up ilqr properly *)
-  let params_from_f ~(theta : P.M.t) ~x0 ~o_list ~x_u_list
-    : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lqr.Params.p
-    =
-    (* set o at time 0 as 0 *)
-    let o_list_tmp = Tensor.zeros_like (List.hd_exn o_list) :: o_list in
-    let _cov_u_inv =
-      theta._cov_u |> sqr_inv |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
-    in
-    let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 in
-    let _cov_o_inv = sqr_inv theta._cov_o in
-    let _Cxx =
-      let tmp = Maths.(einsum [ theta._c, "ab"; _cov_o_inv, "b" ] "ab") in
-      Maths.(tmp *@ c_trans)
-    in
-    let _cx_common =
-      let tmp = Maths.(einsum [ theta._b, "ab"; _cov_o_inv, "b" ] "ab") in
-      Maths.(tmp *@ c_trans)
-    in
-    Lqr.Params.
-      { x0 = Some x0
-      ; params =
-          List.map2_exn o_list_tmp x_u_list ~f:(fun o (x, u) ->
-            let _cx = Maths.(_cx_common - (const o *@ c_trans)) in
-            Lds_data.Temp.
-              { _f = None
-              ; _Fx_prod = _Fx ~x ~u theta
-              ; _Fu_prod = _Fu ~x theta
-              ; _cx = Some _cx
-              ; _cu = None
-              ; _Cxx
-              ; _Cxu = None
-              ; _Cuu = _cov_u_inv
-              })
-      }
+    match x, u with
+    | Some x, Some u ->
+      let pre_sig = Maths.((x *@ theta._U_f) + theta._b_f) in
+      let f_t = Maths.sigmoid pre_sig in
+      let pre_g = Maths.((f_t * x *@ theta._U_h) + theta._b_h) in
+      let x_hat = Maths.(soft_relu pre_g + (u *@ theta._W)) in
+      let tmp_einsum2 a b = Maths.einsum [ a, "ab"; b, "ma" ] "mba" in
+      let term1 = Maths.diag_embed Maths.(f 1. - f_t) ~offset:0 ~dim1:(-2) ~dim2:(-1) in
+      let term2 =
+        let tmp = Maths.(d_sigmoid pre_sig * (x_hat - x)) in
+        tmp_einsum2 theta._U_f tmp
+      in
+      let term3 =
+        let tmp1 = Maths.diag_embed Maths.(f_t) ~offset:0 ~dim1:(-2) ~dim2:(-1) in
+        let tmp2 = tmp_einsum2 theta._U_f (d_sigmoid pre_sig) in
+        let tmp3 = tmp_einsum2 theta._U_h (d_soft_relu pre_g) in
+        let tmp4 = Maths.einsum [ tmp3, "mab"; Maths.(tmp2 + tmp1), "mbc" ] "mac" in
+        Maths.(tmp1 * tmp4)
+      in
+      let final = Maths.(term1 + term2 + term3) in
+      final
+    | _ ->
+      Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a; Dims.a ]
+      |> Maths.const
 
   (* rollout x list under sampled u *)
   let rollout_x ~u_list ~x0 (theta : P.M.t) =
@@ -250,20 +231,140 @@ module LGS = struct
     in
     List.rev x_list
 
+  let rollout_sol ~u_list ~x0 (theta : P.M.t) =
+    let x0_tan = Maths.const x0 in
+    let _, x_list =
+      List.fold u_list ~init:(x0_tan, []) ~f:(fun (x, accu) u ->
+        let pre_sig = Maths.((x *@ theta._U_f) + theta._b_f) in
+        let f_t = Maths.sigmoid pre_sig in
+        let pre_g = Maths.((f_t * x *@ theta._U_h) + theta._b_h) in
+        let x_hat = Maths.(soft_relu pre_g + (u *@ theta._W)) in
+        let new_x = Maths.(((f 1. - f_t) * x) + (f_t * x_hat)) in
+        new_x, Lqr.Solution.{ u = Some u; x = Some new_x } :: accu)
+    in
+    List.rev x_list
+
+  (* artificially add one to tau so it goes from 0 to T *)
+  let extend_tau_list (tau : Maths.t option Lqr.Solution.p list) =
+    let u_list = List.map tau ~f:(fun s -> s.u) in
+    let x_list = List.map tau ~f:(fun s -> s.x) in
+    let u_ext = u_list @ [ None ] in
+    let x_ext = Some (Maths.const x0) :: x_list in
+    List.map2_exn u_ext x_ext ~f:(fun u x -> Lqr.Solution.{ u; x })
+
+  (* given a trajectory and parameters, calculate average cost across batch (summed over time) *)
+  let cost_func
+        ~batch_const
+        (tau : Maths.t option Lqr.Solution.p list)
+        (p :
+          ( Maths.t option
+            , (Maths.t, Maths.t -> Maths.t) Lqr.momentary_params list )
+            Lqr.Params.p)
+    =
+    let tau_extended = extend_tau_list tau in
+    let maybe_tmp_einsum_sqr ~batch_const a c b =
+      match a, c, b with
+      | Some a, Some c, Some b ->
+        let c_eqn = if batch_const then "ab" else "mab" in
+        Some (Maths.einsum [ a, "ma"; c, c_eqn; b, "mb" ] "m")
+      | _ -> None
+    in
+    let maybe_tmp_einsum ~batch_const a b =
+      match a, b with
+      | Some a, Some b ->
+        let b_eqn = if batch_const then "a" else "ma" in
+        Some (Maths.einsum [ a, "ma"; b, b_eqn ] "m")
+      | _ -> None
+    in
+    let cost =
+      List.fold2_exn tau_extended p.params ~init:None ~f:(fun accu tau p ->
+        let x_sqr_cost = maybe_tmp_einsum_sqr ~batch_const tau.x p.common._Cxx tau.x in
+        let u_sqr_cost = maybe_tmp_einsum_sqr ~batch_const tau.u p.common._Cuu tau.u in
+        let xu_cost =
+          let tmp = maybe_tmp_einsum_sqr ~batch_const tau.x p.common._Cxu tau.u in
+          match tmp with
+          | None -> None
+          | Some x -> Some Maths.(2. $* x)
+        in
+        let x_cost = maybe_tmp_einsum ~batch_const tau.x p._cx in
+        let u_cost = maybe_tmp_einsum ~batch_const tau.u p._cu in
+        accu +? (x_sqr_cost +? u_sqr_cost) +? (xu_cost +? (x_cost +? u_cost)))
+      |> Option.value_exn
+    in
+    cost |> Maths.primal |> Tensor.mean |> Tensor.to_float0_exn
+
   (* optimal u determined from lqr *)
-  (* TODO: given a norminal trajectory of x and u, linearise to find lqr params *)
   let pred_u ~data (theta : P.M.t) =
     let x0, o_list = data in
     let x0_tan = Maths.const x0 in
-    (* TODO: need to specify current u and x *)
-    let x_u_list = [] in
-    (* use lqr to obtain the optimal u *)
-    let p =
-      params_from_f ~x0:x0_tan ~theta ~o_list ~x_u_list
-      |> Lds_data.map_naive ~batch_const:Dims.batch_const
+    let params_func (tau : Maths.t option Lqr.Solution.p list)
+      : ( Maths.t option
+          , (Maths.t, Maths.t -> Maths.t) Lqr.momentary_params list )
+          Lqr.Params.p
+      =
+      (* set o at time 0 as 0 *)
+      let o_list_tmp = Tensor.zeros_like (List.hd_exn o_list) :: o_list in
+      let _cov_u_inv =
+        theta._cov_u |> sqr_inv |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+      in
+      let _Cuu_batched =
+        List.init Dims.m ~f:(fun _ ->
+          Maths.reshape _cov_u_inv ~shape:[ 1; Dims.b; Dims.b ])
+        |> Maths.concat_list ~dim:0
+      in
+      let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 in
+      let _cov_o_inv = sqr_inv theta._cov_o in
+      let _Cxx =
+        let tmp = Maths.(einsum [ theta._c, "ab"; _cov_o_inv, "b" ] "ab") in
+        Maths.(tmp *@ c_trans)
+      in
+      let _Cxx_batched =
+        List.init Dims.m ~f:(fun _ -> Maths.reshape _Cxx ~shape:[ 1; Dims.a; Dims.a ])
+        |> Maths.concat_list ~dim:0
+      in
+      let _cx_common =
+        let tmp = Maths.(einsum [ theta._b, "ab"; _cov_o_inv, "b" ] "ab") in
+        Maths.(tmp *@ c_trans)
+      in
+      let tau_extended = extend_tau_list tau in
+      let tmp_list =
+        Lqr.Params.
+          { x0 = Some x0_tan
+          ; params =
+              List.map2_exn o_list_tmp tau_extended ~f:(fun o s ->
+                let _cx = Maths.(_cx_common - (const o *@ c_trans)) in
+                Lds_data.Temp.
+                  { _f = None
+                  ; _Fx_prod = _Fx ~x:s.x ~u:s.u theta
+                  ; _Fu_prod = _Fu ~x:s.x theta
+                  ; _cx = Some _cx
+                  ; _cu = None
+                  ; _Cxx = _Cxx_batched
+                  ; _Cxu = None
+                  ; _Cuu = _Cuu_batched
+                  })
+          }
+      in
+      Lds_data.map_naive tmp_list ~batch_const:false
     in
-    let sol, u_cov_list = Lqr._solve ~laplace ~batch_const:Dims.batch_const p in
-    let optimal_u_list = List.map sol ~f:(fun s -> s.u) in
+    let u_init =
+      List.init Dims.tmax ~f:(fun _ ->
+        let rand = Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.b ] in
+        Maths.const rand)
+    in
+    let tau_init = rollout_sol ~u_list:u_init ~x0 theta in
+    (* TODO: is there a more elegant way? Currently I need to set batch_const to false since _Fx and _Fu has batch dim. *)
+    (* use lqr to obtain the optimal u *)
+    let sol, u_cov_list =
+      Ilqr._isolve
+        ~laplace
+        ~batch_const:false
+        ~cost_func
+        ~params_func
+        ~conv_threshold
+        ~tau_init
+    in
+    let optimal_u_list = List.map sol ~f:(fun s -> s.u |> Option.value_exn) in
     (* sample u from the kronecker formation *)
     let u_list =
       let optimal_u = concat_time optimal_u_list in
@@ -396,7 +497,7 @@ module LGS = struct
       Convenience.gaussian_tensor_2d_normed
         ~device:Dims.device
         ~kind:Dims.kind
-        ~a:Dims.b
+        ~a:Dims.a
         ~b:Dims.a
         ~sigma:0.1
       |> Prms.free

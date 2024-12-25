@@ -166,7 +166,7 @@ let unary_tests =
     ; "log", [ `positive ], any_shape Maths.log
     ; "exp", [], any_shape Maths.exp
     ; "inv_sqr", [ `specified_unary [ 3; 10; 10 ] ], any_shape inv_sqr
-    ; "inv_rectangle", [ `specified_unary [ 80; 15 ] ], any_shape Maths.inv_rectangle
+    ; "inv_rectangle", [ `specified_unary [ 3; 80; 15 ] ], any_shape Maths.inv_rectangle
     ; "sigmoid", [], any_shape Maths.sigmoid
     ; "softplus", [], any_shape Maths.softplus
     ; "tanh", [], any_shape Maths.tanh

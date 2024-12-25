@@ -59,7 +59,7 @@ let forward
     if stop
     then tau_prev
     else (
-      let x0 = Torch.Tensor.f 0. |> Maths.const |> Some in
+      let x0 = p.x0 in
       let u0 =
         let _k0 =
           let tmp = List.hd_exn bck in
@@ -88,7 +88,7 @@ let forward
             x, u_new, Solution.{ u; x = x_new } :: accu)
       in
       let tau_curr = List.rev solution in
-      let cost_curr = cost_func tau_curr in
+      let cost_curr = cost_func ~batch_const tau_curr p in
       let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
       let stop = Float.(pct_change < conv_threshold) in
       fwd_loop ~stop ~alpha ~tau_prev:(Some tau_curr) ~cost_prev:cost_curr)
@@ -113,6 +113,7 @@ let rec ilqr_loop
     let p_curr : (t option, (t, t -> t) momentary_params list) Params.p =
       params_func tau_prev
     in
+    (* batch const is false since fx and fu now has batch dimension in front *)
     let common_info =
       backward_common
         ~batch_const
@@ -124,7 +125,7 @@ let rec ilqr_loop
     let tau_curr =
       forward ~batch_const ~cost_func ~p:p_curr ~tau_opt:tau_prev ~bck ~conv_threshold
     in
-    let cost_curr = cost_func tau_curr in
+    let cost_curr = cost_func ~batch_const tau_curr p_curr in
     let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
     let stop = Float.(pct_change < conv_threshold) in
     ilqr_loop
@@ -163,13 +164,15 @@ let _isolve
       ?(laplace = false)
       ~cost_func
       ~params_func
-      ~u_init
+      (* ~u_init *)
       ~conv_threshold
-      ~(p_init : (t option, (t, t -> t) momentary_params list) Params.p)
+      (* ~(p_init : (t option, (t, t -> t) momentary_params list) Params.p) *)
+      ~tau_init
   =
   (* step 1: rollout u *)
-  let tau_init = rollout ~u_init ~p_init in
-  let cost_init = cost_func tau_init in
+  (* let tau_init = rollout ~u_init ~p_init in *)
+  let p_init = params_func tau_init in
+  let cost_init = cost_func ~batch_const tau_init p_init in
   (*step 2: loop to find the best controls and states *)
   let tau_final, common_info_final =
     ilqr_loop

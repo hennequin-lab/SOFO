@@ -199,13 +199,12 @@ let inv_sqr (x, dx) =
 
 (* pseudo-inverse of a matrix of size [m x n] where m != n *)
 let inv_rectangle ?(rcond = 1e-6) (x, dx) =
-  assert (List.length (Tensor.shape x) = 2);
   let y = Tensor.pinverse x ~rcond in
   let dy =
     with_tangent dx ~f:(fun dx ->
-      let tran_2d = Tensor.transpose ~dim0:1 ~dim1:0 in
+      let tran_2d = Tensor.transpose ~dim0:(-1) ~dim1:(-2) in
       let xTx = Tensor.(matmul (tran_2d x) x) in
-      let tmp1 = Tensor.(matmul (inverse xTx) (Tensor.transpose dx ~dim0:2 ~dim1:1)) in
+      let tmp1 = Tensor.(matmul (inverse xTx) (tran_2d dx )) in
       let tmp2 = Tensor.(matmul tmp1 (matmul x y)) in
       let tmp3 = Tensor.(matmul y (matmul dx y)) in
       Tensor.(tmp1 - tmp2 - tmp3))
