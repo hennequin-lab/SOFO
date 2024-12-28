@@ -7,7 +7,7 @@
   lgs_elbo
   lgs_elbo_laplace
   lgs_elbo_gru
-  test)
+  lorenz_elbo_gru)
  (libraries cmdargs bos sofo owl domainslib owl-ode lqr ilqr)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))

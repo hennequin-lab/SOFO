@@ -50,6 +50,7 @@ let _u ~tangent ~batch_const ~_k ~_K ~x ~alpha =
 let forward
       ~batch_const
       ~cost_func
+      ~f_theta
       ~(p : (t option, (t, t -> t) momentary_params list) Params.p)
       ~(tau_opt : t option Solution.p list)
       ~(bck : backward_info list)
@@ -68,33 +69,34 @@ let forward
         maybe_scalar_mul _k0 alpha
       in
       let _, _, solution =
-        let params_except_last = List.drop_last_exn p.params in
-        let params_bck_list = List.map2_exn params_except_last bck ~f:(fun p b -> p, b) in
-        List.fold2_exn
-          params_bck_list
-          tau_opt
-          ~init:(x0, u0, [])
-          ~f:(fun (x, u, accu) (p, b) tau ->
-            cleanup ();
-            (* fold into the state update *)
-            let x_new =
-              let _Fx_prod2, _Fu_prod2 = p.common._Fx_prod2, p.common._Fu_prod2 in
-              p._f +? (_Fx_prod2 *? x) +? (_Fu_prod2 *? u)
-            in
-            let u_new =
-              let x_opt = tau.x in
-              _u ~tangent:false ~batch_const ~_k:b._k ~_K:b._K ~x:(x_new -? x_opt) ~alpha
-            in
-            x, u_new, Solution.{ u; x = x_new } :: accu)
+        List.fold2_exn bck tau_opt ~init:(x0, u0, []) ~f:(fun (x, u, accu) b tau ->
+          cleanup ();
+          (* fold into the state update *)
+          let x_new = f_theta ~x:(Option.value_exn x) ~u:(Option.value_exn u) in
+          let u_new =
+            let x_opt = tau.x in
+            _u
+              ~tangent:false
+              ~batch_const
+              ~_k:b._k
+              ~_K:b._K
+              ~x:(Some x_new -? x_opt)
+              ~alpha
+          in
+          Some x_new, u_new, Solution.{ u; x = Some x_new } :: accu)
       in
       let tau_curr = List.rev solution in
       let cost_curr = cost_func ~batch_const tau_curr p in
       let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
-      let stop = Float.(pct_change < conv_threshold) in
-      fwd_loop ~stop ~alpha ~tau_prev:(Some tau_curr) ~cost_prev:cost_curr)
+      if Float.(is_nan cost_curr)
+      then failwith "current cost value is nan"
+      else (
+        let stop = Float.(pct_change < conv_threshold) in
+        fwd_loop ~stop ~alpha ~tau_prev:tau_curr ~cost_prev:cost_curr))
   in
   let alpha = 1. in
-  fwd_loop ~stop:false ~alpha ~tau_prev:None ~cost_prev:0. |> Option.value_exn
+  let cost_init = cost_func ~batch_const tau_opt p in
+  fwd_loop ~stop:false ~alpha ~tau_prev:tau_opt ~cost_prev:cost_init
 
 let rec ilqr_loop
           ~batch_const
@@ -104,6 +106,7 @@ let rec ilqr_loop
           ~cost_prev
           ~params_func
           ~cost_func
+          ~f_theta
           ~(tau_prev : t option Solution.p list)
           ~common_info_prev
   =
@@ -123,11 +126,19 @@ let rec ilqr_loop
     cleanup ();
     let bck = backward ~batch_const common_info p_curr in
     let tau_curr =
-      forward ~batch_const ~cost_func ~p:p_curr ~tau_opt:tau_prev ~bck ~conv_threshold
+      forward
+        ~batch_const
+        ~cost_func
+        ~f_theta
+        ~p:p_curr
+        ~tau_opt:tau_prev
+        ~bck
+        ~conv_threshold
     in
     let cost_curr = cost_func ~batch_const tau_curr p_curr in
     let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
     let stop = Float.(pct_change < conv_threshold) in
+    cleanup ();
     ilqr_loop
       ~batch_const
       ~laplace
@@ -135,26 +146,23 @@ let rec ilqr_loop
       ~stop
       ~params_func
       ~cost_func
+      ~f_theta
       ~tau_prev:tau_curr
       ~cost_prev:cost_curr
       ~common_info_prev:(Some common_info))
 
-let rollout ~u_init ~(p_init : (t option, (t, t -> t) momentary_params list) Params.p) =
+let rollout
+      ~u_init
+      ~(p_init : (t option, (t, t -> t) momentary_params list) Params.p)
+      ~f_theta
+  =
   (* x0 is 0; u goes from 0 to T-1, x goes from 1 to T *)
   let _, solution =
-    let params_except_last = List.drop_last_exn p_init.params in
-    List.fold2_exn
-      params_except_last
-      u_init
-      ~init:(p_init.x0, [])
-      ~f:(fun (x, accu) p u ->
-        cleanup ();
-        (* fold into the state update *)
-        let x =
-          let _Fx_prod2, _Fu_prod2 = p.common._Fx_prod2, p.common._Fu_prod2 in
-          p._f +? (_Fx_prod2 *? x) +? (_Fu_prod2 *? u)
-        in
-        x, Solution.{ u; x } :: accu)
+    List.fold u_init ~init:(p_init.x0, []) ~f:(fun (x, accu) u ->
+      cleanup ();
+      (* fold into the state update *)
+      let x_new = f_theta ~x:(Option.value_exn x) ~u:(Option.value_exn u) in
+      Some x_new, Solution.{ u; x = Some x_new } :: accu)
   in
   List.rev solution
 
@@ -162,15 +170,13 @@ let rollout ~u_init ~(p_init : (t option, (t, t -> t) momentary_params list) Par
 let _isolve
       ?(batch_const = false)
       ?(laplace = false)
+      ~f_theta
       ~cost_func
       ~params_func
-      (* ~u_init *)
       ~conv_threshold
-      (* ~(p_init : (t option, (t, t -> t) momentary_params list) Params.p) *)
       ~tau_init
   =
-  (* step 1: rollout u *)
-  (* let tau_init = rollout ~u_init ~p_init in *)
+  (* step 1: init params and cost *)
   let p_init = params_func tau_init in
   let cost_init = cost_func ~batch_const tau_init p_init in
   (*step 2: loop to find the best controls and states *)
@@ -182,10 +188,12 @@ let _isolve
       ~stop:false
       ~params_func
       ~cost_func
+      ~f_theta
       ~tau_prev:tau_init
       ~cost_prev:cost_init
       ~common_info_prev:None
   in
+  cleanup ();
   (* step 3: calculate covariances if required *)
   if laplace
   then (

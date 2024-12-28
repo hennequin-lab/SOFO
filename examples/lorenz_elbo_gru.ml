@@ -1,4 +1,4 @@
-(* Linear Gaussian Dynamics, with same state/control/cost parameters constant across trials and across time; use a mini-gru (ilqr-vae appendix c) as generative model. *)
+(* Lorenz attractor with no controls, with same state/control/cost parameters constant across trials and across time; use a mini-gru (ilqr-vae appendix c) as generative model. *)
 open Printf
 open Base
 open Forward_torch
@@ -10,51 +10,37 @@ let _ =
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
+let in_dir = Cmdargs.in_dir "-d"
+let _ = Bos.Cmd.(v "rm" % "-f" % in_dir "info") |> Bos.OS.Cmd.run
+
 (* -----------------------------------------
-   -- Control Problem / Data Generation ---
+   -- Generate Lorenz data            ------
    ----------------------------------------- *)
-module Dims = struct
-  let a = 6
-  let b = 3
-  let o = 8
-  let tmax = 10
-  let m = 32
-  let batch_const = true
-  let kind = Torch_core.Kind.(T f64)
-  let device = Torch.Device.cuda_if_available ()
-end
 
-module Data = Lds_data.Make_LDS_Tensor (Dims)
+open Lorenz_common
 
-let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
+(* state dim *)
+let a = 3
 
-(* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
+(* control dim *)
+let b = 1
+let batch_size = 128
+let num_epochs_to_run = 2000
+let tmax = 33
+let train_data = Arr.load_npy (in_dir "lorenz_train")
 
-let f_list : Tensor.t Lds_data.f_params list =
-  let _Fx = Data.sample_fx () in
-  let _Fu = Data.sample_fu () in
-  let c = Data.sample_c () in
-  let b = Data.sample_b () in
-  let cov = Data.sample_output_cov () in
-  List.init (Dims.tmax + 1) ~f:(fun _ ->
-    Lds_data.
-      { _Fx_prod = _Fx
-      ; _Fu_prod = _Fu
-      ; _f = None
-      ; _c = Some c
-      ; _b = Some b
-      ; _cov = Some cov
-      })
+(* let train_data = data Int.(tmax - 1) *)
+let full_batch_size = Arr.(shape train_data).(1)
+let train_data_batch = get_batch train_data
+let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size t
 
-let sample_data () =
-  (* generate ground truth params and data *)
-  let u_list =
-    let _cov_u = Tensor.eye ~n:Dims.b ~options:(Dims.kind, Dims.device) in
-    Data.sample_u_list ~cov_u:_cov_u
-  in
-  let x_list, o_list = Data.traj_rollout ~x0 ~f_list ~u_list in
-  let o_list = List.map o_list ~f:(fun o -> Option.value_exn o) in
-  u_list, x_list, o_list
+let num_train_loops =
+  Convenience.num_train_loops ~full_batch_size ~batch_size num_epochs_to_run
+
+let batch_const = true
+let kind = Torch_core.Kind.(T f64)
+let device = Torch.Device.cuda_if_available ()
+let x0 = Tensor.zeros ~device ~kind [ batch_size; a ]
 
 (* -----------------------------------------
    ----- Utilitiy Functions ------
@@ -67,21 +53,18 @@ let ( +? ) a b =
   | Some a, Some b -> Some Maths.(a + b)
 
 let tmp_einsum a b =
-  if Dims.batch_const
+  if batch_const
   then Maths.einsum [ a, "ma"; b, "ab" ] "mb"
   else Maths.einsum [ a, "ma"; b, "mab" ] "mb"
 
 (* -----------------------------------------
    -- Model setup and optimizer
    ----------------------------------------- *)
-let in_dir = Cmdargs.in_dir "-d"
-let _ = Bos.Cmd.(v "rm" % "-f" % in_dir "info") |> Bos.OS.Cmd.run
 
 let base =
   Optimizer.Config.Base.
     { default with kind = Torch_core.Kind.(T f64); ba_kind = Bigarray.float64 }
 
-let max_iter = 2000
 let laplace = false
 let conv_threshold = 0.01
 
@@ -187,9 +170,7 @@ module LGS = struct
       let pre_sig = Maths.((x *@ theta._U_f) + theta._b_f) in
       let f_t = Maths.sigmoid pre_sig in
       Maths.einsum [ f_t, "ma"; theta._W, "ba" ] "mba"
-    | None ->
-      Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.b; Dims.a ]
-      |> Maths.const
+    | None -> Tensor.zeros ~device ~kind [ batch_size; b; a ] |> Maths.const
 
   let _Fx ~x ~u (theta : P.M.t) =
     match x, u with
@@ -205,7 +186,7 @@ module LGS = struct
         tmp_einsum2 theta._U_f tmp
       in
       let term3 =
-        let tmp1 = Maths.diag_embed Maths.(f_t) ~offset:0 ~dim1:(-2) ~dim2:(-1) in
+        let tmp1 = Maths.diag_embed f_t ~offset:0 ~dim1:(-2) ~dim2:(-1) in
         let tmp2 = tmp_einsum2 theta._U_f (d_sigmoid pre_sig) in
         let tmp3 = tmp_einsum2 theta._U_h (d_soft_relu pre_g) in
         let tmp4 = Maths.einsum [ tmp3, "mab"; Maths.(tmp2 + tmp1), "mbc" ] "mac" in
@@ -213,9 +194,7 @@ module LGS = struct
       in
       let final = Maths.(term1 + term2 + term3) in
       final
-    | _ ->
-      Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a; Dims.a ]
-      |> Maths.const
+    | _ -> Tensor.zeros ~device ~kind [ batch_size; a; a ] |> Maths.const
 
   (* rollout x list under sampled u *)
   let rollout_one_step ~x ~u (theta : P.M.t) =
@@ -308,8 +287,7 @@ module LGS = struct
         theta._cov_u |> sqr_inv |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
       in
       let _Cuu_batched =
-        List.init Dims.m ~f:(fun _ ->
-          Maths.reshape _cov_u_inv ~shape:[ 1; Dims.b; Dims.b ])
+        List.init batch_size ~f:(fun _ -> Maths.reshape _cov_u_inv ~shape:[ 1; b; b ])
         |> Maths.concat_list ~dim:0
       in
       let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 in
@@ -319,7 +297,7 @@ module LGS = struct
         Maths.(tmp *@ c_trans)
       in
       let _Cxx_batched =
-        List.init Dims.m ~f:(fun _ -> Maths.reshape _Cxx ~shape:[ 1; Dims.a; Dims.a ])
+        List.init batch_size ~f:(fun _ -> Maths.reshape _Cxx ~shape:[ 1; a; a ])
         |> Maths.concat_list ~dim:0
       in
       let _cx_common =
@@ -348,40 +326,37 @@ module LGS = struct
       Lds_data.map_naive tmp_list ~batch_const:false
     in
     let u_init =
-      List.init Dims.tmax ~f:(fun _ ->
-        let rand = Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.b ] in
+      List.init tmax ~f:(fun _ ->
+        let rand = Tensor.randn ~device ~kind [ batch_size; b ] in
         Maths.const rand)
     in
     let tau_init = rollout_sol ~u_list:u_init ~x0 theta in
     (* TODO: is there a more elegant way? Currently I need to set batch_const to false since _Fx and _Fu has batch dim. *)
     (* use lqr to obtain the optimal u *)
     let f_theta = rollout_one_step theta in
-    let sol, u_cov_list =
+    let sol, _ =
       Ilqr._isolve
         ~laplace
+        ~f_theta
         ~batch_const:false
         ~cost_func
         ~params_func
         ~conv_threshold
         ~tau_init
-        ~f_theta
     in
     let optimal_u_list = List.map sol ~f:(fun s -> s.u |> Option.value_exn) in
     (* sample u from the kronecker formation *)
     let u_list =
       let optimal_u = concat_time optimal_u_list in
-      let xi =
-        Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.b; Dims.tmax ]
-        |> Maths.const
-      in
+      let xi = Tensor.randn ~device ~kind [ batch_size; b; tmax ] |> Maths.const in
       let _chol_space = Maths.abs theta._cov_space in
       let _chol_time = Maths.abs theta._cov_time in
       let xi_space = Maths.einsum [ xi, "mbt"; _chol_space, "b" ] "mbt" in
       let xi_time = Maths.einsum [ xi_space, "mat"; _chol_time, "t" ] "mat" in
       let meaned = Maths.(xi_time + optimal_u) in
-      List.init Dims.tmax ~f:(fun i ->
+      List.init tmax ~f:(fun i ->
         Maths.slice ~dim:2 ~start:(Some i) ~end_:(Some (i + 1)) ~step:1 meaned
-        |> Maths.reshape ~shape:[ Dims.m; Dims.b ])
+        |> Maths.reshape ~shape:[ batch_size; b ])
     in
     optimal_u_list, u_list
 
@@ -396,7 +371,7 @@ module LGS = struct
     let cov_term = Maths.(2. $* sum (log (abs g_cov))) |> Maths.reshape ~shape:[ 1; 1 ] in
     let const_term =
       let o = x |> Maths.primal |> Tensor.shape |> List.last_exn in
-      Tensor.of_float0 ~device:Dims.device Float.(log (2. * pi) * of_int o)
+      Tensor.of_float0 ~device Float.(log (2. * pi) * of_int o)
       |> Tensor.reshape ~shape:[ 1; 1 ]
       |> Maths.const
     in
@@ -436,8 +411,8 @@ module LGS = struct
           |> Option.value_exn
         in
         let entropy =
-          let u = concat_time u_list |> Maths.reshape ~shape:[ Dims.m; -1 ] in
-          let optimal_u = Maths.reshape optimal_u ~shape:[ Dims.m; -1 ] in
+          let u = concat_time u_list |> Maths.reshape ~shape:[ batch_size; -1 ] in
+          let optimal_u = Maths.reshape optimal_u ~shape:[ batch_size; -1 ] in
           let g_cov = Maths.kron theta._cov_space theta._cov_time in
           gaussian_llh ~g_mean:optimal_u ~g_cov ~x:u
         in
@@ -446,10 +421,8 @@ module LGS = struct
         (* M2: calculate the kl term analytically *)
         let cov2 = Maths.kron theta._cov_space theta._cov_time in
         let det1 = Maths.(2. $* sum (log (abs cov2))) in
-        let det2 =
-          Maths.(Float.(2. * of_int Dims.tmax) $* sum (log (abs theta._cov_u)))
-        in
-        let _const = Tensor.of_float0 (Float.of_int Dims.b) |> Maths.const in
+        let det2 = Maths.(Float.(2. * of_int tmax) $* sum (log (abs theta._cov_u))) in
+        let _const = Tensor.of_float0 (Float.of_int b) |> Maths.const in
         let tr =
           let tmp1 = theta._cov_u |> sqr_inv in
           let tmp2 = Maths.(tmp1 * sqr theta._cov_space) in
@@ -486,87 +459,46 @@ module LGS = struct
       u init (Some (neg_elbo, Some ggn))
 
   let init : P.tagged =
+    let _device = device in
+    let _kind = kind in
     let _U_f =
-      Convenience.gaussian_tensor_2d_normed
-        ~device:Dims.device
-        ~kind:Dims.kind
-        ~a:Dims.a
-        ~b:Dims.a
-        ~sigma:0.1
-      |> Prms.free
+      Convenience.gaussian_tensor_2d_normed ~device ~kind ~a ~b:a ~sigma:0.1 |> Prms.free
     in
     let _U_h =
-      Convenience.gaussian_tensor_2d_normed
-        ~device:Dims.device
-        ~kind:Dims.kind
-        ~a:Dims.a
-        ~b:Dims.a
-        ~sigma:0.1
-      |> Prms.free
+      Convenience.gaussian_tensor_2d_normed ~device ~kind ~a ~b:a ~sigma:0.1 |> Prms.free
     in
     let _b_f =
-      Convenience.gaussian_tensor_2d_normed
-        ~device:Dims.device
-        ~kind:Dims.kind
-        ~a:1
-        ~b:Dims.a
-        ~sigma:0.1
+      Convenience.gaussian_tensor_2d_normed ~device ~kind ~a:1 ~b:a ~sigma:0.1
       |> Prms.free
     in
     let _b_h =
-      Convenience.gaussian_tensor_2d_normed
-        ~device:Dims.device
-        ~kind:Dims.kind
-        ~a:1
-        ~b:Dims.a
-        ~sigma:0.1
+      Convenience.gaussian_tensor_2d_normed ~device ~kind ~a:1 ~b:a ~sigma:0.1
       |> Prms.free
     in
     let _W =
-      Convenience.gaussian_tensor_2d_normed
-        ~device:Dims.device
-        ~kind:Dims.kind
-        ~a:Dims.b
-        ~b:Dims.a
-        ~sigma:0.1
+      Convenience.gaussian_tensor_2d_normed ~device ~kind ~a:b ~b:a ~sigma:0.1
       |> Prms.free
     in
     let _c =
-      Convenience.gaussian_tensor_2d_normed
-        ~device:Dims.device
-        ~kind:Dims.kind
-        ~a:Dims.a
-        ~b:Dims.o
-        ~sigma:1.
-      |> Prms.free
+      Convenience.gaussian_tensor_2d_normed ~device ~kind ~a ~b:a ~sigma:1. |> Prms.free
     in
     let _b =
-      Convenience.gaussian_tensor_2d_normed
-        ~device:Dims.device
-        ~kind:Dims.kind
-        ~a:1
-        ~b:Dims.o
-        ~sigma:1.
-      |> Prms.free
+      Convenience.gaussian_tensor_2d_normed ~device ~kind ~a:1 ~b:a ~sigma:1. |> Prms.free
     in
     let _cov_o =
-      Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) (Scalar.f 0.1))
+      Tensor.(mul_scalar (ones ~device:_device ~kind:_kind [ a ]) (Scalar.f 0.1))
       |> Prms.free
     in
     let _cov_u =
-      Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
+      Tensor.(mul_scalar (ones ~device:_device ~kind:_kind [ b ]) (Scalar.f 0.1))
       |> Prms.free
     in
     let _cov_space =
-      Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
+      Tensor.(mul_scalar (ones ~device:_device ~kind:_kind [ b ]) (Scalar.f 0.1))
       |> Prms.free
     in
     let _cov_time =
-      Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) (Scalar.f 0.1))
+      Tensor.(mul_scalar (ones ~device:_device ~kind:_kind [ tmax ]) (Scalar.f 0.1))
       |> Prms.free
     in
     { _U_f; _U_h; _b_f; _b_h; _W; _c; _b; _cov_o; _cov_u; _cov_space; _cov_time }
@@ -589,11 +521,11 @@ module LGS = struct
     o_error
 end
 
-let config ~base_lr ~gamma ~iter:_ =
+(* let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
-    ; n_tangents = 256
+    ; n_tangents = 128
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
@@ -601,20 +533,26 @@ let config ~base_lr ~gamma ~iter:_ =
     ; perturb_thresh = None
     }
 
-module O = Optimizer.SOFO (LGS)
+module O = Optimizer.SOFO (LGS) *)
 
-(* let config ~base_lr ~gamma:_ ~iter:_ =
-  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr } *)
+let config ~base_lr ~gamma:_ ~iter:_ =
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
 
-(* module O = Optimizer.Adam (LGS) *)
+module O = Optimizer.Adam (LGS)
 
-let optimise ~max_iter ~f_name ~init config_f =
+let optimise ~f_name ~init config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
     Stdlib.Gc.major ();
+    let e = epoch_of iter in
     let config = config_f ~iter in
     let data =
-      let _, _, o_list = sample_data () in
-      x0, o_list
+      let trajectory = train_data_batch batch_size in
+      ( x0
+      , List.map trajectory ~f:(fun x ->
+          let x =
+            Tensor.of_bigarray ~device:base.device x |> Tensor.to_type ~type_:kind
+          in
+          x) )
     in
     let t0 = Unix.gettimeofday () in
     let loss, new_state = O.step ~config ~state ~data ~args:() in
@@ -631,35 +569,39 @@ let optimise ~max_iter ~f_name ~init config_f =
       then (
         (* simulation error *)
         let o_error =
-          let _, _, o_list = sample_data () in
-          let data = x0, o_list in
+          let data =
+            let trajectory = train_data_batch batch_size in
+            ( x0
+            , List.map trajectory ~f:(fun x ->
+                let x =
+                  Tensor.of_bigarray ~device:base.device x |> Tensor.to_type ~type_:kind
+                in
+                x) )
+          in
           LGS.simulate ~theta:(LGS.P.const (LGS.P.value (O.params new_state))) ~data
         in
         (* avg error *)
-        Convenience.print [%message (iter : int) (loss_avg : float)];
-        let t = iter in
+        Convenience.print [%message (e : float) (loss_avg : float)];
         Owl.Mat.(
           save_txt
             ~append:true
             ~out:(in_dir f_name)
-            (of_array [| Float.of_int t; time_elapsed; loss_avg; o_error |] 1 4));
+            (of_array [| e; time_elapsed; loss_avg; o_error |] 1 4));
         O.W.P.T.save
           (LGS.P.value (O.params new_state))
           ~kind:base.ba_kind
           ~out:(in_dir f_name ^ "_params"));
       []
     in
-    if iter < max_iter
+    if iter < num_train_loops
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
-
-(* let checkpoint_name = Some "lgs_elbo_sofo_lr_0.01_damp_0.1" *)
-
-let checkpoint_name = None
-let lr_rates = [ 0.01 ]
-let damping_list = [ Some 0.1 ]
+  loop ~iter:0 ~state:(O.init init) ~time_elapsed:0. []
+(*
+   let checkpoint_name = None
+let lr_rates = [  0.1; 0.05; 0.01 ]
+let damping_list = [ Some 1e-1 ]
 let meth = "sofo"
 
 let _ =
@@ -671,21 +613,15 @@ let _ =
         match checkpoint_name with
         | None ->
           ( LGS.(init)
-          , sprintf
-              "lgs_elbo_%s_lr_%s_damp_%s_perturbed"
-              meth
-              (Float.to_string eta)
-              gamma_name )
+          , sprintf "lorenz_elbo_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name )
         | Some checkpoint_name ->
-          let params_ba =
-            O.W.P.T.load ~device:Dims.device (in_dir checkpoint_name ^ "_params")
-          in
+          let params_ba = O.W.P.T.load ~device (in_dir checkpoint_name ^ "_params") in
           ( LGS.P.map params_ba ~f:(fun x ->
               (* randomly perturb to escape local minimum *)
               let x_perturbed = Tensor.(x + mul_scalar (rand_like x) (Scalar.f 0.01)) in
               Prms.free x_perturbed)
           , sprintf
-              "lgs_elbo_%s_lr_%s_damp_%s_%s"
+              "lorenz_elbo_%s_lr_%s_damp_%s_%s"
               meth
               (Float.to_string eta)
               gamma_name
@@ -693,9 +629,10 @@ let _ =
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name ~init config_f))
+      optimise ~f_name ~init config_f)) *)
 
-(* let lr_rates = [ 0.1 ]
+let checkpoint_name = None
+let lr_rates = [ 0.001; 0.0005; 0.0001 ]
 let meth = "adam"
 
 let _ =
@@ -703,12 +640,12 @@ let _ =
     let config_f = config ~base_lr:eta ~gamma:None in
     let init, f_name =
       match checkpoint_name with
-      | None -> LGS.(init), sprintf "lgs_elbo_%s_lr_%s" meth (Float.to_string eta)
+      | None -> LGS.(init), sprintf "lorenz_elbo_%s_lr_%s" meth (Float.to_string eta)
       | Some checkpoint_name ->
-        let params_ba = O.W.P.T.load ~device:Dims.device (in_dir checkpoint_name ^ "_params") in
+        let params_ba = O.W.P.T.load ~device (in_dir checkpoint_name ^ "_params") in
         ( LGS.P.map params_ba ~f:(fun x -> Prms.free x)
-        , sprintf "lgs_elbo_%s_lr_%s_%s" meth (Float.to_string eta) checkpoint_name )
+        , sprintf "lorenz_elbo_%s_lr_%s_%s" meth (Float.to_string eta) checkpoint_name )
     in
-      Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
-      Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name ~init config_f) *)
+    Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
+    Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
+    optimise ~f_name ~init config_f)

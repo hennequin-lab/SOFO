@@ -4,6 +4,7 @@ open Lqr
 val _isolve
   :  ?batch_const:bool
   -> ?laplace:bool
+  -> f_theta:(x:Maths.t -> u:Maths.t -> Maths.t)
   -> cost_func:
        (batch_const:bool
         -> Maths.t option Solution.p list
