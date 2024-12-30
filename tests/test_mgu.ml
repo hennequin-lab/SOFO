@@ -8,7 +8,7 @@ module Linalg = Owl.Linalg.D
 open Lqr_common
 
 let epsilon = 1e-3
-let rel_tol = Alcotest.float 1e-4
+let rel_tol = Alcotest.float 1e-3
 let n_tests = 10
 
 (* state and control dims *)
@@ -88,7 +88,7 @@ let x = Tensor.ones [ a; 1 ]
 let u = Tensor.ones [ b; 1 ]
 
 (* test partial f/partial u or partial f/partial x on the idx-th element of u/x *)
-let test_Fz ~idx ~test_x =
+let test_Fz ~idx ~test_x () =
   let _Fz_finite =
     let dz = if test_x then Tensor.zeros_like x else Tensor.zeros_like u in
     Tensor.set_float2 dz idx 0 1.;
@@ -109,6 +109,18 @@ let test_Fz ~idx ~test_x =
     let tmp = if test_x then _Fx ~x ~u theta_eg else _Fu ~x theta_eg in
     Tensor.slice tmp ~dim:1 ~start:(Some idx) ~end_:(Some (idx + 1)) ~step:1
   in
-  Tensor.(print (norm (_Fz_finite - _Fz_analytic) / norm _Fz_finite))
+  let diff =
+    Tensor.(norm (_Fz_finite - _Fz_analytic) / norm _Fz_finite) |> Tensor.to_float0_exn
+  in
+  Alcotest.(check @@ rel_tol) "LQR test" 0.0 diff
 
-let _ = test_Fz ~idx:6 ~test_x:true
+let () =
+  Alcotest.run
+    "MGU tests"
+    [ ( "fx"
+      , List.init n_tests ~f:(fun _ ->
+          Alcotest.test_case "Fx" `Quick (test_Fz ~idx:(Random.int a) ~test_x:true)) )
+    ; ( "fu"
+      , List.init n_tests ~f:(fun _ ->
+          Alcotest.test_case "Fu" `Quick (test_Fz ~idx:(Random.int b) ~test_x:false)) )
+    ]

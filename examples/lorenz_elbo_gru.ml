@@ -25,7 +25,7 @@ let a = 3
 (* control dim *)
 let b = 1
 let batch_size = 128
-let num_epochs_to_run = 2000
+let num_epochs_to_run = 500
 let tmax = 33
 let train_data = Arr.load_npy (in_dir "lorenz_train")
 
@@ -521,7 +521,7 @@ module LGS = struct
     o_error
 end
 
-(* let config ~base_lr ~gamma ~iter:_ =
+let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
@@ -533,12 +533,12 @@ end
     ; perturb_thresh = None
     }
 
-module O = Optimizer.SOFO (LGS) *)
+module O = Optimizer.SOFO (LGS)
 
-let config ~base_lr ~gamma:_ ~iter:_ =
+(* let config ~base_lr ~gamma:_ ~iter:_ =
   Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
 
-module O = Optimizer.Adam (LGS)
+module O = Optimizer.Adam (LGS) *)
 
 let optimise ~f_name ~init config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -597,11 +597,11 @@ let optimise ~f_name ~init config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init init) ~time_elapsed:0. []
-(*
-   let checkpoint_name = None
-let lr_rates = [  0.1; 0.05; 0.01 ]
-let damping_list = [ Some 1e-1 ]
+  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
+
+let checkpoint_name = None
+let lr_rates = [ 1e-5; 1e-4 ]
+let damping_list = [ Some 1e-5 ]
 let meth = "sofo"
 
 let _ =
@@ -629,10 +629,10 @@ let _ =
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~f_name ~init config_f)) *)
+      optimise ~f_name ~init config_f))
 
-let checkpoint_name = None
-let lr_rates = [ 0.001; 0.0005; 0.0001 ]
+(* let checkpoint_name = None
+let lr_rates = [ 0.001; 0.0005]
 let meth = "adam"
 
 let _ =
@@ -648,4 +648,4 @@ let _ =
     in
     Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
     Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~f_name ~init config_f)
+    optimise ~f_name ~init config_f) *)
