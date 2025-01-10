@@ -102,7 +102,7 @@ module type T = sig
   val value : tagged -> T.t
   val primal : M.t -> T.t
   val tangent : M.t -> T.t
-  val make_dual : T.t -> t:Maths.tangent p -> M.t
+  val make_dual : tagged -> t:Maths.tangent p -> M.t
 
   module Let_syntax : sig
     (** This module lifts the {!Let_syntax} module for the [t] type to the [t p] type. *)

@@ -169,7 +169,12 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
     try map x ~f:(fun x -> Option.value_exn (Maths.tangent x)) with
     | _ -> raise Maths.Not_a_dual_number
 
-  let make_dual x ~t = map2 x t ~f:(fun x t -> Maths.make_dual x ~t)
+  let make_dual x ~t =
+    map2 x t ~f:(fun x t ->
+      match x with
+      | Const x -> Maths.const x
+      | Free x -> Maths.make_dual x ~t
+      | Bounded (x, _, _) -> Maths.make_dual x ~t)
 
   module M = struct
     type t = Maths.t p

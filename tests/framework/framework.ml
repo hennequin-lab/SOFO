@@ -11,7 +11,9 @@ module Make (P : Prms.T) (O : Prms.T) = struct
     let dot_prod_1, v, w =
       (* samples v where it has one extra dimension in front of size k *)
       let v = P.T.gaussian_like_k ~k p in
-      let p = P.make_dual p ~t:(P.map v ~f:(fun v -> Maths.Direct v)) in
+      let p =
+        P.make_dual (P.map p ~f:Prms.free) ~t:(P.map v ~f:(fun v -> Maths.Direct v))
+      in
       let o = f p in
       let w = O.T.gaussian_like (O.primal o) in
       let o = O.tangent o in
