@@ -29,13 +29,14 @@ module Data = Lds_data.Make_LDS_Tensor (Dims)
 let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
 
 (* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
+let cov = Data.sample_output_cov ()
 
 let f_list : Tensor.t Lds_data.f_params list =
   let _Fx = Data.sample_fx () in
   let _Fu = Data.sample_fu () in
   let c = Data.sample_c () in
   let b = Data.sample_b () in
-  let cov = Data.sample_output_cov () in
+  (* let cov = Data.sample_output_cov () in *)
   List.init (Dims.tmax + 1) ~f:(fun _ ->
     Lds_data.
       { _Fx_prod = _Fx
@@ -46,10 +47,12 @@ let f_list : Tensor.t Lds_data.f_params list =
       ; _cov = Some cov
       })
 
+let _cov_u = Tensor.eye ~n:Dims.b ~options:(Dims.kind, Dims.device)
+
 let sample_data () =
   (* generate ground truth params and data *)
   let u_list =
-    let _cov_u = Tensor.eye ~n:Dims.b ~options:(Dims.kind, Dims.device) in
+    (* let _cov_u = Tensor.eye ~n:Dims.b ~options:(Dims.kind, Dims.device) in *)
     Data.sample_u_list ~cov_u:_cov_u
   in
   let x_list, o_list = Data.traj_rollout ~x0 ~f_list ~u_list in
@@ -335,6 +338,7 @@ module LGS = struct
       let ggn = L.vtgt_hessian_gv ~rolled_out_x_list:x_except_first ~u_list theta in
       u init (Some (neg_elbo, Some ggn))
 
+  (* TODO: here we only learn _Fx, _Fu, _c and _b *)
   let init : P.tagged =
     let _Fx_prod =
       Convenience.gaussian_tensor_2d_normed
@@ -372,16 +376,16 @@ module LGS = struct
         ~sigma:1.
       |> Prms.free
     in
-    let _cov_o =
-      Tensor.(
+    let _cov_o = Tensor.diag ~diagonal:0 (Tensor.sqrt cov) |> Prms.const in
+    (* Tensor.(
         mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) (Scalar.f 0.1))
       |> Prms.free
-    in
-    let _cov_u =
-      Tensor.(
+    in *)
+    let _cov_u = Tensor.diag ~diagonal:0 (Tensor.sqrt _cov_u) |> Prms.const in
+    (* Tensor.(
         mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
       |> Prms.free
-    in
+    in *)
     let _cov_space =
       Tensor.(
         mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
@@ -412,11 +416,11 @@ module LGS = struct
     o_error
 end
 
-let config ~base_lr ~gamma ~iter:_ =
+(* let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
-    ; n_tangents = 256
+    ; n_tangents = 128
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
@@ -424,12 +428,12 @@ let config ~base_lr ~gamma ~iter:_ =
     ; perturb_thresh = None
     }
 
-module O = Optimizer.SOFO (LGS)
+module O = Optimizer.SOFO (LGS) *)
 
-(* let config ~base_lr ~gamma:_ ~iter:_ =
-  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr } *)
+let config ~base_lr ~gamma:_ ~iter:_ =
+  Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
 
-(* module O = Optimizer.Adam (LGS) *)
+module O = Optimizer.Adam (LGS)
 
 let optimise ~max_iter ~f_name ~init config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -476,13 +480,13 @@ let optimise ~max_iter ~f_name ~init config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init init) ~time_elapsed:0. []
 
 (* let checkpoint_name = Some "lgs_elbo_sofo_lr_0.01_damp_0.1" *)
 
-let checkpoint_name = None
-let lr_rates = [ 0.01 ]
-let damping_list = [ Some 0.1 ]
+(* let checkpoint_name = None
+let lr_rates = [ 10. ]
+let damping_list = [ Some 1e-3 ]
 let meth = "sofo"
 
 let _ =
@@ -516,9 +520,9 @@ let _ =
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name ~init config_f))
-
-(* let lr_rates = [ 0.1 ]
+      optimise ~max_iter ~f_name ~init config_f)) *)
+let checkpoint_name = None
+let lr_rates = [ 0.01 ]
 let meth = "adam"
 
 let _ =
@@ -528,10 +532,12 @@ let _ =
       match checkpoint_name with
       | None -> LGS.(init), sprintf "lgs_elbo_%s_lr_%s" meth (Float.to_string eta)
       | Some checkpoint_name ->
-        let params_ba = O.W.P.T.load ~device:Dims.device (in_dir checkpoint_name ^ "_params") in
+        let params_ba =
+          O.W.P.T.load ~device:Dims.device (in_dir checkpoint_name ^ "_params")
+        in
         ( LGS.P.map params_ba ~f:(fun x -> Prms.free x)
         , sprintf "lgs_elbo_%s_lr_%s_%s" meth (Float.to_string eta) checkpoint_name )
     in
-      Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
-      Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name ~init config_f) *)
+    Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
+    Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
+    optimise ~max_iter ~f_name ~init config_f)

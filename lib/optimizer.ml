@@ -90,7 +90,11 @@ module SOFO (W : Wrapper.T) = struct
   let init_tangents ~base ~rank_one ~n_tangents theta =
     let vs =
       W.P.map theta ~f:(function
-        | Prms.Const _ -> Tensor.f 0.
+        | Prms.Const x ->
+          Tensor.zeros
+            ~device:(Tensor.device x)
+            ~kind:(Tensor.kind x)
+            (n_tangents :: Tensor.shape x)
         | Prms.Free x ->
           sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
         | Prms.Bounded (x, _, _) ->
@@ -201,7 +205,7 @@ module SOFO (W : Wrapper.T) = struct
         (* levenberg-marquardt *)
         let lm =
           (* use natural_g_tmp for a forward pass *)
-          let theta_tmp = W.P.value (update_theta ?learning_rate ~theta natural_g_tmp) in
+          let theta_tmp = update_theta ?learning_rate ~theta natural_g_tmp in
           (* loss after updating *)
           let vs_tmp =
             init_tangents
@@ -236,7 +240,7 @@ module SOFO (W : Wrapper.T) = struct
             in
             let tmp2 =
               let vanilla_g_tmp =
-                let num_params = Float.(of_int (W.P.T.numel theta_tmp)) in
+                let num_params = Float.(of_int (W.P.T.numel (W.P.value theta_tmp))) in
                 let weights =
                   Tensor.(
                     div_scalar
@@ -341,7 +345,11 @@ module FGD (W : Wrapper.T) = struct
   let init_tangents ~base ~rank_one ~n_tangents theta =
     let vs =
       W.P.map theta ~f:(function
-        | Prms.Const _ -> Tensor.f 0.
+        | Prms.Const x ->
+          Tensor.zeros
+            ~device:(Tensor.device x)
+            ~kind:(Tensor.kind x)
+            (n_tangents :: Tensor.shape x)
         | Prms.Free x ->
           sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
         | Prms.Bounded (x, _, _) ->
