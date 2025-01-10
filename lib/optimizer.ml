@@ -87,10 +87,14 @@ module SOFO (W : Wrapper.T) = struct
     }
 
   (* initialise tangents, where each tangent is normalised. *)
-  let init_tangents ~base ~rank_one ~n_tangents theta_ =
+  let init_tangents ~base ~rank_one ~n_tangents theta =
     let vs =
-      W.P.map theta_ ~f:(fun x ->
-        sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
+      W.P.map theta ~f:(function
+        | Prms.Const _ -> Tensor.f 0.
+        | Prms.Free x ->
+          sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
+        | Prms.Bounded (x, _, _) ->
+          sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
     in
     (* normalise each tangent *)
     let normalize vs =
@@ -158,15 +162,14 @@ module SOFO (W : Wrapper.T) = struct
     in
     (* initialise tangents *)
     let theta = params state in
-    let theta_ = W.P.value (theta : W.P.tagged) in
     let vs =
       init_tangents
         ~base:config.base
         ~rank_one:config.rank_one
         ~n_tangents:config.n_tangents
-        theta_
+        theta
     in
-    let theta_dual = W.P.make_dual theta_ ~t:vs in
+    let theta_dual = W.P.make_dual theta ~t:vs in
     (* define update function *)
     let update = `loss_and_ggn update_each_step in
     (* initialise losses and ggn *)
@@ -335,10 +338,14 @@ module FGD (W : Wrapper.T) = struct
     { theta; g_avg = None; beta_t = Option.map config.momentum ~f:(fun _ -> 1.) }
 
   (* initialise tangents, where each tangent is normalised. *)
-  let init_tangents ~base ~rank_one ~n_tangents theta_ =
+  let init_tangents ~base ~rank_one ~n_tangents theta =
     let vs =
-      W.P.map theta_ ~f:(fun x ->
-        sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
+      W.P.map theta ~f:(function
+        | Prms.Const _ -> Tensor.f 0.
+        | Prms.Free x ->
+          sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
+        | Prms.Bounded (x, _, _) ->
+          sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
     in
     (* normalise each tangent *)
     let normalize vs =
@@ -389,15 +396,14 @@ module FGD (W : Wrapper.T) = struct
     in
     (* initialise tangents *)
     let theta = params state in
-    let theta_ = W.P.value (theta : W.P.tagged) in
     let vs =
       init_tangents
         ~base:config.base
         ~rank_one:config.rank_one
         ~n_tangents:config.n_tangents
-        theta_
+        theta
     in
-    let theta_dual = W.P.make_dual theta_ ~t:vs in
+    let theta_dual = W.P.make_dual theta ~t:vs in
     (* define update function *)
     let update = `loss_and_ggn update_each_step in
     (* initialise losses and ggn *)
@@ -416,7 +422,7 @@ module FGD (W : Wrapper.T) = struct
           ~keepdim:true)
       (* calculate vanilla g *)
     in
-    let num_params = Float.(of_int (W.P.T.numel theta_)) in
+    let num_params = Float.(of_int (W.P.T.numel (W.P.value theta))) in
     let vanilla_g =
       let weights =
         Tensor.(
