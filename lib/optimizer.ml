@@ -83,7 +83,11 @@ module SOFO (W : Wrapper.T) = struct
   let init_tangents ~base ~rank_one ~n_tangents theta =
     let vs =
       W.P.map theta ~f:(function
-        | Prms.Const _ -> Tensor.f 0.
+        | Prms.Const x ->
+          Tensor.zeros
+            ~device:(Tensor.device x)
+            ~kind:(Tensor.kind x)
+            (n_tangents :: Tensor.shape x)
         | Prms.Free x ->
           sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
         | Prms.Bounded (x, _, _) ->
@@ -219,7 +223,11 @@ module FGD (W : Wrapper.T) = struct
   let init_tangents ~base ~rank_one ~n_tangents theta =
     let vs =
       W.P.map theta ~f:(function
-        | Prms.Const _ -> Tensor.f 0.
+        | Prms.Const x ->
+          Tensor.zeros
+            ~device:(Tensor.device x)
+            ~kind:(Tensor.kind x)
+            (n_tangents :: Tensor.shape x)
         | Prms.Free x ->
           sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
         | Prms.Bounded (x, _, _) ->
