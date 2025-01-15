@@ -204,7 +204,10 @@ module LGS = struct
       { x0 = Some x0
       ; params =
           List.map o_list_tmp ~f:(fun o ->
-            let _cx = Maths.(_cx_common - (const o *@ c_trans)) in
+            let _cx =
+              let tmp = Maths.(einsum [ const o, "ab"; _cov_o_inv, "b" ] "ab") in
+              Maths.(_cx_common - (tmp *@ c_trans))
+            in
             Lds_data.Temp.
               { _f = None
               ; _Fx_prod = theta.gen._Fx_prod

@@ -14,11 +14,11 @@ let _ =
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
 module Dims = struct
-  let a = 24
-  let b = 10
-  let o = 48
+  let a = 4
+  let b = 4
+  let o = 8
   let tmax = 10
-  let m = 512
+  let m = 32
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
@@ -31,9 +31,10 @@ let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
 (* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
 (* TODO: cov as identity as the simplest case *)
 let cov = Tensor.eye ~options:(Dims.kind, Dims.device) ~n:Dims.o
-(* let cov = Data.sample_output_cov () *)
 
+(* let cov = Data.sample_output_cov () *)
 let _Fx = Data.sample_fx ()
+let _Fu = Data.sample_fu ()
 let _Fu = Data.sample_fu ()
 let c = Data.sample_c ()
 let b = Data.sample_b ()
@@ -55,7 +56,6 @@ let _cov_u = Tensor.eye ~n:Dims.b ~options:(Dims.kind, Dims.device)
 let sample_data () =
   (* generate ground truth params and data *)
   let u_list = Data.sample_u_list ~cov_u:_cov_u in
-  (* generate ground truth params and data *)
   let x_list, o_list = Data.traj_rollout ~x0 ~f_list ~u_list in
   let o_list = List.map o_list ~f:(fun o -> Option.value_exn o) in
   u_list, x_list, o_list
@@ -79,7 +79,7 @@ let base =
   Optimizer.Config.Base.
     { default with kind = Torch_core.Kind.(T f64); ba_kind = Bigarray.float64 }
 
-let max_iter = 200
+let max_iter = 2000
 let laplace = true
 
 module LGS = struct
@@ -193,7 +193,10 @@ module LGS = struct
       { x0 = Some x0
       ; params =
           List.map o_list_tmp ~f:(fun o ->
-            let _cx = Maths.(_cx_common - (const o *@ c_trans)) in
+            let _cx =
+              let tmp = Maths.(einsum [ const o, "ab"; _cov_o_inv, "b" ] "ab") in
+              Maths.(_cx_common - (tmp *@ c_trans))
+            in
             Lds_data.Temp.
               { _f = None
               ; _Fx_prod = theta._Fx_prod
@@ -227,6 +230,9 @@ module LGS = struct
     in
     let sol, u_cov_list = Lqr._solve ~laplace ~batch_const:Dims.batch_const p in
     let optimal_u_list = List.map sol ~f:(fun s -> s.u) in
+    (* let u_last = List.last_exn optimal_u_list in
+    let u_tan = Maths.tangent u_last |> Option.value_exn in
+    Tensor.print u_tan; *)
     (* sample u from the kronecker formation *)
     let u_list =
       let optimal_u = concat_time optimal_u_list in
@@ -405,29 +411,27 @@ module LGS = struct
     in
     { _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u; _cov_space; _cov_time }
 
+  (* calculate the error between latents *)
   let simulate ~theta ~data =
-    (* infer the optimal u *)
-    let optimal_u_list, _ = pred_u ~data theta in
+    (* rollout under the given u *)
+    let x0, x_list, u_list = data in
     (* rollout to obtain x *)
-    let rolled_out_x_list = rollout_x ~u_list:optimal_u_list ~x0 theta in
-    (* noiseless observation *)
-    let noiseless_o_list =
-      List.map rolled_out_x_list ~f:(fun x -> Maths.((x *@ theta._c) + theta._b))
-      |> List.tl_exn
+    let rolled_out_x_list =
+      rollout_x ~u_list:(List.map u_list ~f:Maths.const) ~x0 theta
     in
-    let o_error =
-      List.fold2_exn noiseless_o_list (snd data) ~init:0. ~f:(fun accu o1 o2 ->
-        let error = Tensor.(norm (Maths.primal o1 - o2)) |> Tensor.to_float0_exn in
+    let error =
+      List.fold2_exn rolled_out_x_list x_list ~init:0. ~f:(fun accu x1 x2 ->
+        let error = Tensor.(norm (Maths.primal x1 - x2)) |> Tensor.to_float0_exn in
         accu +. error)
     in
-    o_error
+    error
 end
 
 (* let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
-    ; n_tangents = 128
+    ; n_tangents = 256
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
@@ -437,10 +441,10 @@ end
 
 module O = Optimizer.SOFO (LGS) *)
 
- let config ~base_lr ~gamma:_ ~iter:_ =
+let config ~base_lr ~gamma:_ ~iter:_ =
   Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
 
-module O = Optimizer.Adam (LGS)  
+module O = Optimizer.Adam (LGS)
 
 let optimise ~max_iter ~f_name ~init config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -489,10 +493,22 @@ let optimise ~max_iter ~f_name ~init config_f =
         in
         (* simulation error *)
         let o_error =
-          let _, _, o_list = sample_data () in
-          let data = x0, o_list in
+          let u_list, x_list, _ = sample_data () in
+          let data = x0, x_list, u_list in
           LGS.simulate ~theta:(LGS.P.const (LGS.P.value (O.params new_state))) ~data
         in
+        (* error between actual Fx and learned Fx *)
+        let _Fx_error =
+          let theta_curr = O.params new_state in
+          let _Fx_learned = theta_curr._Fx_prod |> Prms.value in
+          Tensor.(_Fx - _Fx_learned) |> Tensor.norm |> Tensor.to_float0_exn
+        in
+        let _Fu_error =
+          let theta_curr = O.params new_state in
+          let _Fu_learned = theta_curr._Fu_prod |> Prms.value in
+          Tensor.(_Fu - _Fu_learned) |> Tensor.norm |> Tensor.to_float0_exn
+        in
+        Convenience.print [%message (iter : int) (_Fx_error : float) (_Fu_error : float)];
         (* avg error *)
         Convenience.print [%message (iter : int) (loss_avg : float)];
         let t = iter in
@@ -514,13 +530,12 @@ let optimise ~max_iter ~f_name ~init config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init  init) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init init) ~time_elapsed:0. []
 
 (* let checkpoint_name = Some "lgs_elbo_sofo_lr_0.01_damp_0.1" *)
-
 (* let checkpoint_name = None
 let lr_rates = [ 1. ]
-let damping_list = [ Some 0.1 ]
+let damping_list = [ Some 1e-5 ]
 let meth = "sofo"
 
 let _ =
@@ -551,9 +566,8 @@ let _ =
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
       optimise ~max_iter ~f_name ~init config_f)) *)
-
 let checkpoint_name = None
-let lr_rates = [ 0.1 ]
+let lr_rates = [ 0.01 ]
 let meth = "adam"
 
 let _ =
