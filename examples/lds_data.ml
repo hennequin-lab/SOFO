@@ -676,11 +676,8 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
   let sample_c_u () = sample_tensor [ X.m; X.b ]
   let sample_f () = sample_tensor [ X.m; X.a ]
 
-  let sample_u ~cov_u =
-    let sqrt_u = Tensor.sqrt cov_u in
-    Tensor.(matmul (sample_tensor [ X.m; X.b ]) sqrt_u)
-
-  let sample_u_list ~cov_u = List.init X.tmax ~f:(fun _ -> sample_u ~cov_u)
+  let sample_u_list ~std_u =
+    List.init X.tmax ~f:(fun _ -> Tensor.(sample_tensor [ X.m; X.b ] * std_u))
 
   (* output follows a Gaussian with mean = z c + b and diagonal cov *)
   let sample_c () =

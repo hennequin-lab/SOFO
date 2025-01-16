@@ -33,8 +33,7 @@ let sample_stable ~a =
   in
   Mat.(Float.(0.8 / r) $* a)
 
-(* let _Fx = Tensor.of_bigarray ~device (sample_stable ~a) *)
-let _Fx = Tensor.eye ~options:(kind, device) ~n:a
+let _Fx = Tensor.of_bigarray ~device (sample_stable ~a)
 let _Fu = Tensor.randn ~device ~kind [ b; a ]
 let c = Tensor.randn ~device ~kind [ a; o ]
 
@@ -79,9 +78,7 @@ module LGS = struct
     let o_list_tmp = Tensor.zeros_like (List.hd_exn o_list) :: o_list in
     let _Cxx = Maths.(einsum [ theta._c, "ab"; theta._c, "cb" ] "ac") in
     let _Cuu =
-      (* TODO: what should we set _Cuu as? *)
-      Tensor.(
-        mul_scalar (ones ~device:base.device ~kind:base.kind [ b; b ]) (Scalar.f 0.001))
+      Tensor.(mul_scalar (eye ~options:(base.kind, base.device) ~n:b) (Scalar.f 0.001))
       |> Maths.const
     in
     Lqr.Params.
@@ -163,6 +160,9 @@ module LGS = struct
     let _Fx_prod = Tensor.randn ~device ~kind [ a; a ] |> Prms.free in
     let _Fu_prod = Tensor.randn ~device ~kind [ b; a ] |> Prms.free in
     let _c = Tensor.randn ~device ~kind [ a; o ] |> Prms.free in
+    (* let _Fx_prod = _Fx |> Prms.free in
+    let _Fu_prod = _Fu |> Prms.free in
+    let _c = c |> Prms.free in *)
     { _Fx_prod; _Fu_prod; _c }
 
   let error x y ~reduce_dim_list =
@@ -281,8 +281,7 @@ let _ =
       let gamma_name = Option.value_map gamma ~default:"none" ~f:Float.to_string in
       let init, f_name =
         ( LGS.(init)
-        , sprintf "lgs_elbo_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name
-        )
+        , sprintf "lgs_elbo_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name )
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
@@ -299,4 +298,4 @@ let _ =
     in
     Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
     Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name ~init config_f) *)
+    optimise ~max_iter ~f_name ~init config_f)  *)

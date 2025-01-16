@@ -14,11 +14,11 @@ let _ =
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
 module Dims = struct
-  let a = 4
-  let b = 4
+  let a = 8
+  let b = 8
   let o = 8
   let tmax = 10
-  let m = 32
+  let m = 512
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
@@ -29,18 +29,15 @@ module Data = Lds_data.Make_LDS_Tensor (Dims)
 let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
 
 (* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
-(* TODO: cov as identity as the simplest case *)
-let cov = Tensor.eye ~options:(Dims.kind, Dims.device) ~n:Dims.o
-
-(* let cov = Data.sample_output_cov () *)
+(* TODO: noise cov as identity as the simplest case *)
+let _std_o = Tensor.eye ~options:(Dims.kind, Dims.device) ~n:Dims.o
+let _std_u = Tensor.ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]
 let _Fx = Data.sample_fx ()
-let _Fu = Data.sample_fu ()
 let _Fu = Data.sample_fu ()
 let c = Data.sample_c ()
 let b = Data.sample_b ()
 
 let f_list : Tensor.t Lds_data.f_params list =
-  (* let cov = Data.sample_output_cov () in *)
   List.init (Dims.tmax + 1) ~f:(fun _ ->
     Lds_data.
       { _Fx_prod = _Fx
@@ -48,14 +45,12 @@ let f_list : Tensor.t Lds_data.f_params list =
       ; _f = None
       ; _c = Some c
       ; _b = Some b
-      ; _cov = Some cov
+      ; _cov = Some Tensor.(matmul _std_o (transpose _std_o ~dim0:1 ~dim1:0))
       })
-
-let _cov_u = Tensor.eye ~n:Dims.b ~options:(Dims.kind, Dims.device)
 
 let sample_data () =
   (* generate ground truth params and data *)
-  let u_list = Data.sample_u_list ~cov_u:_cov_u in
+  let u_list = Data.sample_u_list ~std_u:_std_u in
   let x_list, o_list = Data.traj_rollout ~x0 ~f_list ~u_list in
   let o_list = List.map o_list ~f:(fun o -> Option.value_exn o) in
   u_list, x_list, o_list
@@ -80,7 +75,8 @@ let base =
     { default with kind = Torch_core.Kind.(T f64); ba_kind = Bigarray.float64 }
 
 let max_iter = 2000
-let laplace = true
+let laplace = false
+let sample = false
 
 module LGS = struct
   module PP = struct
@@ -89,11 +85,11 @@ module LGS = struct
       ; _Fu_prod : 'a
       ; _c : 'a
       ; _b : 'a
-      ; _cov_o : 'a (* sqrt of the diagonal of covariance of emission noise *)
-      ; _cov_u : 'a (* sqrt of the diagonal of covariance of prior over u *)
-      ; _cov_space : 'a
+      ; _std_o : 'a (* sqrt of the diagonal of covariance of emission noise *)
+      ; _std_u : 'a (* sqrt of the diagonal of covariance of prior over u *)
+      ; _std_space : 'a
         (* recognition model; sqrt of the diagonal of covariance of space factor *)
-      ; _cov_time : 'a (* sqrt of the diagonal of covariance of the time factor *)
+      ; _std_time : 'a (* sqrt of the diagonal of covariance of the time factor *)
       }
     [@@deriving prms]
   end
@@ -127,7 +123,7 @@ module LGS = struct
           Tensor.(accu + increment))
       in
       let llh_ggn =
-        let like_hess = theta._cov_o |> sqr_inv |> Maths.primal in
+        let like_hess = theta._std_o |> sqr_inv |> Maths.primal in
         (* y = cx + b *)
         let y_list =
           List.map rolled_out_x_list ~f:(fun x ->
@@ -136,12 +132,12 @@ module LGS = struct
         ggn_final ~o_list:y_list ~like_hess ~diagonal:true
       in
       let prior_ggn =
-        let like_hess = theta._cov_u |> sqr_inv |> Maths.primal in
+        let like_hess = theta._std_u |> sqr_inv |> Maths.primal in
         ggn_final ~o_list:u_list ~like_hess ~diagonal:true
       in
       let entropy_ggn =
-        let _cov_space_inv = theta._cov_space |> sqr_inv |> Maths.primal in
-        let _cov_time_inv = theta._cov_time |> sqr_inv |> Maths.primal in
+        let _cov_space_inv = theta._std_space |> sqr_inv |> Maths.primal in
+        let _cov_time_inv = theta._std_time |> sqr_inv |> Maths.primal in
         let vtgt =
           let vtgt_list =
             List.map u_list ~f:(fun u ->
@@ -159,7 +155,7 @@ module LGS = struct
         Tensor.einsum ~equation:"kmbt,tbmj->kj" [ tmp1; tmp2 ] ~path:None |> Tensor.neg
       in
       (* TODO: do not include entropy term for now *)
-      let final = Tensor.(llh_ggn + prior_ggn) in
+      let final = Tensor.(div_scalar llh_ggn (Scalar.f (Float.of_int Dims.tmax))) in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false final in
       let final_s =
         final_s
@@ -177,10 +173,10 @@ module LGS = struct
     (* set o at time 0 as 0 *)
     let o_list_tmp = Tensor.zeros_like (List.hd_exn o_list) :: o_list in
     let _cov_u_inv =
-      theta._cov_u |> sqr_inv |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+      theta._std_u |> sqr_inv |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
     in
     let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 in
-    let _cov_o_inv = sqr_inv theta._cov_o in
+    let _cov_o_inv = sqr_inv theta._std_o in
     let _Cxx =
       let tmp = Maths.(einsum [ theta._c, "ab"; _cov_o_inv, "b" ] "ab") in
       Maths.(tmp *@ c_trans)
@@ -222,17 +218,13 @@ module LGS = struct
   (* optimal u determined from lqr *)
   let pred_u ~data (theta : P.M.t) =
     let x0, o_list = data in
-    let x0_tan = Maths.const x0 in
     (* use lqr to obtain the optimal u *)
     let p =
-      params_from_f ~x0:x0_tan ~theta ~o_list
+      params_from_f ~x0:(Maths.const x0) ~theta ~o_list
       |> Lds_data.map_naive ~batch_const:Dims.batch_const
     in
-    let sol, u_cov_list = Lqr._solve ~laplace ~batch_const:Dims.batch_const p in
+    let sol, _ = Lqr._solve ~laplace ~batch_const:Dims.batch_const p in
     let optimal_u_list = List.map sol ~f:(fun s -> s.u) in
-    (* let u_last = List.last_exn optimal_u_list in
-    let u_tan = Maths.tangent u_last |> Option.value_exn in
-    Tensor.print u_tan; *)
     (* sample u from the kronecker formation *)
     let u_list =
       let optimal_u = concat_time optimal_u_list in
@@ -240,8 +232,8 @@ module LGS = struct
         Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.b; Dims.tmax ]
         |> Maths.const
       in
-      let _chol_space = Maths.abs theta._cov_space in
-      let _chol_time = Maths.abs theta._cov_time in
+      let _chol_space = Maths.abs theta._std_space in
+      let _chol_time = Maths.abs theta._std_time in
       let xi_space = Maths.einsum [ xi, "mbt"; _chol_space, "b" ] "mbt" in
       let xi_time = Maths.einsum [ xi_space, "mat"; _chol_time, "t" ] "mat" in
       let meaned = Maths.(xi_time + optimal_u) in
@@ -252,14 +244,14 @@ module LGS = struct
     optimal_u_list, u_list
 
   (* gaussian llh with diagonal covariance *)
-  let gaussian_llh ~g_mean ~g_cov ~x =
-    let g_cov_inv = sqr_inv g_cov in
+  let gaussian_llh ~g_mean ~g_std ~x =
+    let g_cov_inv = sqr_inv g_std in
     let error_term =
       let error = Maths.(x - g_mean) in
       let tmp = Maths.einsum [ error, "ma"; g_cov_inv, "a" ] "ma" in
       Maths.einsum [ tmp, "ma"; error, "ma" ] "m" |> Maths.reshape ~shape:[ -1; 1 ]
     in
-    let cov_term = Maths.(2. $* sum (log (abs g_cov))) |> Maths.reshape ~shape:[ 1; 1 ] in
+    let cov_term = Maths.(2. $* sum (log (abs g_std))) |> Maths.reshape ~shape:[ 1; 1 ] in
     let const_term =
       let o = x |> Maths.primal |> Tensor.shape |> List.last_exn in
       Tensor.of_float0 ~device:Dims.device Float.(log (2. * pi) * of_int o)
@@ -278,7 +270,7 @@ module LGS = struct
         let increment =
           gaussian_llh
             ~g_mean:o
-            ~g_cov:theta._cov_o
+            ~g_std:theta._std_o
             ~x:Maths.(tmp_einsum x theta._c + theta._b)
         in
         match accu with
@@ -295,7 +287,7 @@ module LGS = struct
           List.foldi u_list ~init:None ~f:(fun t accu u ->
             if t % 1 = 0 then Stdlib.Gc.major ();
             let u_zeros = Tensor.zeros_like (Maths.primal u) |> Maths.const in
-            let increment = gaussian_llh ~g_mean:u_zeros ~g_cov:theta._cov_u ~x:u in
+            let increment = gaussian_llh ~g_mean:u_zeros ~g_std:theta._std_u ~x:u in
             match accu with
             | None -> Some increment
             | Some accu -> Some Maths.(accu + increment))
@@ -304,35 +296,34 @@ module LGS = struct
         let entropy =
           let u = concat_time u_list |> Maths.reshape ~shape:[ Dims.m; -1 ] in
           let optimal_u = Maths.reshape optimal_u ~shape:[ Dims.m; -1 ] in
-          let g_cov = Maths.kron theta._cov_space theta._cov_time in
-          gaussian_llh ~g_mean:optimal_u ~g_cov ~x:u
+          let g_std = Maths.kron theta._std_space theta._std_time in
+          gaussian_llh ~g_mean:optimal_u ~g_std ~x:u
         in
         Maths.(entropy - prior))
       else (
         (* M2: calculate the kl term analytically *)
-        let cov2 = Maths.kron theta._cov_space theta._cov_time in
-        let det1 = Maths.(2. $* sum (log (abs cov2))) in
+        let std2 = Maths.kron theta._std_space theta._std_time in
+        let det1 = Maths.(2. $* sum (log (abs std2))) in
         let det2 =
-          Maths.(Float.(2. * of_int Dims.tmax) $* sum (log (abs theta._cov_u)))
+          Maths.(Float.(2. * of_int Dims.tmax) $* sum (log (abs theta._std_u)))
         in
         let _const = Tensor.of_float0 (Float.of_int Dims.b) |> Maths.const in
         let tr =
-          let tmp1 = theta._cov_u |> sqr_inv in
-          let tmp2 = Maths.(tmp1 * sqr theta._cov_space) in
-          let tmp3 = Maths.(kron tmp2 (sqr theta._cov_time)) in
+          let tmp1 = theta._std_u |> sqr_inv in
+          let tmp2 = Maths.(tmp1 * sqr theta._std_space) in
+          let tmp3 = Maths.(kron tmp2 (sqr theta._std_time)) in
           Maths.sum tmp3
         in
         let quad =
-          let _cov_u = theta._cov_u |> sqr_inv in
+          let _cov_u = theta._std_u |> sqr_inv in
           let tmp1 = Maths.einsum [ optimal_u, "mbt"; _cov_u, "b" ] "mbt" in
           Maths.einsum [ tmp1, "mbt"; optimal_u, "mbt" ] "m" |> Maths.unsqueeze ~dim:1
         in
         let tmp = Maths.(det2 - det1 - _const + tr) |> Maths.reshape ~shape:[ 1; 1 ] in
         Maths.(tmp + quad) |> Maths.squeeze ~dim:1)
     in
-    Maths.(llh - kl)
+    Maths.((llh - kl) /$ Float.of_int Dims.tmax)
 
-  (* calculate optimal u *)
   let f ~update ~data ~init ~args:() (theta : P.M.t) =
     let module L = Elbo_loss in
     let x0, o_list = data in
@@ -342,9 +333,7 @@ module LGS = struct
     let o_except_first = List.map o_list ~f:(fun o -> Maths.const o) in
     let x_except_first = List.tl_exn rolled_out_x_list in
     let x_o_list = List.map2_exn x_except_first o_except_first ~f:(fun x o -> x, o) in
-    let neg_elbo =
-      Maths.(neg (elbo ~x_o_list ~u_list ~optimal_u_list theta ~sample:false))
-    in
+    let neg_elbo = Maths.(neg (elbo ~x_o_list ~u_list ~optimal_u_list theta ~sample)) in
     match update with
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
@@ -377,7 +366,7 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:Dims.a
         ~b:Dims.o
-        ~sigma:1.
+        ~sigma:0.1
       |> Prms.free
     in
     let _b =
@@ -386,33 +375,29 @@ module LGS = struct
         ~kind:Dims.kind
         ~a:1
         ~b:Dims.o
-        ~sigma:1.
+        ~sigma:0.1
       |> Prms.free
     in
-    let _cov_o = Tensor.diag ~diagonal:0 (Tensor.sqrt cov) |> Prms.const in
+    let _std_o = Tensor.diag ~diagonal:0 _std_o |> Prms.const in
     (* Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) (Scalar.f 0.1))
+        f 0.1 * (ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]) )
       |> Prms.free
     in *)
-    let _cov_u = Tensor.diag ~diagonal:0 (Tensor.sqrt _cov_u) |> Prms.const in
+    let _std_u = _std_u |> Prms.const in
     (* Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 0.1))
+         f 0.1 * (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]))
       |> Prms.free
     in *)
-    let _cov_space =
-      Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 1.))
-      |> Prms.free
+    let _std_space =
+      Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) |> Prms.free
     in
-    let _cov_time =
-      Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) (Scalar.f 1.))
-      |> Prms.free
+    let _std_time =
+      Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) |> Prms.free
     in
-    { _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u; _cov_space; _cov_time }
+    { _Fx_prod; _Fu_prod; _c; _b; _std_o; _std_u; _std_space; _std_time }
 
   (* calculate the error between latents *)
-  let simulate ~theta ~data =
+  let simulate ~data ~(theta : P.M.t) =
     (* rollout under the given u *)
     let x0, x_list, u_list = data in
     (* rollout to obtain x *)
@@ -424,14 +409,14 @@ module LGS = struct
         let error = Tensor.(norm (Maths.primal x1 - x2)) |> Tensor.to_float0_exn in
         accu +. error)
     in
-    error
+    Float.(error / of_int Dims.tmax)
 end
 
-(* let config ~base_lr ~gamma ~iter:_ =
+let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
-    ; n_tangents = 256
+    ; n_tangents = 128
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
@@ -439,12 +424,12 @@ end
     ; perturb_thresh = None
     }
 
-module O = Optimizer.SOFO (LGS) *)
+module O = Optimizer.SOFO (LGS)
 
-let config ~base_lr ~gamma:_ ~iter:_ =
+(* let config ~base_lr ~gamma:_ ~iter:_ =
   Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
 
-module O = Optimizer.Adam (LGS)
+module O = Optimizer.Adam (LGS)  *)
 
 let optimise ~max_iter ~f_name ~init config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -473,11 +458,11 @@ let optimise ~max_iter ~f_name ~init config_f =
             let _Fu_prod = Maths.const _Fu in
             let _c = Maths.const c in
             let _b = Maths.const b in
-            let _cov_o = Tensor.diag ~diagonal:0 (Tensor.sqrt cov) |> Maths.const in
-            let _cov_u = Tensor.diag ~diagonal:0 (Tensor.sqrt _cov_u) |> Maths.const in
-            let _cov_space = theta_curr._cov_space |> Prms.value |> Maths.const in
-            let _cov_time = theta_curr._cov_time |> Prms.value |> Maths.const in
-            LGS.PP.{ _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u; _cov_space; _cov_time }
+            let _std_o = Tensor.diag ~diagonal:0 _std_o |> Maths.const in
+            let _std_u = _std_u |> Maths.const in
+            let _std_space = theta_curr._std_space |> Prms.value |> Maths.const in
+            let _std_time = theta_curr._std_time |> Prms.value |> Maths.const in
+            LGS.PP.{ _Fx_prod; _Fu_prod; _c; _b; _std_o; _std_u; _std_space; _std_time }
           in
           let u_list = List.map u_list ~f:Maths.const in
           let x_o_list =
@@ -485,11 +470,14 @@ let optimise ~max_iter ~f_name ~init config_f =
             List.map2_exn x_except_first o_list ~f:(fun x o ->
               Maths.const x, Maths.const o)
           in
-          LGS.elbo ~x_o_list ~u_list ~optimal_u_list:u_list ~sample:false theta_true
-          |> Maths.primal
-          |> Tensor.neg
-          |> Tensor.mean
-          |> Tensor.to_float0_exn
+          let elbo_tmp =
+            LGS.elbo ~x_o_list ~u_list ~optimal_u_list:u_list ~sample theta_true
+            |> Maths.primal
+            |> Tensor.neg
+            |> Tensor.mean
+            |> Tensor.to_float0_exn
+          in
+          Float.(elbo_tmp / of_int Dims.tmax)
         in
         (* simulation error *)
         let o_error =
@@ -497,18 +485,6 @@ let optimise ~max_iter ~f_name ~init config_f =
           let data = x0, x_list, u_list in
           LGS.simulate ~theta:(LGS.P.const (LGS.P.value (O.params new_state))) ~data
         in
-        (* error between actual Fx and learned Fx *)
-        let _Fx_error =
-          let theta_curr = O.params new_state in
-          let _Fx_learned = theta_curr._Fx_prod |> Prms.value in
-          Tensor.(_Fx - _Fx_learned) |> Tensor.norm |> Tensor.to_float0_exn
-        in
-        let _Fu_error =
-          let theta_curr = O.params new_state in
-          let _Fu_learned = theta_curr._Fu_prod |> Prms.value in
-          Tensor.(_Fu - _Fu_learned) |> Tensor.norm |> Tensor.to_float0_exn
-        in
-        Convenience.print [%message (iter : int) (_Fx_error : float) (_Fu_error : float)];
         (* avg error *)
         Convenience.print [%message (iter : int) (loss_avg : float)];
         let t = iter in
@@ -530,12 +506,10 @@ let optimise ~max_iter ~f_name ~init config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init init) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
 
-(* let checkpoint_name = Some "lgs_elbo_sofo_lr_0.01_damp_0.1" *)
-(* let checkpoint_name = None
-let lr_rates = [ 1. ]
-let damping_list = [ Some 1e-5 ]
+let lr_rates = [ 1e-4 ]
+let damping_list = [ Some 0.1 ]
 let meth = "sofo"
 
 let _ =
@@ -544,45 +518,27 @@ let _ =
       let config_f = config ~base_lr:eta ~gamma in
       let gamma_name = Option.value_map gamma ~default:"none" ~f:Float.to_string in
       let init, f_name =
-        match checkpoint_name with
-        | None ->
-          ( LGS.(init)
-          , sprintf "lgs_elbo_%s_lr_%s_damp_%s" meth (Float.to_string eta) gamma_name )
-        | Some checkpoint_name ->
-          let params_ba =
-            O.W.P.T.load ~device:Dims.device (in_dir checkpoint_name ^ "_params")
-          in
-          ( LGS.P.map params_ba ~f:(fun x ->
-              (* randomly perturb to escape local minimum *)
-              let x_perturbed = Tensor.(x + mul_scalar (rand_like x) (Scalar.f 0.01)) in
-              Prms.free x_perturbed)
-          , sprintf
-              "lgs_elbo_%s_lr_%s_damp_%s_%s"
-              meth
-              (Float.to_string eta)
-              gamma_name
-              checkpoint_name )
+        ( LGS.(init)
+        , sprintf
+            "lgs_elbo_%s_lr_%s_damp_%s_sample_%s"
+            meth
+            (Float.to_string eta)
+            gamma_name
+            (Bool.to_string sample) )
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name ~init config_f)) *)
-let checkpoint_name = None
-let lr_rates = [ 0.01 ]
+      optimise ~max_iter ~f_name ~init config_f))
+
+(* let lr_rates = [ 0.1 ]
 let meth = "adam"
 
 let _ =
   List.iter lr_rates ~f:(fun eta ->
     let config_f = config ~base_lr:eta ~gamma:None in
     let init, f_name =
-      match checkpoint_name with
-      | None -> LGS.(init), sprintf "lgs_elbo_%s_lr_%s" meth (Float.to_string eta)
-      | Some checkpoint_name ->
-        let params_ba =
-          O.W.P.T.load ~device:Dims.device (in_dir checkpoint_name ^ "_params")
-        in
-        ( LGS.P.map params_ba ~f:(fun x -> Prms.free x)
-        , sprintf "lgs_elbo_%s_lr_%s_%s" meth (Float.to_string eta) checkpoint_name )
+      LGS.(init), sprintf "lgs_elbo_%s_lr_%s_sample_%s" meth (Float.to_string eta) (Bool.to_string sample)
     in
     Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
     Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name ~init config_f)
+    optimise ~max_iter ~f_name ~init config_f) *)
