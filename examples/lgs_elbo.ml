@@ -18,7 +18,7 @@ module Dims = struct
   let b = 8
   let o = 8
   let tmax = 10
-  let m = 512
+  let m = 256
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
@@ -154,8 +154,10 @@ module LGS = struct
         in
         Tensor.einsum ~equation:"kmbt,tbmj->kj" [ tmp1; tmp2 ] ~path:None |> Tensor.neg
       in
-      (* TODO: do not include entropy term for now *)
-      let final = Tensor.(div_scalar llh_ggn (Scalar.f (Float.of_int Dims.tmax))) in
+      (* TODO: do not include entropy term for now -> or should we? *)
+      let final =
+        Tensor.(div_scalar (llh_ggn + prior_ggn- entropy_ggn) (Scalar.f (Float.of_int Dims.tmax)))
+      in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false final in
       let final_s =
         final_s
@@ -307,7 +309,9 @@ module LGS = struct
         let det2 =
           Maths.(Float.(2. * of_int Dims.tmax) $* sum (log (abs theta._std_u)))
         in
-        let _const = Tensor.of_float0 (Float.of_int Dims.b) |> Maths.const in
+        let _const =
+          Tensor.of_float0 (Float.of_int (Dims.b * Dims.tmax)) |> Maths.const
+        in
         let tr =
           let tmp1 = theta._std_u |> sqr_inv in
           let tmp2 = Maths.(tmp1 * sqr theta._std_space) in
@@ -315,8 +319,8 @@ module LGS = struct
           Maths.sum tmp3
         in
         let quad =
-          let _cov_u = theta._std_u |> sqr_inv in
-          let tmp1 = Maths.einsum [ optimal_u, "mbt"; _cov_u, "b" ] "mbt" in
+          let _cov_u_inv = theta._std_u |> sqr_inv in
+          let tmp1 = Maths.einsum [ optimal_u, "mbt"; _cov_u_inv, "b" ] "mbt" in
           Maths.einsum [ tmp1, "mbt"; optimal_u, "mbt" ] "m" |> Maths.unsqueeze ~dim:1
         in
         let tmp = Maths.(det2 - det1 - _const + tr) |> Maths.reshape ~shape:[ 1; 1 ] in
@@ -389,10 +393,10 @@ module LGS = struct
       |> Prms.free
     in *)
     let _std_space =
-      Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) |> Prms.free
+      Tensor.(f 1. * randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) |> Prms.free
     in
     let _std_time =
-      Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) |> Prms.free
+      Tensor.(f 1. * randn ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) |> Prms.free
     in
     { _Fx_prod; _Fu_prod; _c; _b; _std_o; _std_u; _std_space; _std_time }
 
@@ -416,7 +420,7 @@ let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
-    ; n_tangents = 128
+    ; n_tangents = 256
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
@@ -424,12 +428,12 @@ let config ~base_lr ~gamma ~iter:_ =
     ; perturb_thresh = None
     }
 
-module O = Optimizer.SOFO (LGS)
+module O = Optimizer.SOFO (LGS) 
 
 (* let config ~base_lr ~gamma:_ ~iter:_ =
   Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
 
-module O = Optimizer.Adam (LGS)  *)
+module O = Optimizer.Adam (LGS)   *)
 
 let optimise ~max_iter ~f_name ~init config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -506,10 +510,10 @@ let optimise ~max_iter ~f_name ~init config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init  ~config:(config_f ~iter:0)  init) ~time_elapsed:0. []
 
-let lr_rates = [ 1e-4 ]
-let damping_list = [ Some 0.1 ]
+let lr_rates = [5. ]
+let damping_list = [ Some 1e-5 ]
 let meth = "sofo"
 
 let _ =
@@ -528,7 +532,7 @@ let _ =
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name ~init config_f))
+      optimise ~max_iter ~f_name ~init config_f)) 
 
 (* let lr_rates = [ 0.1 ]
 let meth = "adam"
@@ -537,8 +541,13 @@ let _ =
   List.iter lr_rates ~f:(fun eta ->
     let config_f = config ~base_lr:eta ~gamma:None in
     let init, f_name =
-      LGS.(init), sprintf "lgs_elbo_%s_lr_%s_sample_%s" meth (Float.to_string eta) (Bool.to_string sample)
+      ( LGS.(init)
+      , sprintf
+          "lgs_elbo_%s_lr_%s_sample_%s"
+          meth
+          (Float.to_string eta)
+          (Bool.to_string sample) )
     in
     Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
     Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name ~init config_f) *)
+    optimise ~max_iter ~f_name ~init config_f)   *)

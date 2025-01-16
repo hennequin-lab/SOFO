@@ -49,8 +49,8 @@ let f_list : Tensor.t Lds_data.f_params list =
 let sample_data () =
   (* generate ground truth params and data *)
   let u_list =
-    let _cov_u = Tensor.eye ~n:Dims.b ~options:(Dims.kind, Dims.device) in
-    Data.sample_u_list ~cov_u:_cov_u
+    let _std_u = Tensor.ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ] in
+    Data.sample_u_list ~std_u:_std_u
   in
   let x_list, o_list = Data.traj_rollout ~x0 ~f_list ~u_list in
   let o_list = List.map o_list ~f:(fun o -> Option.value_exn o) in
@@ -499,7 +499,7 @@ let config ~base_lr ~gamma ~iter:_ =
     ; perturb_thresh = None
     }
 
-module O = Optimizer.SOFO (LGS) 
+module O = Optimizer.SOFO (LGS)
 
 (* let config ~base_lr ~gamma:_ ~iter:_ =
   Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
@@ -551,7 +551,7 @@ let optimise ~max_iter ~f_name ~init config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init  ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
 
 (* let checkpoint_name = Some "lgs_elbo_sofo_lr_0.01_damp_0.1" *)
 
@@ -591,7 +591,7 @@ let _ =
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name ~init config_f)) 
+      optimise ~max_iter ~f_name ~init config_f))
 
 (* let lr_rates = [ 0.01 ]
 let meth = "adam"

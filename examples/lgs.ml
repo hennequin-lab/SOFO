@@ -48,8 +48,8 @@ let f_list : Tensor.t Lds_data.f_params list =
 let sample_data () =
   (* generate ground truth params and data *)
   let u_list =
-    let _cov_u = Tensor.eye ~n:Dims.b ~options:(Dims.kind, Dims.device) in
-    Data.sample_u_list ~cov_u:_cov_u
+    let _std_u = Tensor.ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ] in
+    Data.sample_u_list ~std_u:_std_u
   in
   let x_list, o_list = Data.traj_rollout ~x0 ~f_list ~u_list in
   let o_list = List.map o_list ~f:(fun o -> Option.value_exn o) in
