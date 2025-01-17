@@ -10,69 +10,136 @@ let _ =
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
-(* -----------------------------------------
-   -- Control Problem / Data Generation ---
-   ----------------------------------------- *)
-module Dims = struct
-  let a = 8
-  let b = 8
-  let o = 8
-  let tmax = 10
-  let m = 64
-  let batch_const = true
-  let kind = Torch_core.Kind.(T f64)
-  let device = Torch.Device.cuda_if_available ()
-end
-
-module Data = Lds_data.Make_LDS_Tensor (Dims)
-
-let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
-
-(* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
-(* TODO: noise cov as identity as the simplest case *)
-let _std_o = Tensor.eye ~options:(Dims.kind, Dims.device) ~n:Dims.o
-let _std_u = Tensor.ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]
-let _Fx = Data.sample_fx ()
-let _Fu = Data.sample_fu ()
-let c = Data.sample_c ()
-let b = Data.sample_b ()
-
-let f_list : Tensor.t Lds_data.f_params list =
-  List.init (Dims.tmax + 1) ~f:(fun _ ->
-    Lds_data.
-      { _Fx_prod = _Fx
-      ; _Fu_prod = _Fu
-      ; _f = None
-      ; _c = Some c
-      ; _b = Some b
-      ; _cov = Some Tensor.(matmul _std_o (transpose _std_o ~dim0:1 ~dim1:0))
-      })
-
-let sample_data () =
-  (* generate ground truth params and data *)
-  let u_list = Data.sample_u_list ~std_u:_std_u in
-  let x_list, o_list = Data.traj_rollout ~x0 ~f_list ~u_list in
-  let o_list = List.map o_list ~f:(fun o -> Option.value_exn o) in
-  u_list, x_list, o_list
-
-(* -----------------------------------------
-   ----- Utilitiy Functions ------
-   ----------------------------------------- *)
-
-let tmp_einsum a b =
-  if Dims.batch_const
-  then Maths.einsum [ a, "ma"; b, "ab" ] "mb"
-  else Maths.einsum [ a, "ma"; b, "mab" ] "mb"
-
-(* -----------------------------------------
-   -- Model setup and optimizer
-   ----------------------------------------- *)
 let in_dir = Cmdargs.in_dir "-d"
 let _ = Bos.Cmd.(v "rm" % "-f" % in_dir "info") |> Bos.OS.Cmd.run
 
 let base =
   Optimizer.Config.Base.
-    { default with kind = Torch_core.Kind.(T f64); ba_kind = Bigarray.float64 }
+    { device = Torch.Device.cuda_if_available ()
+    ; kind = Torch_core.Kind.(T f64)
+    ; ba_kind = Bigarray.float64
+    }
+
+let m = 4
+let o = 8
+let bs = 2
+let sigma_o = Maths.(f 0.1)
+
+let c =
+  Tensor.(
+    f Float.(1. /. sqrt (of_int m)) * randn ~device:base.device ~kind:base.kind [ m; o ])
+  |> Maths.const
+
+module PP = struct
+  type 'a p =
+    { c : 'a
+    ; d : 'a
+    }
+  [@@deriving prms]
+end
+
+module P = PP.Make (Prms.P)
+
+let theta =
+  let c = Prms.free (Maths.primal c) in
+  let d =
+    Prms.create
+      ~above:(Tensor.f 0.001)
+      (Tensor.ones ~device:base.device ~kind:base.kind [ m ])
+  in
+  PP.{ c; d }
+
+let sample_data () =
+  let us = Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const in
+  let xs = Maths.(us *@ c) in
+  let ys = Maths.(xs + (sigma_o * const (Tensor.randn_like (primal xs)))) in
+  us, ys
+
+let solver a y =
+  let ell = Maths.cholesky a in
+  let ell_t = Maths.transpose ~dim0:0 ~dim1:1 ell in
+  let _x = Maths.linsolve_triangular ~left:false ~upper:true ell_t y in
+  Maths.linsolve_triangular ~left:false ~upper:false ell _x
+
+let u_opt ~(theta : P.M.t) y =
+  let a = Maths.(einsum [ theta.c, "ji"; theta.c, "jk" ] "ik") in
+  let a =
+    Maths.(
+      a
+      + diag_embed
+          ~offset:0
+          ~dim1:0
+          ~dim2:1
+          (sqr sigma_o * const Tensor.(ones ~device:base.device ~kind:base.kind [ o ])))
+  in
+  let solution = solver a y in
+  Maths.(einsum [ theta.c, "ij"; solution, "mj" ] "mi")
+
+let u, y = sample_data ()
+(* let u_opt = u_opt ~theta:(P.const (P.value theta)) y *)
+
+let gaussian_llh ?mu ~std x =
+  let inv_std = Maths.(f 1. / std) in
+  let error_term =
+    let error =
+      match mu with
+      | None -> Maths.(einsum [ x, "ma"; inv_std, "a" ] "ma")
+      | Some mu -> Maths.(einsum [ x - mu, "ma"; inv_std, "a" ] "ma")
+    in
+    Maths.einsum [ error, "ma"; error, "ma" ] "m" |> Maths.reshape ~shape:[ -1; 1 ]
+  in
+  let cov_term = Maths.(2. $* sum (log (abs std))) |> Maths.reshape ~shape:[ 1; 1 ] in
+  let const_term =
+    let o = x |> Maths.primal |> Tensor.shape |> List.last_exn in
+    Float.(log (2. * pi) * of_int o)
+  in
+  Maths.(0.5 $* (const_term $+ error_term + cov_term))
+  |> Maths.(mean_dim ~keepdim:false ~dim:(Some [ 1 ]))
+  |> Maths.neg
+
+let neg_elbo ~(theta : P.M.t) y =
+  let u_opt = u_opt ~theta y in
+  let u = Maths.(u_opt + (const (Tensor.randn_like (primal u_opt)) * theta.PP.d)) in
+  let y_pred = Maths.(u_opt *@ c) in
+  let lik_term = gaussian_llh ~mu:y_pred ~std:sigma_o y in
+  let prior_term = gaussian_llh ~std:Maths.(f 1.) u in
+  let q_term = gaussian_llh ~mu:u_opt ~std:theta.d u in
+  u_opt, Maths.(lik_term + prior_term - q_term) |> Maths.neg
+
+module M = struct
+  module P = P
+
+  type args = unit
+  type data = Maths.t list
+
+  let f ~update ~data:ys ~init ~args:() (theta : P.M.t) =
+    let u_opt = u_opt ~theta y in
+    let u = Maths.(u_opt + (const (Tensor.randn_like (primal u_opt)) * theta.PP.d)) in
+    let y_pred = Maths.(u_opt *@ c) in
+    let lik_term = gaussian_llh ~mu:y_pred ~std:sigma_o y in
+    let prior_term = gaussian_llh ~std:Maths.(f 1.) u in
+    let q_term = gaussian_llh ~mu:u_opt ~std:theta.d u in
+    let neg_elbo = Maths.(lik_term + prior_term - q_term) |> Maths.neg in
+    match update with
+    | `loss_only u -> u init (Some neg_elbo)
+    | `loss_and_ggn u ->
+      let ggn =
+        let neg_elbo_t = Maths.tangent neg_elbo in
+        Tensor.(())
+          L.vtgt_hessian_gv
+          ~rolled_out_x_list:x_except_first
+          ~u_list
+          ~optimal_u_list
+          ~sample
+          theta
+      in
+      u init (Some (neg_elbo, Some ggn))
+end
+
+(*
+   (* -----------------------------------------
+   -- Model setup and optimizer
+   ----------------------------------------- *)
 
 let max_iter = 2000
 let laplace = false
@@ -570,3 +637,4 @@ let _ =
     Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
     Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
     optimise ~max_iter ~f_name ~init config_f)    *)
+*)

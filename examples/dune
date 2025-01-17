@@ -5,6 +5,7 @@
   lorenz
   lgs
   lgs_min
+  fa
   lgs_elbo
   lgs_elbo_laplace
   lorenz_elbo_gru
