@@ -138,7 +138,7 @@ module M = struct
         Tensor.(matmul fisher_half (transpose fisher_half ~dim0:0 ~dim1:1))
       in
       (* TODO: use ggn *)
-      (* let ggn =
+      let ggn =
         let llh_ggn =
           cal_ggn
             ~y:Maths.(u_sampled *@ theta.c)
@@ -156,8 +156,9 @@ module M = struct
         let entropy_ggn =
           cal_ggn ~y:u_sampled ~like_hess:Tensor.(f 1. / square (Maths.primal theta.d))
         in
-        Tensor.(llh_ggn + prior_ggn) in *)
-      u init (Some (neg_elbo, Some emp_fisher))
+        Tensor.(llh_ggn + prior_ggn)
+      in
+      u init (Some (neg_elbo, Some ggn))
 end
 
 let max_iter = 2000
@@ -219,7 +220,7 @@ let optimise ~max_iter ~f_name ~init config_f =
   (* ~config:(config_f ~iter:0) *)
   loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
 
-let lr_rates = [ 10. ]
+let lr_rates = [ 5. ]
 let damping_list = [ Some 1e-5 ]
 let meth = "sofo"
 
