@@ -149,7 +149,7 @@ module LGS = struct
         in
         Tensor.einsum ~equation:"kmbt,tbmj->kj" [ tmp1; tmp2 ] ~path:None |> Tensor.neg
       in
-      let final = Tensor.(llh_ggn + (prior_ggn + entropy_ggn)) in
+      let final = Tensor.(llh_ggn + (prior_ggn - entropy_ggn)) in
       final
   end
 
@@ -603,8 +603,8 @@ let optimise ~f_name ~init config_f =
   loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
 
 let checkpoint_name = None
-let lr_rates = [ 1e-5; 1e-4 ]
-let damping_list = [ Some 1e-5 ]
+let lr_rates = [0.01]
+let damping_list = [ Some 1e-3]
 let meth = "sofo"
 
 let _ =

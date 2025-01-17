@@ -14,11 +14,11 @@ let _ =
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
 module Dims = struct
-  let a = 8
-  let b = 8
-  let o = 8
+  let a = 18
+  let b = 18
+  let o = 18
   let tmax = 10
-  let m = 256
+  let m = 64
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
@@ -108,7 +108,7 @@ module LGS = struct
 
   (* special care to be taken when dealing with elbo loss *)
   module Elbo_loss = struct
-    let vtgt_hessian_gv ~rolled_out_x_list ~u_list (theta : P.M.t) =
+    let vtgt_hessian_gv ~rolled_out_x_list ~u_list ~sample (theta : P.M.t) =
       (* fold ggn across time *)
       let ggn_final ~o_list ~like_hess ~diagonal =
         let vtgt_hess_eqn = if diagonal then "kma,a->kma" else "kma,ab->kmb" in
@@ -123,7 +123,10 @@ module LGS = struct
           Tensor.(accu + increment))
       in
       let llh_ggn =
-        let like_hess = theta._std_o |> sqr_inv |> Maths.primal in
+        let like_hess =
+          let tmp = theta._std_o |> sqr_inv |> Maths.primal in
+          Tensor.(tmp / f 2.)
+        in
         (* y = cx + b *)
         let y_list =
           List.map rolled_out_x_list ~f:(fun x ->
@@ -132,31 +135,42 @@ module LGS = struct
         ggn_final ~o_list:y_list ~like_hess ~diagonal:true
       in
       let prior_ggn =
-        let like_hess = theta._std_u |> sqr_inv |> Maths.primal in
+        let like_hess =
+          let tmp = theta._std_u |> sqr_inv |> Maths.primal in
+          Tensor.(tmp / f 2.)
+        in
         ggn_final ~o_list:u_list ~like_hess ~diagonal:true
       in
-      let entropy_ggn =
-        let _cov_space_inv = theta._std_space |> sqr_inv |> Maths.primal in
-        let _cov_time_inv = theta._std_time |> sqr_inv |> Maths.primal in
-        let vtgt =
-          let vtgt_list =
-            List.map u_list ~f:(fun u ->
-              let vtgt = Maths.tangent u |> Option.value_exn in
-              Tensor.unsqueeze vtgt ~dim:(-1))
-          in
-          Tensor.concat vtgt_list ~dim:(-1)
-        in
-        let tmp1 =
-          Tensor.einsum ~equation:"kmbt,b->kmbt" [ vtgt; _cov_space_inv ] ~path:None
-        in
-        let tmp2 =
-          Tensor.einsum ~equation:"t,kmbt->tbmk" [ _cov_time_inv; vtgt ] ~path:None
-        in
-        Tensor.einsum ~equation:"kmbt,tbmj->kj" [ tmp1; tmp2 ] ~path:None |> Tensor.neg
-      in
+      let kl_ggn = Tensor.neg prior_ggn in
       (* TODO: do not include entropy term for now -> or should we? *)
       let final =
-        Tensor.(div_scalar (llh_ggn + prior_ggn- entropy_ggn) (Scalar.f (Float.of_int Dims.tmax)))
+        let ggn_unnormed =
+          if sample
+          then (
+            let entropy_ggn =
+              let _cov_space_inv = theta._std_space |> sqr_inv |> Maths.primal in
+              let _cov_time_inv = theta._std_time |> sqr_inv |> Maths.primal in
+              let vtgt =
+                let vtgt_list =
+                  List.map u_list ~f:(fun u ->
+                    let vtgt = Maths.tangent u |> Option.value_exn in
+                    Tensor.unsqueeze vtgt ~dim:(-1))
+                in
+                Tensor.concat vtgt_list ~dim:(-1)
+              in
+              let tmp1 =
+                Tensor.einsum ~equation:"kmbt,b->kmbt" [ vtgt; _cov_space_inv ] ~path:None
+              in
+              let tmp2 =
+                Tensor.einsum ~equation:"t,kmbt->tbmk" [ _cov_time_inv; vtgt ] ~path:None
+              in
+              Tensor.einsum ~equation:"kmbt,tbmj->kj" [ tmp1; tmp2 ] ~path:None
+              |> Tensor.neg
+            in
+            Tensor.(llh_ggn + prior_ggn - entropy_ggn))
+          else Tensor.(llh_ggn - kl_ggn)
+        in
+        Tensor.(ggn_unnormed / f (Float.of_int Dims.tmax))
       in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false final in
       let final_s =
@@ -256,11 +270,9 @@ module LGS = struct
     let cov_term = Maths.(2. $* sum (log (abs g_std))) |> Maths.reshape ~shape:[ 1; 1 ] in
     let const_term =
       let o = x |> Maths.primal |> Tensor.shape |> List.last_exn in
-      Tensor.of_float0 ~device:Dims.device Float.(log (2. * pi) * of_int o)
-      |> Tensor.reshape ~shape:[ 1; 1 ]
-      |> Maths.const
+      Float.(log (2. * pi) * of_int o)
     in
-    Maths.(0.5 $* error_term + cov_term + const_term)
+    Maths.(0.5 $* (const_term $+ error_term + cov_term))
     |> Maths.(mean_dim ~keepdim:false ~dim:(Some [ 1 ]))
     |> Maths.neg
 
@@ -309,21 +321,18 @@ module LGS = struct
         let det2 =
           Maths.(Float.(2. * of_int Dims.tmax) $* sum (log (abs theta._std_u)))
         in
-        let _const =
-          Tensor.of_float0 (Float.of_int (Dims.b * Dims.tmax)) |> Maths.const
-        in
+        let _const = Float.of_int (Dims.b * Dims.tmax) in
+        let _cov_u_inv = theta._std_u |> sqr_inv in
         let tr =
-          let tmp1 = theta._std_u |> sqr_inv in
-          let tmp2 = Maths.(tmp1 * sqr theta._std_space) in
+          let tmp2 = Maths.(_cov_u_inv * sqr theta._std_space) in
           let tmp3 = Maths.(kron tmp2 (sqr theta._std_time)) in
           Maths.sum tmp3
         in
         let quad =
-          let _cov_u_inv = theta._std_u |> sqr_inv in
           let tmp1 = Maths.einsum [ optimal_u, "mbt"; _cov_u_inv, "b" ] "mbt" in
           Maths.einsum [ tmp1, "mbt"; optimal_u, "mbt" ] "m" |> Maths.unsqueeze ~dim:1
         in
-        let tmp = Maths.(det2 - det1 - _const + tr) |> Maths.reshape ~shape:[ 1; 1 ] in
+        let tmp = Maths.(det2 - det1 + tr -$ _const) |> Maths.reshape ~shape:[ 1; 1 ] in
         Maths.(tmp + quad) |> Maths.squeeze ~dim:1)
     in
     Maths.((llh - kl) /$ Float.of_int Dims.tmax)
@@ -341,7 +350,9 @@ module LGS = struct
     match update with
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
-      let ggn = L.vtgt_hessian_gv ~rolled_out_x_list:x_except_first ~u_list theta in
+      let ggn =
+        L.vtgt_hessian_gv ~rolled_out_x_list:x_except_first ~u_list ~sample theta
+      in
       u init (Some (neg_elbo, Some ggn))
 
   (* TODO: here we only learn _Fx, _Fu, _c and _b *)
@@ -420,7 +431,7 @@ let config ~base_lr ~gamma ~iter:_ =
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some base_lr
-    ; n_tangents = 256
+    ; n_tangents = 128
     ; rank_one = false
     ; damping = gamma
     ; momentum = None
@@ -428,12 +439,12 @@ let config ~base_lr ~gamma ~iter:_ =
     ; perturb_thresh = None
     }
 
-module O = Optimizer.SOFO (LGS) 
+module O = Optimizer.SOFO (LGS)
 
 (* let config ~base_lr ~gamma:_ ~iter:_ =
   Optimizer.Config.Adam.{ default with learning_rate = Some base_lr }
 
-module O = Optimizer.Adam (LGS)   *)
+module O = Optimizer.Adam (LGS)    *)
 
 let optimise ~max_iter ~f_name ~init config_f =
   let rec loop ~iter ~state ~time_elapsed running_avg =
@@ -510,10 +521,10 @@ let optimise ~max_iter ~f_name ~init config_f =
     then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
   in
   (* ~config:(config_f ~iter:0) *)
-  loop ~iter:0 ~state:(O.init  ~config:(config_f ~iter:0)  init) ~time_elapsed:0. []
+  loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
 
-let lr_rates = [5. ]
-let damping_list = [ Some 1e-5 ]
+let lr_rates = [ 0.1 ]
+let damping_list = [ Some 1e-3 ]
 let meth = "sofo"
 
 let _ =
@@ -532,7 +543,7 @@ let _ =
       in
       Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
       Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-      optimise ~max_iter ~f_name ~init config_f)) 
+      optimise ~max_iter ~f_name ~init config_f))
 
 (* let lr_rates = [ 0.1 ]
 let meth = "adam"
@@ -550,4 +561,4 @@ let _ =
     in
     Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
     Bos.Cmd.(v "rm" % "-f" % in_dir (f_name ^ "_llh")) |> Bos.OS.Cmd.run |> ignore;
-    optimise ~max_iter ~f_name ~init config_f)   *)
+    optimise ~max_iter ~f_name ~init config_f)    *)

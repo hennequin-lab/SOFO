@@ -204,7 +204,7 @@ let inv_rectangle ?(rcond = 1e-6) (x, dx) =
     with_tangent dx ~f:(fun dx ->
       let tran_2d = Tensor.transpose ~dim0:(-1) ~dim1:(-2) in
       let xTx = Tensor.(matmul (tran_2d x) x) in
-      let tmp1 = Tensor.(matmul (inverse xTx) (tran_2d dx )) in
+      let tmp1 = Tensor.(matmul (inverse xTx) (tran_2d dx)) in
       let tmp2 = Tensor.(matmul tmp1 (matmul x y)) in
       let tmp3 = Tensor.(matmul y (matmul dx y)) in
       Tensor.(tmp1 - tmp2 - tmp3))
@@ -603,6 +603,7 @@ let ( / ) (x, dx) (y, dy) =
 
 (* x = x + z *)
 let ( $+ ) z (x, dx) = (Tensor.(add_scalar x (Scalar.f z)), dx) |> assert_right_shape "$+"
+let ( -$ ) (x, dx) z = (Tensor.(sub_scalar x (Scalar.f z)), dx) |> assert_right_shape "$-"
 
 (* x = x *z *)
 let ( $* ) z (x, dx) =
