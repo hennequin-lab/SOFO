@@ -22,7 +22,6 @@ let base =
 let m = 10
 let o = 40
 let bs = 256
-let sigma_o_gt = Maths.(f 0.1)
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
 
@@ -31,11 +30,9 @@ let make_c (m, o) =
     f Float.(1. /. sqrt (of_int m)) * randn ~device:base.device ~kind:base.kind [ m; o ])
   |> Maths.const
 
-let c = make_c (m, o)
-
 module PP = struct
   type 'a p =
-    { c : 'a (*     ; recog : 'a *)
+    { c : 'a
     ; sigma_o_prms : 'a
     ; d_prms : 'a
     }
@@ -50,11 +47,16 @@ let theta =
   let d_prms = Prms.free Maths.(primal (f (-2.) * ones_u)) in
   PP.{ c; sigma_o_prms; d_prms }
 
-let sample_data () =
-  let us = Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const in
-  let xs = Maths.(us *@ c) in
-  let ys = Maths.(xs + (sigma_o_gt * const (Tensor.randn_like (primal xs)))) in
-  us, ys
+let sample_data =
+  let sigma_o = Maths.(f 0.1) in
+  let c = make_c (m, o) in
+  fun () ->
+    let us =
+      Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const
+    in
+    let xs = Maths.(us *@ c) in
+    let ys = Maths.(xs + (sigma_o * const (Tensor.randn_like (primal xs)))) in
+    us, ys
 
 let solver a y =
   let ell = Maths.cholesky a in
@@ -99,6 +101,7 @@ module M = struct
     let u = Maths.(u_opt + u_diff) in
     let y_pred = Maths.(u *@ theta.c) in
     let y' =
+      (* generate surrogate sample drawn from the predictive distribution, for the Fisher matrix *)
       Maths.(
         const (primal y_pred)
         (* IMPORTANT that y_pred be made a constant! *)
@@ -117,13 +120,13 @@ module M = struct
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
       let emp_fisher =
-        let neg_elbo_t =
+        let neg_lik_t =
           Maths.(tangent lik_term')
           |> Option.value_exn
-          |> fun x -> Tensor.(x / f Float.(of_int m))
+          |> fun x -> Tensor.(x / f Float.(of_int o))
         in
-        let n_tangents = List.hd_exn (Tensor.shape neg_elbo_t) in
-        let fisher_half = Tensor.reshape neg_elbo_t ~shape:[ n_tangents; -1 ] in
+        let n_tangents = List.hd_exn (Tensor.shape neg_lik_t) in
+        let fisher_half = Tensor.reshape neg_lik_t ~shape:[ n_tangents; -1 ] in
         Tensor.(matmul fisher_half (transpose fisher_half ~dim0:0 ~dim1:1))
       in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false emp_fisher in
@@ -133,8 +136,6 @@ module M = struct
       |> Owl.Mat.save_txt ~out:(in_dir (sprintf "svals"));
       u init (Some (neg_elbo, Some emp_fisher))
 end
-
-let max_iter = 5000
 
 (* --------------------------------
    -- Generic type of optimiser
@@ -155,7 +156,7 @@ end
 module Make (D : Do_with_T) = struct
   open D
 
-  let optimise () =
+  let optimise max_iter =
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
     let rec loop ~iter ~state ~time_elapsed running_avg =
       Stdlib.Gc.major ();
@@ -205,11 +206,11 @@ module Do_with_SOFO : Do_with_T = struct
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.2
-      ; n_tangents = 128
+      ; learning_rate = Some 0.03
+      ; n_tangents = 256
       ; sqrt = true
       ; rank_one = true
-      ; damping = Some 1e-5
+      ; damping = Some 1e-3
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None
@@ -248,14 +249,18 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  match Cmdargs.get_string "-m" with
-  | Some "sofo" ->
-    let module X = Make (Do_with_SOFO) in
-    X.optimise ()
-  | Some "fgd" ->
-    let module X = Make (Do_with_FGD) in
-    X.optimise ()
-  | Some "adam" ->
-    let module X = Make (Do_with_Adam) in
-    X.optimise ()
-  | _ -> failwith "-m [sofo | fgd | adam]"
+  let max_iter = 5000 in
+  let optimise =
+    match Cmdargs.get_string "-m" with
+    | Some "sofo" ->
+      let module X = Make (Do_with_SOFO) in
+      X.optimise
+    | Some "fgd" ->
+      let module X = Make (Do_with_FGD) in
+      X.optimise
+    | Some "adam" ->
+      let module X = Make (Do_with_Adam) in
+      X.optimise
+    | _ -> failwith "-m [sofo | fgd | adam]"
+  in
+  optimise max_iter

@@ -135,7 +135,6 @@ module SOFO (W : Wrapper.T) = struct
   (* calculate natural gradient = V(VtGtGV)^-1 V^t g *)
   let natural_g ?damping ~sqrt ~vs ~ggn vtg =
     let u, s, _ = Tensor.svd ~some:true ~compute_uv:true ggn in
-    let s = if sqrt then Tensor.sqrt s else s in
     (* how each V should be weighted, as a row array *)
     let weights =
       let tmp = Convenience.a_trans_b u vtg in
@@ -146,6 +145,7 @@ module SOFO (W : Wrapper.T) = struct
           let offset = Float.(gamma * Tensor.(maximum s |> to_float0_exn)) in
           Tensor.(s + f offset)
       in
+      let s = if sqrt then Tensor.sqrt s else s in
       Tensor.(matmul (u / s) tmp) |> Convenience.trans_2d
     in
     weighted_vs_sum vs ~weights
