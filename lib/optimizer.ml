@@ -133,8 +133,9 @@ module SOFO (W : Wrapper.T) = struct
       Tensor.(view (matmul weights v_i) ~size:s))
 
   (* calculate natural gradient = V(VtGtGV)^-1 V^t g *)
-  let natural_g ?damping ~vs ~ggn vtg =
+  let natural_g ?damping ~sqrt ~vs ~ggn vtg =
     let u, s, _ = Tensor.svd ~some:true ~compute_uv:true ggn in
+    let s = if sqrt then Tensor.sqrt s else s in
     (* how each V should be weighted, as a row array *)
     let weights =
       let tmp = Convenience.a_trans_b u vtg in
@@ -201,7 +202,9 @@ module SOFO (W : Wrapper.T) = struct
     let updated_damping =
       if config.lm
       then (
-        let natural_g_tmp = natural_g ?damping:state.damping ~vs ~ggn:final_ggn vtg in
+        let natural_g_tmp =
+          natural_g ?damping:state.damping ~sqrt:config.sqrt ~vs ~ggn:final_ggn vtg
+        in
         (* levenberg-marquardt *)
         let lm =
           (* use natural_g_tmp for a forward pass *)
@@ -273,7 +276,9 @@ module SOFO (W : Wrapper.T) = struct
       else state.damping
     in
     (* compute natural gradient and update theta *)
-    let natural_g = natural_g ?damping:updated_damping ~vs ~ggn:final_ggn vtg in
+    let natural_g =
+      natural_g ?damping:updated_damping ~sqrt:config.sqrt ~vs ~ggn:final_ggn vtg
+    in
     let natural_g_avg =
       let module M = Momentum (W.P) in
       M.apply ?momentum:config.momentum ~avg:state.g_avg natural_g

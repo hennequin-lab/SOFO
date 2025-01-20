@@ -40,6 +40,7 @@ module Config = struct
       { base : ('a, 'b) Base.t
       ; learning_rate : float option
       ; n_tangents : int
+      ; sqrt : bool
       ; rank_one : bool
       ; damping : float option
       ; momentum : float option
@@ -51,6 +52,7 @@ module Config = struct
       { base = Base.default
       ; learning_rate = None
       ; n_tangents = 10
+      ; sqrt = false
       ; rank_one = false
       ; damping = None
       ; momentum = None
