@@ -534,6 +534,7 @@ let config ~base_lr ~gamma ~iter:_ =
     ; momentum = None
     ; lm = false
     ; perturb_thresh = None
+    ; sqrt = false
     }
 
 module O = Optimizer.SOFO (LGS)
@@ -603,8 +604,8 @@ let optimise ~f_name ~init config_f =
   loop ~iter:0 ~state:(O.init ~config:(config_f ~iter:0) init) ~time_elapsed:0. []
 
 let checkpoint_name = None
-let lr_rates = [0.01]
-let damping_list = [ Some 1e-3]
+let lr_rates = [ 0.01 ]
+let damping_list = [ Some 1e-3 ]
 let meth = "sofo"
 
 let _ =

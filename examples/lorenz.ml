@@ -27,6 +27,7 @@ let config ~base_lr ~gamma =
     ; momentum = None
     ; lm = false
     ; perturb_thresh = None
+    ; sqrt = false
     }
 
 (* neural network *)

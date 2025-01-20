@@ -497,6 +497,7 @@ let config ~base_lr ~gamma ~iter:_ =
     ; momentum = None
     ; lm = false
     ; perturb_thresh = None
+    ; sqrt = false
     }
 
 module O = Optimizer.SOFO (LGS)

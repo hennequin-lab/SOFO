@@ -291,46 +291,34 @@ let _M ~pos2 =
   in
   Maths.concat_list [ row1; row2 ] ~dim:1
 
-(* shape [m x 2 x 2] *)
-let _JM ~pos2 =
-  let common = Maths.(neg (_A2 $* sin pos2)) in
-  let row1 = Maths.concat_list [ Maths.(2. $* common); common ] ~dim:2 in
-  let row2 =
-    Maths.concat_list
-      [ Maths.(2. $* common)
-      ; Maths.(
-          const (Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 1; 1 ]))
-      ]
-      ~dim:2
-  in
-  Maths.concat_list [ row1; row2 ] ~dim:1
+(* shape [m x 1 x 1] *)
+let _P ~pos2 =
+  let common = Maths.(_A2 $* cos pos2) in
+  Maths.(_A3 $* (_A1 $+ (2. $* common)) - sqr (_A3 $+ (2. $* common)))
+  |> Maths.reshape ~shape:[ -1; 1; 1 ]
 
-(* shape [m x 2 x 4] *)
-let _JX ~pos2 ~vel1 ~vel2 =
-  let a2_cos_pos2 = Maths.(_A2 $* cos pos2) in
-  let a2_sin_pos2 = Maths.(_A2 $* sin pos2) in
-  let zeros_tmp =
-    Maths.(const (Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 1; 1 ]))
-  in
+(* shape [m x 2 x 2] *)
+let _M_inv ~pos2 ~_P =
+  let common = Maths.(_A2 $* cos pos2) in
   let row1 =
     Maths.concat_list
-      [ zeros_tmp
-      ; Maths.(neg vel2 * ((2. $* vel1) + vel2) * a2_cos_pos2)
-      ; Maths.(neg (2. $* vel2) * a2_sin_pos2)
-      ; Maths.(neg (2. $* vel1 + vel2) * a2_sin_pos2)
+      [ Maths.(
+          const
+            Tensor.(
+              mul_scalar
+                (ones ~device:base.device ~kind:base.kind [ batch_size; 1; 1 ])
+                (Scalar.f _A3)))
+      ; Maths.(neg (_A3 $+ common))
       ]
       ~dim:2
   in
   let row2 =
     Maths.concat_list
-      [ zeros_tmp
-      ; Maths.(sqr vel1 * a2_cos_pos2)
-      ; Maths.((2. $* vel1) * a2_sin_pos2)
-      ; zeros_tmp
-      ]
+      [ Maths.(neg (_A3 $+ common)); Maths.(_A1 $+ (2. $* common)) ]
       ~dim:2
   in
-  Maths.concat_list [ row1; row2 ] ~dim:1
+  let mat = Maths.concat_list [ row1; row2 ] ~dim:1 in
+  Maths.(mat / _P)
 
 (* shape [m x 2 x 1] *)
 let _X ~pos2 ~vel1 ~vel2 =
@@ -343,25 +331,14 @@ let _X ~pos2 ~vel1 ~vel2 =
 let _Fu ~x =
   match x with
   | Some x ->
-    let _, pos2, vel1, vel2 = decompose_x x in
-    let _M = _M ~pos2 in
-    let _JM = _JM ~pos2 in
-    let _JX = _JX ~pos2 ~vel1 ~vel2 in
-    (* TODO: what is the correct way of setting the disturbance? currently I set everything to 0.1 *)
-    let _C = Maths.(_M + (0.01 $* _JM)) in
-    (* shape [m x 2 x 2] *)
-    let _C_inv = Maths.inv_sqr _C in
-    (* shape [m x 4 x 2] *)
-    let _C_inv_complete =
-      let upper =
-        Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 2; 2 ]
-        |> Maths.const
-      in
-      Maths.concat upper _C_inv ~dim:1
+    let _, pos2, _, _ = decompose_x x in
+    let _P = _P ~pos2 in
+    let _M_inv = _M_inv ~pos2 ~_P in
+    let zeros =
+      Tensor.zeros [ batch_size; 2; 2 ] ~device:base.device ~kind:base.kind |> Maths.const
     in
     (* need to transpose since the convention is x = u Fu + x Fx *)
-    Maths.(einsum [ _Q, "ab"; _C_inv_complete, "mbc" ] "mac")
-    |> Maths.transpose ~dim0:1 ~dim1:2
+    Maths.concat zeros _M_inv ~dim:0 |> Maths.transpose ~dim0:1 ~dim1:2
   | _ ->
     Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 2; 4 ] |> Maths.const
 

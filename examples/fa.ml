@@ -19,6 +19,13 @@ let base =
     ; ba_kind = Bigarray.float64
     }
 
+type pred_cond =
+  | GGN
+  | EmpFisher
+  | TrueFisher
+
+let pred_cond = TrueFisher
+let sampling = false
 let m = 10
 let o = 40
 let bs = 256
@@ -87,6 +94,16 @@ let gaussian_llh ?mu ~std x =
   in
   Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
 
+let fisher ~lik_term =
+  let neg_lik_t =
+    Maths.(tangent lik_term)
+    |> Option.value_exn
+    |> fun x -> Tensor.(x / f Float.(of_int o))
+  in
+  let n_tangents = List.hd_exn (Tensor.shape neg_lik_t) in
+  let fisher_half = Tensor.reshape neg_lik_t ~shape:[ n_tangents; -1 ] in
+  Tensor.(matmul fisher_half (transpose fisher_half ~dim0:0 ~dim1:1))
+
 module M = struct
   module P = P
 
@@ -100,41 +117,70 @@ module M = struct
     let u_diff = Maths.(const (Tensor.randn_like (primal u_opt)) * unsqueeze ~dim:0 d) in
     let u = Maths.(u_opt + u_diff) in
     let y_pred = Maths.(u *@ theta.c) in
-    let y' =
-      (* generate surrogate sample drawn from the predictive distribution, for the Fisher matrix *)
-      Maths.(
-        const (primal y_pred)
-        (* IMPORTANT that y_pred be made a constant! *)
-        + (unsqueeze ~dim:0 sigma_o * const (Tensor.randn_like (primal y))))
-    in
     let lik_term = gaussian_llh ~mu:y_pred ~std:sigma_o y in
-    let prior_term = gaussian_llh ~std:ones_u u in
-    let q_term = gaussian_llh ~std:d u_diff in
-    let lik_term' = gaussian_llh ~mu:y_pred ~std:sigma_o y' in
+    let kl_term =
+      if sampling
+      then (
+        let prior_term = gaussian_llh ~std:ones_u u in
+        let q_term = gaussian_llh ~std:d u_diff in
+        Maths.(q_term - prior_term))
+      else (
+        let det1 = Maths.(sum theta.d_prms) in
+        let _const =
+          Maths.const (Tensor.of_float0 ~device:base.device (Float.of_int m))
+        in
+        let tr = Maths.(sum (exp theta.d_prms)) in
+        let quad =
+          Maths.(einsum [ u_opt, "mb"; u_opt, "mb" ] "m")
+          |> Maths.reshape ~shape:[ -1; 1 ]
+        in
+        let tmp = Maths.(tr - _const - det1) |> Maths.reshape ~shape:[ 1; 1 ] in
+        Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1)
+    in
     let neg_elbo =
-      Maths.(lik_term + prior_term - q_term)
-      |> Maths.neg
-      |> fun x -> Maths.(x / f Float.(of_int o))
+      Maths.(lik_term - kl_term) |> Maths.neg |> fun x -> Maths.(x / f Float.(of_int o))
     in
     match update with
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
-      let emp_fisher =
-        let neg_lik_t =
-          Maths.(tangent lik_term')
-          |> Option.value_exn
-          |> fun x -> Tensor.(x / f Float.(of_int o))
-        in
-        let n_tangents = List.hd_exn (Tensor.shape neg_lik_t) in
-        let fisher_half = Tensor.reshape neg_lik_t ~shape:[ n_tangents; -1 ] in
-        Tensor.(matmul fisher_half (transpose fisher_half ~dim0:0 ~dim1:1))
+      let preconditioner =
+        match pred_cond with
+        | TrueFisher ->
+          let true_fisher =
+            let y' =
+              (* generate surrogate sample drawn from the predictive distribution, for the Fisher matrix *)
+              Maths.(
+                const (primal y_pred)
+                (* IMPORTANT that y_pred be made a constant! *)
+                + (unsqueeze ~dim:0 sigma_o * const (Tensor.randn_like (primal y))))
+            in
+            let lik_term' = gaussian_llh ~mu:y_pred ~std:sigma_o y' in
+            fisher ~lik_term:lik_term'
+          in
+          true_fisher
+        | EmpFisher -> fisher ~lik_term
+        | GGN ->
+          let ggn =
+            let like_hess =
+              Tensor.(
+                f 1.
+                / square (Maths.primal sigma_o)
+                * ones ~device:base.device ~kind:base.kind [ o ])
+            in
+            let vtgt = Maths.tangent y_pred |> Option.value_exn in
+            let vtgt_hess =
+              Tensor.einsum ~equation:"kma,a->kma" [ vtgt; like_hess ] ~path:None
+            in
+            Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_hess; vtgt ] ~path:None
+          in
+          ggn
       in
-      let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false emp_fisher in
+      let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false preconditioner in
       final_s
       |> Tensor.reshape ~shape:[ -1; 1 ]
       |> Tensor.to_bigarray ~kind:base.ba_kind
       |> Owl.Mat.save_txt ~out:(in_dir (sprintf "svals"));
-      u init (Some (neg_elbo, Some emp_fisher))
+      u init (Some (neg_elbo, Some preconditioner))
 end
 
 (* --------------------------------
@@ -172,7 +218,7 @@ module Make (D : Do_with_T) = struct
           | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
         in
         (* save params *)
-        if iter % 10 = 0
+        if iter % 1 = 0
         then (
           (* avg error *)
           Convenience.print [%message (iter : int) (loss_avg : float)];
@@ -201,14 +247,18 @@ end
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (M)
 
-  let name = "sofo"
+  let name =
+    match pred_cond with
+    | TrueFisher -> "true_fisher"
+    | EmpFisher -> "emp_fisher"
+    | GGN -> "ggn"
 
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.03
+      ; learning_rate = Some 0.05
       ; n_tangents = 256
-      ; sqrt = true
+      ; sqrt = false
       ; rank_one = true
       ; damping = Some 1e-3
       ; momentum = None
@@ -249,7 +299,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 5000 in
+  let max_iter = 1000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->
