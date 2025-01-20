@@ -342,59 +342,23 @@ let _Fu ~x =
   | _ ->
     Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 2; 4 ] |> Maths.const
 
-(* _Fx is partial f/ partial x *)
+(* _Fx is partial f/ partial x. TODO: incomplete *)
 let _Fx ~x ~u =
   match x, u with
   | Some x, Some u ->
     let _, pos2, vel1, vel2 = decompose_x x in
-    let _M = _M ~pos2 in
-    let _JM = _JM ~pos2 in
-    let _JX = _JX ~pos2 ~vel1 ~vel2 in
+    let _P = _P ~pos2 in
+    let _M_inv = _M_inv ~pos2 ~_P in
     let _X = _X ~pos2 ~vel1 ~vel2 in
-    (* TODO: what is the correct way of setting the disturbance? *)
-    let _C = Maths.(_M + (0.01 $* _JM)) in
-    (* shape [m x 2 x 2] *)
-    let _C_inv = Maths.inv_sqr _C in
-    (* shape [m x 4 x 2] *)
-    let _C_inv_complete =
-      let upper =
-        Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 2; 2 ]
-        |> Maths.const
-      in
-      Maths.concat upper _C_inv ~dim:1
-    in
-    let tmp_einsum a b = Maths.einsum [ a, "mab"; b, "mbc" ] "mac" in
-    let common =
-      Maths.(neg (tmp_einsum _C_inv_complete (Maths.unsqueeze ~dim:0 _B + _JX)))
-    in
-    let col1 = Maths.slice common ~dim:2 ~start:(Some 0) ~end_:(Some 1) ~step:1 in
-    let col3 = Maths.slice common ~dim:2 ~start:(Some 2) ~end_:(Some 3) ~step:1 in
-    let col4 = Maths.slice common ~dim:2 ~start:(Some 3) ~end_:(Some 4) ~step:1 in
-    let col2 =
-      let x_dist =
-        Tensor.(
-          mul_scalar (ones ~device:base.device ~kind:base.kind [ batch_size; 4; 1 ]))
-          (Scalar.f 0.01)
-        |> Maths.const
-      in
-      let _D =
-        let _Bx = Maths.einsum [ _B, "ab"; x, "mb" ] "ma" in
-        Maths.(unsqueeze ~dim:(-1) (u - _Bx) - (_X + tmp_einsum _JX x_dist))
-      in
-      let col2_tmp = Maths.slice common ~dim:2 ~start:(Some 1) ~end_:(Some 2) ~step:1 in
-      let _JM_complete =
-        let left =
-          Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 2; 2 ]
-          |> Maths.const
-        in
-        Maths.concat left _C_inv ~dim:2
-      in
-      let tmp1 = Maths.(neg _C_inv_complete *@ _JM_complete *@ _C_inv_complete *@ _D) in
-      Maths.(tmp1 + col2_tmp)
-    in
-    let partial = Maths.concat_list [ col1; col2; col3; col4 ] ~dim:2 in
-    Maths.(unsqueeze _P ~dim:0 + einsum [ _Q, "ab"; partial, "mbc" ] "mac")
-    |> Maths.transpose ~dim0:1 ~dim1:2
+    (* first two rows *)
+    let row_12 = 
+    let zeros_tmp =  Tensor.zeros [ batch_size; 2; 2 ] ~device:base.device ~kind:base.kind |> Maths.const in 
+    let eye_emp = 
+      List.init batch_size ~f:(fun _ -> Tensor.eye ~n:2 ~options:(base.kind, base.device) |> Tensor.unsqueeze ~dim:0) |> Tensor.concat ~dim:0 |> Maths.const in 
+      Maths.concat zeros_tmp eye_emp ~dim:1 in 
+      
+
+   
   | _ ->
     Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 4; 4 ] |> Maths.const
 

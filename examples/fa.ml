@@ -24,7 +24,7 @@ type pred_cond =
   | EmpFisher
   | TrueFisher
 
-let pred_cond = TrueFisher
+let pred_cond = GGN
 let sampling = false
 let m = 10
 let o = 40
@@ -104,6 +104,10 @@ let fisher ~lik_term =
   let fisher_half = Tensor.reshape neg_lik_t ~shape:[ n_tangents; -1 ] in
   Tensor.(matmul fisher_half (transpose fisher_half ~dim0:0 ~dim1:1))
 
+let ggn ~like_hess ~vtgt =
+  let vtgt_hess = Tensor.einsum ~equation:"kma,a->kma" [ vtgt; like_hess ] ~path:None in
+  Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_hess; vtgt ] ~path:None
+
 module M = struct
   module P = P
 
@@ -115,21 +119,21 @@ module M = struct
     let d = Maths.((f 0.001 + exp theta.d_prms) * ones_u) in
     let u_opt = u_opt ~c:theta.c ~sigma_o y in
     let u_diff = Maths.(const (Tensor.randn_like (primal u_opt)) * unsqueeze ~dim:0 d) in
-    let u = Maths.(u_opt + u_diff) in
-    let y_pred = Maths.(u *@ theta.c) in
+    let u_sampled = Maths.(u_opt + u_diff) in
+    let y_pred = Maths.(u_sampled *@ theta.c) in
     let lik_term = gaussian_llh ~mu:y_pred ~std:sigma_o y in
     let kl_term =
       if sampling
       then (
-        let prior_term = gaussian_llh ~std:ones_u u in
+        let prior_term = gaussian_llh ~std:ones_u u_sampled in
         let q_term = gaussian_llh ~std:d u_diff in
         Maths.(q_term - prior_term))
       else (
-        let det1 = Maths.(sum theta.d_prms) in
+        let det1 = Maths.(sum (2. $* log d)) in
         let _const =
           Maths.const (Tensor.of_float0 ~device:base.device (Float.of_int m))
         in
-        let tr = Maths.(sum (exp theta.d_prms)) in
+        let tr = Maths.(sum (sqr d)) in
         let quad =
           Maths.(einsum [ u_opt, "mb"; u_opt, "mb" ] "m")
           |> Maths.reshape ~shape:[ -1; 1 ]
@@ -160,7 +164,7 @@ module M = struct
           true_fisher
         | EmpFisher -> fisher ~lik_term
         | GGN ->
-          let ggn =
+          let llh_ggn =
             let like_hess =
               Tensor.(
                 f 1.
@@ -168,12 +172,15 @@ module M = struct
                 * ones ~device:base.device ~kind:base.kind [ o ])
             in
             let vtgt = Maths.tangent y_pred |> Option.value_exn in
-            let vtgt_hess =
-              Tensor.einsum ~equation:"kma,a->kma" [ vtgt; like_hess ] ~path:None
-            in
-            Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_hess; vtgt ] ~path:None
+            ggn ~like_hess ~vtgt
           in
-          ggn
+          (* TODO: should we include the prior ggn? *)
+          let prior_ggn =
+            let like_hess = Tensor.ones ~device:base.device ~kind:base.kind [ m ] in
+            let vtgt = Maths.tangent u_sampled |> Option.value_exn in
+            ggn ~like_hess ~vtgt
+          in
+          Tensor.(llh_ggn + prior_ggn)
       in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false preconditioner in
       final_s
@@ -218,7 +225,7 @@ module Make (D : Do_with_T) = struct
           | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
         in
         (* save params *)
-        if iter % 1 = 0
+        if iter % 10 = 0
         then (
           (* avg error *)
           Convenience.print [%message (iter : int) (loss_avg : float)];
@@ -256,7 +263,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.05
+      ; learning_rate = Some 0.1
       ; n_tangents = 256
       ; sqrt = false
       ; rank_one = true
