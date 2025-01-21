@@ -138,15 +138,15 @@ module SOFO (W : Wrapper.T) = struct
     (* how each V should be weighted, as a row array *)
     let weights =
       let tmp = Convenience.a_trans_b u vtg in
-      let s =
+      let ds =
         match damping with
         | None -> s
         | Some gamma ->
           let offset = Float.(gamma * Tensor.(maximum s |> to_float0_exn)) in
           Tensor.(s + f offset)
       in
-      let s = if sqrt then Tensor.sqrt s else s in
-      Tensor.(matmul (u / s) tmp) |> Convenience.trans_2d
+      let ds = if sqrt then Tensor.(sqrt ds) else ds in
+      Tensor.(matmul (u / ds) tmp) |> Convenience.trans_2d
     in
     weighted_vs_sum vs ~weights
 

@@ -24,7 +24,7 @@ type pred_cond =
   | EmpFisher
   | TrueFisher
 
-let pred_cond = GGN
+let pred_cond = TrueFisher
 let sampling = false
 let m = 10
 let o = 40
@@ -50,8 +50,12 @@ module P = PP.Make (Prms.P)
 
 let theta =
   let c = Prms.free (Maths.primal (make_c (m, o))) in
-  let sigma_o_prms = Prms.free Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ]) in
-  let d_prms = Prms.free Maths.(primal (f (-2.) * ones_u)) in
+  let sigma_o_prms =
+    Prms.create
+      ~above:(Tensor.f (-5.))
+      Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ])
+  in
+  let d_prms = Prms.create ~above:(Tensor.f (-5.)) Maths.(primal (f (-2.) * ones_u)) in
   PP.{ c; sigma_o_prms; d_prms }
 
 let sample_data =
@@ -94,11 +98,11 @@ let gaussian_llh ?mu ~std x =
   in
   Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
 
-let fisher ~lik_term =
+let fisher ~n ~lik_term =
   let neg_lik_t =
     Maths.(tangent lik_term)
     |> Option.value_exn
-    |> fun x -> Tensor.(x / f Float.(of_int o))
+    |> fun x -> Tensor.(x / f Float.(of_int n))
   in
   let n_tangents = List.hd_exn (Tensor.shape neg_lik_t) in
   let fisher_half = Tensor.reshape neg_lik_t ~shape:[ n_tangents; -1 ] in
@@ -115,8 +119,8 @@ module M = struct
   type args = unit
 
   let f ~update ~data:y ~init ~args:() (theta : P.M.t) =
-    let sigma_o = Maths.((f 0.001 + exp theta.sigma_o_prms) * ones_o) in
-    let d = Maths.((f 0.001 + exp theta.d_prms) * ones_u) in
+    let sigma_o = Maths.(exp (theta.sigma_o_prms * ones_o)) in
+    let d = Maths.(exp theta.d_prms) in
     let u_opt = u_opt ~c:theta.c ~sigma_o y in
     let u_diff = Maths.(const (Tensor.randn_like (primal u_opt)) * unsqueeze ~dim:0 d) in
     let u_sampled = Maths.(u_opt + u_diff) in
@@ -129,17 +133,14 @@ module M = struct
         let q_term = gaussian_llh ~std:d u_diff in
         Maths.(q_term - prior_term))
       else (
-        let det1 = Maths.(sum (2. $* log d)) in
-        let _const =
-          Maths.const (Tensor.of_float0 ~device:base.device (Float.of_int m))
-        in
+        let det1 = Maths.(2. $* sum theta.d_prms) in
+        let _const = Maths.const (Tensor.f Float.(of_int m)) in
         let tr = Maths.(sum (sqr d)) in
         let quad =
-          Maths.(einsum [ u_opt, "mb"; u_opt, "mb" ] "m")
-          |> Maths.reshape ~shape:[ -1; 1 ]
+          Maths.(einsum [ u_opt, "mb"; u_opt, "mb" ] "m") |> Maths.reshape ~shape:[ -1 ]
         in
-        let tmp = Maths.(tr - _const - det1) |> Maths.reshape ~shape:[ 1; 1 ] in
-        Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1)
+        let tmp = Maths.(tr - _const - det1) |> Maths.reshape ~shape:[ 1 ] in
+        Maths.(0.5 $* tmp + quad))
     in
     let neg_elbo =
       Maths.(lik_term - kl_term) |> Maths.neg |> fun x -> Maths.(x / f Float.(of_int o))
@@ -151,18 +152,22 @@ module M = struct
         match pred_cond with
         | TrueFisher ->
           let true_fisher =
-            let y' =
-              (* generate surrogate sample drawn from the predictive distribution, for the Fisher matrix *)
-              Maths.(
-                const (primal y_pred)
-                (* IMPORTANT that y_pred be made a constant! *)
-                + (unsqueeze ~dim:0 sigma_o * const (Tensor.randn_like (primal y))))
-            in
-            let lik_term' = gaussian_llh ~mu:y_pred ~std:sigma_o y' in
-            fisher ~lik_term:lik_term'
+            let n_resample = 30 in
+            (* TODO: batch this instead of iterating *)
+            List.fold (List.range 0 n_resample) ~init:(Tensor.f 0.) ~f:(fun accu _ ->
+              let y' =
+                (* generate surrogate sample drawn from the predictive distribution, for the Fisher matrix *)
+                Maths.(
+                  const (primal y_pred)
+                  (* IMPORTANT that y_pred be made a constant! *)
+                  + (unsqueeze ~dim:0 sigma_o * const (Tensor.randn_like (primal y))))
+              in
+              let lik_term' = gaussian_llh ~mu:y_pred ~std:sigma_o y' in
+              Tensor.(accu + fisher ~n:o ~lik_term:lik_term'))
+            |> fun x -> Tensor.(x / f Float.(of_int n_resample))
           in
           true_fisher
-        | EmpFisher -> fisher ~lik_term
+        | EmpFisher -> fisher ~n:o ~lik_term
         | GGN ->
           let llh_ggn =
             let like_hess =
@@ -263,11 +268,11 @@ module Do_with_SOFO : Do_with_T = struct
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.1
+      ; learning_rate = Some 0.02
       ; n_tangents = 256
       ; sqrt = false
-      ; rank_one = true
-      ; damping = Some 1e-3
+      ; rank_one = false
+      ; damping = Some 1e-4
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None
@@ -306,7 +311,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 1000 in
+  let max_iter = 4000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->
