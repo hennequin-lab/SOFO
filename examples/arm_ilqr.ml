@@ -12,7 +12,7 @@ let tmax = 10
 let a = 4
 let b = 2
 let dt = 0.01
-let conv_threshold = 0.01
+let conv_threshold = 0.001
 
 (* -----------------------------------------
    ----- Utilitiy Functions ------
@@ -271,6 +271,13 @@ let decompose_x x =
   let vel2 = Maths.slice ~dim:1 ~start:(Some 3) ~end_:(Some 4) ~step:1 x in
   reshape_tmp pos1, reshape_tmp pos2, reshape_tmp vel1, reshape_tmp vel2
 
+(* after decomposition, pos1 etc has shape [m x 1 x 1] *)
+let decompose_u u =
+  let reshape_tmp = Maths.reshape ~shape:[ -1; 1; 1 ] in
+  let u1 = Maths.slice ~dim:1 ~start:(Some 0) ~end_:(Some 1) ~step:1 u in
+  let u2 = Maths.slice ~dim:1 ~start:(Some 1) ~end_:(Some 2) ~step:1 u in
+  reshape_tmp u1, reshape_tmp u2
+
 (* shape [m x 2 x 2] *)
 let _M ~pos2 =
   let common = Maths.(_A2 $* cos pos2) in
@@ -338,7 +345,7 @@ let _Fu ~x =
       Tensor.zeros [ batch_size; 2; 2 ] ~device:base.device ~kind:base.kind |> Maths.const
     in
     (* need to transpose since the convention is x = u Fu + x Fx *)
-    Maths.concat zeros _M_inv ~dim:0 |> Maths.transpose ~dim0:1 ~dim1:2
+    Maths.concat zeros _M_inv ~dim:1 |> Maths.transpose ~dim0:1 ~dim1:2
   | _ ->
     Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 2; 4 ] |> Maths.const
 
@@ -347,18 +354,118 @@ let _Fx ~x ~u =
   match x, u with
   | Some x, Some u ->
     let _, pos2, vel1, vel2 = decompose_x x in
+    let u1, u2 = decompose_u u in
     let _P = _P ~pos2 in
     let _M_inv = _M_inv ~pos2 ~_P in
     let _X = _X ~pos2 ~vel1 ~vel2 in
     (* first two rows *)
-    let row_12 = 
-    let zeros_tmp =  Tensor.zeros [ batch_size; 2; 2 ] ~device:base.device ~kind:base.kind |> Maths.const in 
-    let eye_emp = 
-      List.init batch_size ~f:(fun _ -> Tensor.eye ~n:2 ~options:(base.kind, base.device) |> Tensor.unsqueeze ~dim:0) |> Tensor.concat ~dim:0 |> Maths.const in 
-      Maths.concat zeros_tmp eye_emp ~dim:1 in 
-      
-
-   
+    let row_12 =
+      let zeros_tmp =
+        Tensor.zeros [ batch_size; 2; 2 ] ~device:base.device ~kind:base.kind
+        |> Maths.const
+      in
+      let eye_emp =
+        List.init batch_size ~f:(fun _ ->
+          Tensor.eye ~n:2 ~options:(base.kind, base.device) |> Tensor.unsqueeze ~dim:0)
+        |> Tensor.concat ~dim:0
+        |> Maths.const
+      in
+      Maths.concat zeros_tmp eye_emp ~dim:2
+    in
+    (* decompose x and u into individual components *)
+    let h1 =
+      let tmp1 = Maths.(_A2 $* sin pos2 * sqr vel1) in
+      let tmp2 = Maths.(0.025 $* vel1) in
+      let tmp3 = Maths.(0.05 $* vel2) in
+      Maths.(u2 - tmp1 - tmp2 - tmp3)
+    in
+    let h2 =
+      let tmp1 = Maths.(_A2 $* sin pos2 * neg vel2 * ((2. $* vel1) + vel2)) in
+      let tmp2 = Maths.(0.05 $* vel1) in
+      let tmp3 = Maths.(0.025 $* vel2) in
+      Maths.(u1 - tmp1 - tmp2 - tmp3)
+    in
+    let _f = Maths.((_A3 $* h2) - ((_A3 $+ (_A2 $* cos pos2)) * h1)) in
+    let row3 =
+      let row31 = Tensor.zeros ~device:base.device [ batch_size; 1; 1 ] |> Maths.const in
+      let row32 =
+        let tmp1 = Maths.(neg (Float.(_A3 * _A2) $* cos pos2)) in
+        let tmp2 = Maths.(_A2 $* sin pos2 * h1) in
+        let tmp3 = Maths.(_f * (Float.(2. * square _A2) $* cos vel2 * sin vel2)) in
+        Maths.(((tmp1 + tmp2) / _P) - (tmp3 / sqr _P))
+      in
+      let row33 =
+        let tmp1 = Maths.(Float.(_A3 * _A2) $* sin pos2 * vel2) in
+        let tmp2 =
+          Float.(0.05 * _A3)
+          |> Tensor.of_float0 ~device:base.device
+          |> Tensor.reshape ~shape:[ 1; 1; 1 ]
+          |> Maths.const
+        in
+        let tmp3 =
+          let part1 = Maths.(_A3 $+ (_A2 $* cos pos2)) in
+          let part2 = Maths.((Float.(-2. * _A2) $* sin pos2 * vel1) -$ 0.025) in
+          Maths.(part1 * part2)
+        in
+        Maths.((tmp1 - tmp2 - tmp3) / _P)
+      in
+      let row34 =
+        let tmp1 = Maths.(Float.(_A3 * _A2) $* sin pos2 * (2. $* vel1 + vel2)) in
+        let tmp2 =
+          Float.(0.025 * _A3)
+          |> Tensor.of_float0 ~device:base.device
+          |> Tensor.reshape ~shape:[ 1; 1; 1 ]
+          |> Maths.const
+        in
+        let tmp3 = Maths.(0.05 $* (_A3 $+ (_A2 $* cos pos2))) in
+        Maths.((tmp1 - tmp2 + tmp3) / _P)
+      in
+      Maths.concat_list [ row31; row32; row33; row34 ] ~dim:2
+    in
+    let _z =
+      Maths.(
+        ((_A1 $+ (Float.(2. * _A2) $* cos pos2)) * h1) - ((_A3 $+ (_A2 $* cos pos2)) * h2))
+    in
+    let row4 =
+      let row41 = Tensor.zeros ~device:base.device [ batch_size; 1; 1 ] |> Maths.const in
+      let row42 =
+        let tmp1 = Maths.((_A3 $+ neg (_A2 $* sin pos2)) * h2) in
+        let tmp2 = Maths.((_A1 $+ neg (Float.(2. * _A2) $* sin pos2)) * h1) in
+        let tmp3 =
+          let part1 = Maths.(_A1 $+ (Float.(2. * _A2) $* cos pos2)) in
+          let part2 = Maths.(_A2 $* cos pos2 * sqr vel1) in
+          Maths.(part1 * part2)
+        in
+        let tmp4 = Maths.(Float.(2. * square _A2) $* _z * cos pos2 * sin pos2) in
+        Maths.(((tmp2 - tmp1 + tmp3) / _P) - (tmp4 / sqr _P))
+      in
+      let row43 =
+        let tmp1 =
+          Maths.(
+            (_A3 $+ (_A2 $* cos pos2)) * (Float.(2. * _A2) $* (sin pos2 * vel2) -$ 0.05))
+        in
+        let tmp2 =
+          Maths.(
+            (_A1 $+ (Float.(2. * _A2) $* cos pos2))
+            * (Float.(neg 2. * _A2) $* (sin pos2 * vel1) -$ 0.025))
+        in
+        Maths.((tmp2 - tmp1) / _P)
+      in
+      let row44 =
+        let tmp1 =
+          Maths.(
+            (_A3 $+ (_A2 $* cos pos2))
+            * (Float.(2. * _A2) $* (sin pos2 * (vel1 + vel2)) -$ 0.025))
+        in
+        let tmp2 = Maths.(neg (0.05 $* (_A1 $+ (Float.(2. * _A2) $* cos pos2)))) in
+        Maths.((tmp2 - tmp1) / _P)
+      in
+      Maths.concat_list [ row41; row42; row43; row44 ] ~dim:2
+    in
+    let f =
+      Maths.concat_list [ row_12; row3; row4 ] ~dim:1 |> Maths.transpose ~dim0:1 ~dim1:2
+    in
+    f
   | _ ->
     Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 4; 4 ] |> Maths.const
 

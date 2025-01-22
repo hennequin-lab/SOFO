@@ -16,7 +16,7 @@ let n_fisher = 100
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
 module Dims = struct
-  let a = 10
+  let a = 15
   let b = 10
   let o = 40
   let tmax = 10
@@ -257,7 +257,7 @@ module LGS = struct
       theta._std_u |> sqr_inv |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
     in
     let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 in
-    let _cov_o_inv = sqr_inv theta._std_o in
+    let _cov_o_inv = theta._std_o |> sqr_inv in
     let _Cxx =
       let tmp = Maths.(einsum [ theta._c, "ab"; _cov_o_inv, "b" ] "ab") in
       Maths.(tmp *@ c_trans)
@@ -312,8 +312,10 @@ module LGS = struct
         Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.b; Dims.tmax ]
         |> Maths.const
       in
-      let xi_space = Maths.einsum [ xi, "mbt"; theta._std_space, "b" ] "mbt" in
-      let xi_time = Maths.einsum [ xi_space, "mat"; theta._std_time, "t" ] "mat" in
+      let xi_space = Maths.einsum [ xi, "mbt"; Maths.exp theta._std_space, "b" ] "mbt" in
+      let xi_time =
+        Maths.einsum [ xi_space, "mat"; Maths.exp theta._std_time, "t" ] "mat"
+      in
       let meaned = Maths.(xi_time + optimal_u) in
       List.init Dims.tmax ~f:(fun i ->
         Maths.slice ~dim:2 ~start:(Some i) ~end_:(Some (i + 1)) ~step:1 meaned
@@ -368,20 +370,20 @@ module LGS = struct
         let neg_entropy =
           let u = concat_time u_list |> Maths.reshape ~shape:[ Dims.m; -1 ] in
           let optimal_u = Maths.reshape optimal_u ~shape:[ Dims.m; -1 ] in
-          let std = Maths.kron theta._std_space theta._std_time in
+          let std = Maths.(kron (exp theta._std_space) (exp theta._std_time)) in
           gaussian_llh ~mu:optimal_u ~std u
         in
         Maths.(neg_entropy - prior))
       else (
         (* M2: calculate the kl term analytically *)
-        let std2 = Maths.kron theta._std_space theta._std_time in
+        let std2 = Maths.(kron (exp theta._std_space) (exp theta._std_time)) in
         let det1 = Maths.(2. $* sum (log std2)) in
         let det2 = Maths.(Float.(2. * of_int Dims.tmax) $* sum (log theta._std_u)) in
         let _const = Float.of_int (Dims.b * Dims.tmax) in
         let _cov_u_inv = theta._std_u |> sqr_inv in
         let tr =
-          let tmp2 = Maths.(_cov_u_inv * sqr theta._std_space) in
-          let tmp3 = Maths.(kron tmp2 (sqr theta._std_time)) in
+          let tmp2 = Maths.(_cov_u_inv * sqr (exp theta._std_space)) in
+          let tmp3 = Maths.(kron tmp2 (sqr (exp theta._std_time))) in
           Maths.sum tmp3
         in
         let quad =
@@ -454,13 +456,20 @@ module LGS = struct
       (* Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ])
       |> Prms.create ~above:(Tensor.f 0.1) *)
     in
+    (* variational parameters live in log space *)
     let _std_space =
-      Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ])
-      |> Prms.create ~above:(Tensor.f 0.1)
+      (* Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ])
+      |> Prms.create ~above:(Tensor.f 0.1) *)
+      Prms.create
+        ~above:(Tensor.f (-5.))
+        Tensor.(zeros ~device:base.device ~kind:base.kind [ Dims.b ])
     in
     let _std_time =
-      Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ])
-      |> Prms.create ~above:(Tensor.f 0.1)
+      (* Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ])
+      |> Prms.create ~above:(Tensor.f 0.1) *)
+      Prms.create
+        ~above:(Tensor.f (-5.))
+        Tensor.(zeros ~device:base.device ~kind:base.kind [ Dims.tmax ])
     in
     { _Fx_prod; _Fu_prod; _c; _b; _std_o; _std_u; _std_space; _std_time }
 
@@ -492,7 +501,7 @@ module type Do_with_T = sig
      and type W.args = unit
 
   val name : string
-  val config : (float, Bigarray.float64_elt) O.config
+  val config_f : iter:int -> (float, Bigarray.float64_elt) O.config
   val init : O.state
 end
 
@@ -505,6 +514,7 @@ module Make (D : Do_with_T) = struct
       Stdlib.Gc.major ();
       let u_list, _, o_list = sample_data () in
       let t0 = Unix.gettimeofday () in
+      let config = config_f ~iter in
       let loss, new_state = O.step ~config ~state ~data:o_list ~args:() in
       let t1 = Unix.gettimeofday () in
       let time_elapsed = Float.(time_elapsed + t1 - t0) in
@@ -515,7 +525,7 @@ module Make (D : Do_with_T) = struct
           | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
         in
         (* save params *)
-        if iter % 1 = 0
+        if iter % 10 = 0
         then (
           (* ground truth elbo *)
           let elbo_true =
@@ -583,14 +593,12 @@ end
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (LGS)
 
-  let name = "fisher"
-
-  let config =
+  let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.01
+      ; learning_rate = Some Float.(0.2 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 128
-      ; sqrt = false
+      ; sqrt = true
       ; rank_one = false
       ; damping = None
       ; momentum = None
@@ -598,7 +606,8 @@ module Do_with_SOFO : Do_with_T = struct
       ; perturb_thresh = None
       }
 
-  let init = O.init ~config LGS.init
+  let name = sprintf "true_fisher"
+  let init = O.init ~config:(config_f ~iter:0) LGS.init
 end
 
 (* --------------------------------
@@ -610,12 +619,14 @@ module Do_with_Adam : Do_with_T = struct
 
   module O = Optimizer.Adam (LGS)
 
-  let config = Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
+  let config_f ~iter:_ =
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
+
   let init = O.init LGS.init
 end
 
 let _ =
-  let max_iter = 2000 in
+  let max_iter = 1000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->
