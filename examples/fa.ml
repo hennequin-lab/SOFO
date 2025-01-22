@@ -82,10 +82,10 @@ let u_opt ~c ~sigma_o y =
   let solution = solver a y in
   Maths.(einsum [ c, "ij"; solution, "mj" ] "mi")
 
-let gaussian_llh ?mu ?(batched = false) ~std x =
+let gaussian_llh ?mu ?(fisher_batched = false) ~std x =
   let inv_std = Maths.(f 1. / std) in
   let error_term =
-    if batched
+    if fisher_batched
     then (
       (* batch dimension l is number of fisher samples *)
       let error =
@@ -103,7 +103,7 @@ let gaussian_llh ?mu ?(batched = false) ~std x =
       Maths.einsum [ error, "ma"; error, "ma" ] "m")
   in
   let cov_term =
-    let cov_term_shape = if batched then [ 1; 1 ] else [ 1 ] in
+    let cov_term_shape = if fisher_batched then [ 1; 1 ] else [ 1 ] in
     Maths.(sum (log (sqr std))) |> Maths.reshape ~shape:cov_term_shape
   in
   let const_term =
@@ -112,7 +112,7 @@ let gaussian_llh ?mu ?(batched = false) ~std x =
   in
   Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
 
-let fisher ?(batched = false) ~n lik_term =
+let fisher ?(fisher_batched = false) ~n lik_term =
   let neg_lik_t =
     Maths.(tangent lik_term)
     |> Option.value_exn
@@ -120,7 +120,7 @@ let fisher ?(batched = false) ~n lik_term =
   in
   let n_tangents = List.hd_exn (Tensor.shape neg_lik_t) in
   let fisher =
-    if batched
+    if fisher_batched
     then (
       let fisher_half = Tensor.reshape neg_lik_t ~shape:[ n_tangents; n_fisher; -1 ] in
       Tensor.einsum ~equation:"kla,jla->lkj" [ fisher_half; fisher_half ] ~path:None)
@@ -192,14 +192,18 @@ module M = struct
               in
               Maths.(const y_pred_primal + noise)
             in
+            (* Convenience.print
+              [%message
+                (Tensor.shape (Maths.primal Maths.( y_samples_batched))
+                 : int list)]; *)
             let lik_term_sampled_batched =
               gaussian_llh
                 ~mu:y_pred_unsqueezed
                 ~std:sigma_o
-                ~batched:true
+                ~fisher_batched:true
                 y_samples_batched
             in
-            let fisher = fisher ~n:o lik_term_sampled_batched ~batched:true in
+            let fisher = fisher ~n:o lik_term_sampled_batched ~fisher_batched:true in
             Tensor.mean_dim fisher ~dim:(Some [ 0 ]) ~keepdim:false ~dtype:base.kind
           in
           true_fisher

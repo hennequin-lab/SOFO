@@ -718,7 +718,7 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
             | Some _cov ->
               let noise =
                 let eps = sample_tensor [ X.m; X.o ] in
-                let cov_sqrt = Tensor.cholesky ~upper:true _cov in
+                let cov_sqrt = Tensor.linalg_cholesky ~upper:true _cov in
                 let eqn = if X.batch_const then "ma,ab->mb" else "ma,mab->mb" in
                 Tensor.einsum ~equation:eqn [ eps; cov_sqrt ] ~path:None
               in

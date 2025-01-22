@@ -572,7 +572,8 @@ let ( + ) (x, dx) (y, dy) =
 let ( - ) (x, dx) (y, dy) =
   let z = Tensor.(x - y) in
   let dz = with_tangents dx dy ~fx:Fn.id ~fy:Tensor.neg ~fxy:Tensor.( - ) in
-  (z, dz) |> assert_right_shape "( - )"
+  (z, dz) 
+  |> assert_right_shape "( - )"
 
 (* z = x * y, dz = y dx + x dy *)
 let ( * ) (x, dx) (y, dy) =
