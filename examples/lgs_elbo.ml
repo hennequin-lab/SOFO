@@ -447,14 +447,14 @@ module LGS = struct
       Tensor.zeros ~device:base.device ~kind:base.kind [ 1; Dims.o ] |> Prms.const
     in
     let _std_o =
-      Tensor.diag ~diagonal:0 _std_o |> Prms.const
-      (* Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ])
-      |> Prms.create ~above:(Tensor.f 0.1) *)
+      (* Tensor.diag ~diagonal:0 _std_o |> Prms.const *)
+      Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ])
+      |> Prms.create ~above:(Tensor.f 0.1)
     in
     let _std_u =
-      _std_u |> Prms.const
-      (* Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ])
-      |> Prms.create ~above:(Tensor.f 0.1) *)
+      (* _std_u |> Prms.const *)
+      Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ])
+      |> Prms.create ~above:(Tensor.f 0.1)
     in
     (* variational parameters live in log space *)
     let _std_space =
@@ -564,6 +564,11 @@ module Make (D : Do_with_T) = struct
           in
           (* avg error *)
           Convenience.print [%message (iter : int) (loss_avg : float)];
+          (* let learned_std_o =
+            let theta_curr = O.params new_state in
+            theta_curr._std_o |> Prms.value |> Tensor.norm |> Tensor.to_float0_exn
+          in
+          Convenience.print [%message (learned_std_o : float)]; *)
           let t = iter in
           Owl.Mat.(
             save_txt
@@ -596,7 +601,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.2 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(1e-3 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = true
       ; rank_one = false
@@ -606,7 +611,13 @@ module Do_with_SOFO : Do_with_T = struct
       ; perturb_thresh = None
       }
 
-  let name = sprintf "true_fisher"
+  let name =
+    let init_config = config_f ~iter:0 in
+    sprintf
+      "true_fisher_lr_%s_sqrt_%s"
+      (Float.to_string (Option.value_exn init_config.learning_rate))
+      (Bool.to_string init_config.sqrt)
+
   let init = O.init ~config:(config_f ~iter:0) LGS.init
 end
 
@@ -626,7 +637,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 1000 in
+  let max_iter = 1500 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

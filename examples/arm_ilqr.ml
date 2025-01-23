@@ -8,7 +8,7 @@ open Sofo
 
 let base = Optimizer.Config.Base.default
 let batch_size = 32
-let tmax = 10
+let tmax = 100
 let a = 4
 let b = 2
 let dt = 0.01
@@ -345,7 +345,8 @@ let _Fu ~x =
       Tensor.zeros [ batch_size; 2; 2 ] ~device:base.device ~kind:base.kind |> Maths.const
     in
     (* need to transpose since the convention is x = u Fu + x Fx *)
-    Maths.concat zeros _M_inv ~dim:1 |> Maths.transpose ~dim0:1 ~dim1:2
+    Maths.concat zeros _M_inv ~dim:1
+    |> fun x -> Maths.(dt $* x) |> Maths.transpose ~dim0:1 ~dim1:2
   | _ ->
     Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 2; 4 ] |> Maths.const
 
@@ -391,8 +392,12 @@ let _Fx ~x ~u =
       let row32 =
         let tmp1 = Maths.(neg (Float.(_A3 * _A2) $* cos pos2)) in
         let tmp2 = Maths.(_A2 $* sin pos2 * h1) in
-        let tmp3 = Maths.(_f * (Float.(2. * square _A2) $* cos vel2 * sin vel2)) in
-        Maths.(((tmp1 + tmp2) / _P) - (tmp3 / sqr _P))
+        let tmp3 = 
+          let part1 = Maths.(_A3 $+ (_A2 $* cos pos2)) in 
+          let part2 = Maths.(_A2 $* (cos pos2 * (sqr vel1))) in 
+          Maths.(part1 * part2) in 
+        let tmp4 = Maths.(_f * (Float.(2. * square _A2) $* cos vel2 * sin vel2)) in
+        Maths.(((tmp1 + tmp2 + tmp3) / _P) - (tmp4 / sqr _P))
       in
       let row33 =
         let tmp1 = Maths.(Float.(_A3 * _A2) $* sin pos2 * vel2) in
@@ -429,15 +434,19 @@ let _Fx ~x ~u =
     let row4 =
       let row41 = Tensor.zeros ~device:base.device [ batch_size; 1; 1 ] |> Maths.const in
       let row42 =
-        let tmp1 = Maths.((_A3 $+ neg (_A2 $* sin pos2)) * h2) in
-        let tmp2 = Maths.((_A1 $+ neg (Float.(2. * _A2) $* sin pos2)) * h1) in
+        let tmp1 = Maths.(((_A2 $* sin pos2)) * h2) in
+        let tmp2 = Maths.(( neg (Float.(2. * _A2) $* sin pos2)) * h1) in
         let tmp3 =
           let part1 = Maths.(_A1 $+ (Float.(2. * _A2) $* cos pos2)) in
           let part2 = Maths.(_A2 $* cos pos2 * sqr vel1) in
           Maths.(part1 * part2)
         in
-        let tmp4 = Maths.(Float.(2. * square _A2) $* _z * cos pos2 * sin pos2) in
-        Maths.(((tmp2 - tmp1 + tmp3) / _P) - (tmp4 / sqr _P))
+        let tmp4 = 
+          let part1 = Maths.(_A3 $+ (_A2 $* cos pos2)) in
+          let part2 = Maths.(_A2 $* (cos pos2 * vel2 * ((2. $* vel1) + vel2))) in 
+          Maths.(part1 * part2) in
+        let tmp5 = Maths.(Float.(2. * square _A2) $* _z * cos pos2 * sin pos2) in
+        Maths.(((tmp2 - tmp1 + tmp3 - tmp4) / _P) - (tmp5 / sqr _P))
       in
       let row43 =
         let tmp1 =
@@ -462,10 +471,15 @@ let _Fx ~x ~u =
       in
       Maths.concat_list [ row41; row42; row43; row44 ] ~dim:2
     in
-    let f =
-      Maths.concat_list [ row_12; row3; row4 ] ~dim:1 |> Maths.transpose ~dim0:1 ~dim1:2
+    let dx_dot = Maths.concat_list [ row_12; row3; row4 ] ~dim:1 in
+    let eye =
+      List.init batch_size ~f:(fun _ ->
+        Tensor.eye ~n:4 ~options:(base.kind, base.device) |> Tensor.unsqueeze ~dim:0)
+      |> Tensor.concat ~dim:0
+      |> Maths.const
     in
-    f
+    let final = Maths.(eye + (dt $* dx_dot)) |> Maths.transpose ~dim0:1 ~dim1:2 in
+    final
   | _ ->
     Tensor.zeros ~device:base.device ~kind:base.kind [ batch_size; 4; 4 ] |> Maths.const
 
