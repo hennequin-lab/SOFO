@@ -1,4 +1,4 @@
-(* Test whether ilqr is correct with arm model controlled with MGU2. TODO: this is not correct! *)
+(* Test whether ilqr is correct with arm model. *)
 
 open Base
 open Torch
@@ -7,7 +7,7 @@ module Mat = Owl.Dense.Matrix.S
 open Sofo
 
 let base = Optimizer.Config.Base.default
-let batch_size = 32
+let batch_size = 5
 let tmax = 100
 let a = 4
 let b = 2
@@ -163,7 +163,7 @@ let central_spot =
   |> map ~f:Maths.primal
   |> map ~f:(fun x -> Tensor.(sum x |> to_float0_exn))
 
-let reach_target ?angle ?radius () =
+(* let reach_target ?angle ?radius () =
   let angle =
     match angle with
     | Some a -> a
@@ -179,7 +179,30 @@ let reach_target ?angle ?radius () =
     x |> Tensor.of_float0 ~device:base.device |> Tensor.reshape ~shape:[ 1; 1 ]
   in
   ( Float.(central_spot.pos.x1 + (radius * cos angle_)) |> to_tens
-  , Float.(central_spot.pos.x2 + (radius * sin angle_)) |> to_tens )
+  , Float.(central_spot.pos.x2 + (radius * sin angle_)) |> to_tens ) *)
+
+(* specify desired angle and reach target directly *)
+let reach_target () =
+  let a1 =
+    (* Owl_stats.uniform_rvs ~a:(-36.) ~b:(180. +. 36.) *)
+    Owl_stats.uniform_rvs ~a:0. ~b:45. |> fun x -> Float.(x / 180.)
+  in
+  let a2 =
+    (* Owl_stats.uniform_rvs ~a:(-36.) ~b:(180. +. 36.) *)
+    Owl_stats.uniform_rvs ~a:0. ~b:45. |> fun x -> Float.(x / 180.)
+  in
+  let joint_x = Float.(_L1 * cos a1) in
+  let joint_y = Float.(_L1 * sin a1) in
+  let z = Float.(a1 + a2) in
+  let pos1 = Float.(joint_x + (_L2 * cos z)) in
+  let pos2 = Float.(joint_y + (_L2 * sin z)) in
+  let to_tens x =
+    x |> Tensor.of_float0 ~device:base.device |> Tensor.reshape ~shape:[ 1; 1 ]
+  in
+  ( a1 |> to_tens
+  , a2 |> to_tens
+  , Float.(central_spot.pos.x1 + pos1) |> to_tens
+  , Float.(central_spot.pos.x2 + pos2) |> to_tens )
 
 (* ----------------------------------------------------------------------------
     ---     PROBLEM DEFINITION                                       ---
@@ -198,28 +221,22 @@ let x0_batched =
 
 (* given target positions, calculate target angle positions *)
 let target_state (y1, y2) =
-  let r_sqr =
-    Tensor.(square y1 + square (sub_scalar y2 (Scalar.f central_spot.pos.x2)))
-  in
+  let r_sqr = Tensor.(square y1 + square (y2 - f central_spot.pos.x2)) in
   let x2 =
-    let num = Tensor.(sub_scalar r_sqr (Scalar.f Float.(square _L1 + square _L2))) in
-    let denom = Tensor.of_float0 ~device:base.device Float.(2. * _L1 * _L2) in
-    Tensor.(arccos (num / denom)) |> Tensor.to_float0_exn
+    let num = Tensor.(r_sqr - f Float.(square _L1 + square _L2)) in
+    Tensor.(arccos (num / f Float.(2. * _L1 * _L2))) |> Tensor.to_float0_exn
   in
   let x1 =
     let tmp1 =
       let num = y1 in
       let denom =
-        Tensor.(
-          of_float0
-            ~device:base.device
-            Float.(sqrt (square _L1 + square _L2 + (2. * _L1 * _L2 * cos x2))))
+        Tensor.(f Float.(sqrt (square _L1 + square _L2 + (2. * _L1 * _L2 * cos x2))))
       in
       Tensor.(arccos (num / denom))
     in
     let tmp2 =
-      let num = Tensor.(of_float0 ~device:base.device Float.(_L1 + (_L2 * cos x2))) in
-      let denom = Tensor.of_float0 ~device:base.device Float.(_L2 * sin x2) in
+      let num = Tensor.(f Float.(_L1 + (_L2 * cos x2))) in
+      let denom = Tensor.f Float.(_L2 * sin x2) in
       Tensor.(arctan (num / denom))
     in
     Tensor.(tmp1 - tmp2)
@@ -230,8 +247,8 @@ let target_state (y1, y2) =
 let targets_batched =
   let batched_targets =
     List.init batch_size ~f:(fun _ ->
-      let target_pos = reach_target () in
-      target_state target_pos)
+      let target_a1, target_a2, _, _ = reach_target () in
+      target_a1, target_a2)
   in
   let final =
     List.map batched_targets ~f:(fun (x1, x2) ->
@@ -246,21 +263,6 @@ let targets_batched =
 let zeros = Tensor.zeros ~device:base.device ~kind:base.kind [ 1; 1 ]
 let ones = Tensor.ones ~device:base.device ~kind:base.kind [ 1; 1 ]
 let dt_t = Tensor.of_float0 dt ~device:base.device |> Tensor.reshape ~shape:[ 1; 1 ]
-
-(* f = x(t+1) = P x (t) + Q \dot{x}(t) *)
-let _P =
-  let row1 = Tensor.concat [ ones; zeros; dt_t; zeros ] ~dim:1 in
-  let row2 = Tensor.concat [ zeros; ones; zeros; dt_t ] ~dim:1 in
-  let row3 = Tensor.concat [ zeros; zeros; ones; zeros ] ~dim:1 in
-  let row4 = Tensor.concat [ zeros; zeros; zeros; ones ] ~dim:1 in
-  Tensor.concat [ row1; row2; row3; row4 ] ~dim:0 |> Maths.const
-
-let _Q =
-  let row1 = Tensor.concat [ zeros; zeros; zeros; zeros ] ~dim:1 in
-  let row2 = row1 in
-  let row3 = Tensor.concat [ zeros; zeros; dt_t; zeros ] ~dim:1 in
-  let row4 = Tensor.concat [ zeros; zeros; zeros; dt_t ] ~dim:1 in
-  Tensor.concat [ row1; row2; row3; row4 ] ~dim:0 |> Maths.const
 
 (* after decomposition, pos1 etc has shape [m x 1 x 1] *)
 let decompose_x x =
@@ -289,10 +291,7 @@ let _M ~pos2 =
       [ Maths.(_A3 $+ common)
       ; Maths.(
           const
-            Tensor.(
-              mul_scalar
-                (ones ~device:base.device ~kind:base.kind [ batch_size; 1; 1 ])
-                (Scalar.f _A3)))
+            Tensor.(ones ~device:base.device ~kind:base.kind [ batch_size; 1; 1 ] * f _A3))
       ]
       ~dim:2
   in
@@ -301,7 +300,7 @@ let _M ~pos2 =
 (* shape [m x 1 x 1] *)
 let _P ~pos2 =
   let common = Maths.(_A2 $* cos pos2) in
-  Maths.(_A3 $* (_A1 $+ (2. $* common)) - sqr (_A3 $+ (2. $* common)))
+  Maths.((_A3 $* (_A1 $+ (2. $* common))) - sqr (_A3 $+ (2. $* common)))
   |> Maths.reshape ~shape:[ -1; 1; 1 ]
 
 (* shape [m x 2 x 2] *)
@@ -311,10 +310,7 @@ let _M_inv ~pos2 ~_P =
     Maths.concat_list
       [ Maths.(
           const
-            Tensor.(
-              mul_scalar
-                (ones ~device:base.device ~kind:base.kind [ batch_size; 1; 1 ])
-                (Scalar.f _A3)))
+            Tensor.(ones ~device:base.device ~kind:base.kind [ batch_size; 1; 1 ] * f _A3))
       ; Maths.(neg (_A3 $+ common))
       ]
       ~dim:2
@@ -392,10 +388,11 @@ let _Fx ~x ~u =
       let row32 =
         let tmp1 = Maths.(neg (Float.(_A3 * _A2) $* cos pos2)) in
         let tmp2 = Maths.(_A2 $* sin pos2 * h1) in
-        let tmp3 = 
-          let part1 = Maths.(_A3 $+ (_A2 $* cos pos2)) in 
-          let part2 = Maths.(_A2 $* (cos pos2 * (sqr vel1))) in 
-          Maths.(part1 * part2) in 
+        let tmp3 =
+          let part1 = Maths.(_A3 $+ (_A2 $* cos pos2)) in
+          let part2 = Maths.(_A2 $* cos pos2 * sqr vel1) in
+          Maths.(part1 * part2)
+        in
         let tmp4 = Maths.(_f * (Float.(2. * square _A2) $* cos vel2 * sin vel2)) in
         Maths.(((tmp1 + tmp2 + tmp3) / _P) - (tmp4 / sqr _P))
       in
@@ -434,24 +431,25 @@ let _Fx ~x ~u =
     let row4 =
       let row41 = Tensor.zeros ~device:base.device [ batch_size; 1; 1 ] |> Maths.const in
       let row42 =
-        let tmp1 = Maths.(((_A2 $* sin pos2)) * h2) in
-        let tmp2 = Maths.(( neg (Float.(2. * _A2) $* sin pos2)) * h1) in
+        let tmp1 = Maths.((_A2 $* sin pos2) * h2) in
+        let tmp2 = Maths.(neg (Float.(2. * _A2) $* sin pos2) * h1) in
         let tmp3 =
           let part1 = Maths.(_A1 $+ (Float.(2. * _A2) $* cos pos2)) in
           let part2 = Maths.(_A2 $* cos pos2 * sqr vel1) in
           Maths.(part1 * part2)
         in
-        let tmp4 = 
+        let tmp4 =
           let part1 = Maths.(_A3 $+ (_A2 $* cos pos2)) in
-          let part2 = Maths.(_A2 $* (cos pos2 * vel2 * ((2. $* vel1) + vel2))) in 
-          Maths.(part1 * part2) in
+          let part2 = Maths.(_A2 $* cos pos2 * vel2 * ((2. $* vel1) + vel2)) in
+          Maths.(part1 * part2)
+        in
         let tmp5 = Maths.(Float.(2. * square _A2) $* _z * cos pos2 * sin pos2) in
-        Maths.(((tmp2 - tmp1 + tmp3 - tmp4) / _P) - (tmp5 / sqr _P))
+        Maths.(((tmp1 + tmp2 + tmp3 - tmp4) / _P) - (tmp5 / sqr _P))
       in
       let row43 =
         let tmp1 =
           Maths.(
-            (_A3 $+ (_A2 $* cos pos2)) * (Float.(2. * _A2) $* (sin pos2 * vel2) -$ 0.05))
+            (_A3 $+ (_A2 $* cos pos2)) * ((Float.(2. * _A2) $* sin pos2 * vel2) -$ 0.05))
         in
         let tmp2 =
           Maths.(
@@ -464,7 +462,7 @@ let _Fx ~x ~u =
         let tmp1 =
           Maths.(
             (_A3 $+ (_A2 $* cos pos2))
-            * (Float.(2. * _A2) $* (sin pos2 * (vel1 + vel2)) -$ 0.025))
+            * ((Float.(2. * _A2) $* sin pos2 * (vel1 + vel2)) -$ 0.025))
         in
         let tmp2 = Maths.(neg (0.05 $* (_A1 $+ (Float.(2. * _A2) $* cos pos2)))) in
         Maths.((tmp2 - tmp1) / _P)
@@ -577,12 +575,11 @@ let ilqr ~targets_batched =
     let _Cuu_batched =
       List.init batch_size ~f:(fun _ ->
         Maths.reshape
-          (Maths.const (Tensor.eye ~options:(base.kind, base.device) ~n:2))
+          (Maths.const Tensor.(f 0.1 * eye ~options:(base.kind, base.device) ~n:2))
           ~shape:[ 1; b; b ])
       |> Maths.concat_list ~dim:0
     in
     let tau_extended = extend_tau_list tau in
-    (* let _cx = Maths.((squeeze ~dim:2 targets_batched) *@ _Cxx) in *)
     let _cx = Maths.einsum [ targets_batched, "ma"; _Cxx_batched, "mab" ] "mb" in
     let tmp_list =
       Lqr.Params.
@@ -594,7 +591,8 @@ let ilqr ~targets_batched =
                 ; _Fx_prod = _Fx ~x:s.x ~u:s.u
                 ; _Fu_prod = _Fu ~x:s.x
                 ; _cx =
-                    (if i = tmax
+                Some _cx
+                    (* (if i = tmax
                      then Some _cx
                      else
                        Some
@@ -602,17 +600,18 @@ let ilqr ~targets_batched =
                             (Tensor.zeros
                                ~kind:base.kind
                                ~device:base.device
-                               [ batch_size; a ])))
+                               [ batch_size; a ]))) *)
                 ; _cu = None
                 ; _Cxx =
-                    (if i = tmax
+                _Cxx_batched
+                    (* (if i = tmax
                      then _Cxx_batched
                      else
                        Maths.const
                          (Tensor.zeros
                             ~kind:base.kind
                             ~device:base.device
-                            [ batch_size; a; a ]))
+                            [ batch_size; a; a ])) *)
                 ; _Cxu = None
                 ; _Cuu = _Cuu_batched
                 })
@@ -650,5 +649,5 @@ let _ =
     let last = List.last_exn sol in
     Option.value_exn last.x
   in
-  let error = calc_error final_state in
-  Convenience.print [%message (error : float)]
+  let final_error = calc_error final_state in
+  Convenience.print [%message (final_error : float)]
