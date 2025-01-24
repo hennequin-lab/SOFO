@@ -175,7 +175,6 @@ module M = struct
         let tmp = Maths.(tr - _const - det1 + det2) |> Maths.reshape ~shape:[ 1 ] in
         Maths.(0.5 $* tmp + quad))
     in
-    (* TODO:ignore kl term first *)
     let neg_elbo =
       Maths.(lik_term - kl_term) |> Maths.neg |> fun x -> Maths.(x / f Float.(of_int o))
     in
@@ -186,23 +185,28 @@ module M = struct
         match pred_cond with
         | TrueFisher ->
           let true_fisher =
-            let y_pred_unsqueezed = Maths.unsqueeze ~dim:0 y_pred in
+            let y_pred_unsqueezed =
+              let tmp = Maths.unsqueeze ~dim:0 y_pred in
+              List.init n_fisher ~f:(fun _ -> tmp) |> Maths.concat_list ~dim:0
+            in
             let y_pred_primal = Maths.primal y_pred |> Tensor.unsqueeze ~dim:0 in
             let sigma_extended =
-              sigma_o |> Maths.unsqueeze ~dim:0 |> Maths.unsqueeze ~dim:0
+              sigma_o
+              |> Maths.primal
+              |> Tensor.unsqueeze ~dim:0
+              |> Tensor.unsqueeze ~dim:0
             in
             let y_samples_batched =
               let noise =
-                Maths.(
+                Tensor.(
                   sigma_extended
-                  * const
-                      Tensor.(
-                        randn
-                          (n_fisher :: Maths.shape y)
-                          ~device:base.device
-                          ~kind:base.kind))
+                  * Tensor.(
+                      randn
+                        (n_fisher :: Maths.shape y)
+                        ~device:base.device
+                        ~kind:base.kind))
               in
-              Maths.(const y_pred_primal + noise)
+              Maths.(const Tensor.(y_pred_primal + noise))
             in
             let lik_term_sampled_batched =
               gaussian_llh
@@ -320,7 +324,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
-      ; damping = None
+      ; damping = Some 1e-3
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None

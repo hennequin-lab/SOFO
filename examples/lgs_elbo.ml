@@ -16,9 +16,9 @@ let n_fisher = 100
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
 module Dims = struct
-  let a = 24
+  let a = 15
   let b = 10
-  let o = 48
+  let o = 40
   let tmax = 10
   let m = 128
   let batch_const = true
@@ -166,7 +166,11 @@ module LGS = struct
     (* this is u sampled from posterior *)
     let true_fisher ~u_list (theta : P.M.t) =
       let _std_o_extended =
-        theta._std_o |> Maths.exp |> Maths.unsqueeze ~dim:0 |> Maths.unsqueeze ~dim:0
+        theta._std_o
+        |> Maths.primal
+        |> Tensor.exp
+        |> Tensor.unsqueeze ~dim:0
+        |> Tensor.unsqueeze ~dim:0
       in
       let _, fisher_rollout =
         List.fold
@@ -184,16 +188,14 @@ module LGS = struct
               |> Maths.concat_list ~dim:0
             in
             let noise =
-              Maths.(
+              Tensor.(
                 _std_o_extended
-                * const
-                    Tensor.(
-                      randn
-                        (n_fisher :: Maths.shape new_o)
-                        ~device:base.device
-                        ~kind:base.kind))
+                * randn
+                    (n_fisher :: Maths.shape new_o)
+                    ~device:base.device
+                    ~kind:base.kind)
             in
-            let o_samples_batched = Maths.(const new_o_primal + noise) in
+            let o_samples_batched = Maths.(const Tensor.(new_o_primal + noise)) in
             let lik_term_sampled_batched =
               gaussian_llh
                 ~mu:new_o_unsqueezed
@@ -453,9 +455,9 @@ module LGS = struct
       (* Tensor.diag ~diagonal:0 _std_o |> Prms.const *)
       (* Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ])
       |> Prms.create ~above:(Tensor.f 0.1)  *)
-      Prms.create
+       Prms.create
         ~above:(Tensor.f (-5.))
-        Tensor.(zeros ~device:base.device ~kind:base.kind [ Dims.o ])
+        Tensor.(zeros ~device:base.device ~kind:base.kind [ Dims.o ]) 
     in
     let _std_u =
       (* _std_u |> Prms.const *)
@@ -521,11 +523,6 @@ module Make (D : Do_with_T) = struct
       let u_list, _, o_list = sample_data () in
       let t0 = Unix.gettimeofday () in
       let config = config_f ~iter in
-      let n_params =
-        let p = O.params state in
-        O.W.P.T.numel (O.W.P.value p)
-      in
-      Convenience.print [%message (n_params : int)];
       let loss, new_state = O.step ~config ~state ~data:o_list ~args:() in
       let t1 = Unix.gettimeofday () in
       let time_elapsed = Float.(time_elapsed + t1 - t0) in
@@ -583,7 +580,7 @@ module Make (D : Do_with_T) = struct
               (of_array
                  [| Float.of_int t; time_elapsed; loss_avg; o_error; elbo_true |]
                  1
-                 5));
+                 5)); 
           O.W.P.T.save
             (LGS.P.value (O.params new_state))
             ~kind:base.ba_kind
@@ -607,7 +604,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.1 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(2e-1 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = true
       ; rank_one = false
