@@ -29,7 +29,7 @@ let sampling = false
 let n_fisher = 30
 let m = 10
 let o = 40
-let bs = 256
+let bs = 128
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
 
@@ -40,7 +40,8 @@ let make_c (m, o) =
 
 module PP = struct
   type 'a p =
-    { c : 'a
+    { sigma_u_prms : 'a
+    ; c : 'a
     ; sigma_o_prms : 'a
     ; d_prms : 'a
     }
@@ -56,8 +57,13 @@ let theta =
       ~above:(Tensor.f (-5.))
       Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ])
   in
+  let sigma_u_prms =
+    Prms.create
+      ~above:(Tensor.f (-5.))
+      Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ])
+  in
   let d_prms = Prms.create ~above:(Tensor.f (-5.)) Maths.(primal (f (-2.) * ones_u)) in
-  PP.{ c; sigma_o_prms; d_prms }
+  PP.{ c; sigma_o_prms; sigma_u_prms; d_prms }
 
 let sample_data =
   let sigma_o = Maths.(f 0.1) in
@@ -156,14 +162,20 @@ module M = struct
         Maths.(q_term - prior_term))
       else (
         let det1 = Maths.(2. $* sum theta.d_prms) in
+        let det2 = Maths.(2. $* sum theta.sigma_u_prms) in
         let _const = Maths.const (Tensor.f Float.(of_int m)) in
-        let tr = Maths.(sum (sqr d)) in
+        let tr = Maths.(d / exp theta.sigma_u_prms) |> Maths.sqr |> Maths.sum in
         let quad =
-          Maths.(einsum [ u_opt, "mb"; u_opt, "mb" ] "m") |> Maths.reshape ~shape:[ -1 ]
+          let u_inv =
+            theta.sigma_u_prms |> Maths.exp |> Maths.sqr |> fun x -> Maths.(1. $/ x)
+          in
+          let tmp1 = Maths.(einsum [ u_opt, "mb"; u_inv, "b" ] "mb") in
+          Maths.(einsum [ tmp1, "mb"; u_opt, "mb" ] "m") |> Maths.reshape ~shape:[ -1 ]
         in
-        let tmp = Maths.(tr - _const - det1) |> Maths.reshape ~shape:[ 1 ] in
+        let tmp = Maths.(tr - _const - det1 + det2) |> Maths.reshape ~shape:[ 1 ] in
         Maths.(0.5 $* tmp + quad))
     in
+    (* TODO:ignore kl term first *)
     let neg_elbo =
       Maths.(lik_term - kl_term) |> Maths.neg |> fun x -> Maths.(x / f Float.(of_int o))
     in
@@ -192,10 +204,6 @@ module M = struct
               in
               Maths.(const y_pred_primal + noise)
             in
-            (* Convenience.print
-              [%message
-                (Tensor.shape (Maths.primal Maths.( y_samples_batched))
-                 : int list)]; *)
             let lik_term_sampled_batched =
               gaussian_llh
                 ~mu:y_pred_unsqueezed
@@ -225,7 +233,7 @@ module M = struct
             let vtgt = Maths.tangent u_sampled |> Option.value_exn in
             ggn ~like_hess ~vtgt
           in
-          Tensor.(llh_ggn + prior_ggn)
+          Tensor.(llh_ggn)
       in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false preconditioner in
       final_s
@@ -308,11 +316,11 @@ module Do_with_SOFO : Do_with_T = struct
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.05
-      ; n_tangents = 256
+      ; learning_rate = Some 0.01
+      ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
-      ; damping = Some 1e-4
+      ; damping = None
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None
@@ -351,7 +359,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 1000 in
+  let max_iter = 500 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

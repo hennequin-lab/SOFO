@@ -16,9 +16,9 @@ let n_fisher = 100
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
 module Dims = struct
-  let a = 15
+  let a = 24
   let b = 10
-  let o = 40
+  let o = 48
   let tmax = 10
   let m = 128
   let batch_const = true
@@ -82,6 +82,7 @@ let laplace = false
 let sample = false
 
 module PP = struct
+  (* note that all std live in log space *)
   type 'a p =
     { _Fx_prod : 'a (* generative model *)
     ; _Fu_prod : 'a
@@ -165,7 +166,7 @@ module LGS = struct
     (* this is u sampled from posterior *)
     let true_fisher ~u_list (theta : P.M.t) =
       let _std_o_extended =
-        theta._std_o |> Maths.unsqueeze ~dim:0 |> Maths.unsqueeze ~dim:0
+        theta._std_o |> Maths.exp |> Maths.unsqueeze ~dim:0 |> Maths.unsqueeze ~dim:0
       in
       let _, fisher_rollout =
         List.fold
@@ -196,7 +197,7 @@ module LGS = struct
             let lik_term_sampled_batched =
               gaussian_llh
                 ~mu:new_o_unsqueezed
-                ~std:theta._std_o
+                ~std:(Maths.exp theta._std_o)
                 ~fisher_batched:true
                 o_samples_batched
             in
@@ -218,7 +219,7 @@ module LGS = struct
       fisher
 
     let ggn ~u_list (theta : P.M.t) =
-      let hess = theta._std_o |> sqr_inv |> Maths.primal in
+      let hess = theta._std_o |> Maths.exp |> sqr_inv |> Maths.primal in
       let _, ggn_rollout =
         List.fold
           u_list
@@ -254,10 +255,13 @@ module LGS = struct
     (* set o at time 0 as 0 *)
     let o_list_tmp = Tensor.zeros_like (List.hd_exn o_list) :: o_list in
     let _cov_u_inv =
-      theta._std_u |> sqr_inv |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+      theta._std_u
+      |> Maths.exp
+      |> sqr_inv
+      |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
     in
     let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 in
-    let _cov_o_inv = theta._std_o |> sqr_inv in
+    let _cov_o_inv = theta._std_o |> Maths.exp |> sqr_inv in
     let _Cxx =
       let tmp = Maths.(einsum [ theta._c, "ab"; _cov_o_inv, "b" ] "ab") in
       Maths.(tmp *@ c_trans)
@@ -340,7 +344,7 @@ module LGS = struct
             let increment =
               gaussian_llh
                 ~mu:o
-                ~std:theta._std_o
+                ~std:(Maths.exp theta._std_o)
                 Maths.(tmp_einsum new_x theta._c + theta._b)
             in
             let new_llh_summed =
@@ -361,7 +365,7 @@ module LGS = struct
         let prior =
           List.foldi u_list ~init:None ~f:(fun t accu u ->
             if t % 1 = 0 then Stdlib.Gc.major ();
-            let increment = gaussian_llh ~std:theta._std_u u in
+            let increment = gaussian_llh ~std:(Maths.exp theta._std_u) u in
             match accu with
             | None -> Some increment
             | Some accu -> Some Maths.(accu + increment))
@@ -378,9 +382,9 @@ module LGS = struct
         (* M2: calculate the kl term analytically *)
         let std2 = Maths.(kron (exp theta._std_space) (exp theta._std_time)) in
         let det1 = Maths.(2. $* sum (log std2)) in
-        let det2 = Maths.(Float.(2. * of_int Dims.tmax) $* sum (log theta._std_u)) in
+        let det2 = Maths.(Float.(2. * of_int Dims.tmax) $* sum theta._std_u) in
         let _const = Float.of_int (Dims.b * Dims.tmax) in
-        let _cov_u_inv = theta._std_u |> sqr_inv in
+        let _cov_u_inv = theta._std_u |> Maths.exp |> sqr_inv in
         let tr =
           let tmp2 = Maths.(_cov_u_inv * sqr (exp theta._std_space)) in
           let tmp3 = Maths.(kron tmp2 (sqr (exp theta._std_time))) in
@@ -414,7 +418,6 @@ module LGS = struct
       let ggn = L.true_fisher ~u_list theta in
       u init (Some (neg_elbo, Some ggn))
 
-  (* TODO: std_o and std_u constant  *)
   let init : P.tagged =
     let _Fx_prod =
       Convenience.gaussian_tensor_2d_normed
@@ -448,25 +451,28 @@ module LGS = struct
     in
     let _std_o =
       (* Tensor.diag ~diagonal:0 _std_o |> Prms.const *)
-      Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ])
-      |> Prms.create ~above:(Tensor.f 0.1)
+      (* Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ])
+      |> Prms.create ~above:(Tensor.f 0.1)  *)
+      Prms.create
+        ~above:(Tensor.f (-5.))
+        Tensor.(zeros ~device:base.device ~kind:base.kind [ Dims.o ])
     in
     let _std_u =
       (* _std_u |> Prms.const *)
-      Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ])
-      |> Prms.create ~above:(Tensor.f 0.1)
-    in
-    (* variational parameters live in log space *)
-    let _std_space =
       (* Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ])
       |> Prms.create ~above:(Tensor.f 0.1) *)
       Prms.create
         ~above:(Tensor.f (-5.))
         Tensor.(zeros ~device:base.device ~kind:base.kind [ Dims.b ])
     in
+    let _std_space =
+      (* Tensor.(zeros ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) |> Prms.const *)
+      Prms.create
+        ~above:(Tensor.f (-5.))
+        Tensor.(zeros ~device:base.device ~kind:base.kind [ Dims.b ])
+    in
     let _std_time =
-      (* Tensor.(f 1. * ones ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ])
-      |> Prms.create ~above:(Tensor.f 0.1) *)
+      (* Tensor.(zeros ~device:Dims.device ~kind:Dims.kind [ Dims.tmax ]) |> Prms.const *)
       Prms.create
         ~above:(Tensor.f (-5.))
         Tensor.(zeros ~device:base.device ~kind:base.kind [ Dims.tmax ])
@@ -515,6 +521,11 @@ module Make (D : Do_with_T) = struct
       let u_list, _, o_list = sample_data () in
       let t0 = Unix.gettimeofday () in
       let config = config_f ~iter in
+      let n_params =
+        let p = O.params state in
+        O.W.P.T.numel (O.W.P.value p)
+      in
+      Convenience.print [%message (n_params : int)];
       let loss, new_state = O.step ~config ~state ~data:o_list ~args:() in
       let t1 = Unix.gettimeofday () in
       let time_elapsed = Float.(time_elapsed + t1 - t0) in
@@ -535,8 +546,8 @@ module Make (D : Do_with_T) = struct
               let _Fu_prod = Maths.const _Fu in
               let _c = Maths.const c in
               let _b = Maths.const b in
-              let _std_o = Tensor.diag ~diagonal:0 _std_o |> Maths.const in
-              let _std_u = _std_u |> Maths.const in
+              let _std_o = Tensor.diag ~diagonal:0 (Tensor.log _std_o) |> Maths.const in
+              let _std_u = _std_u |> Tensor.log |> Maths.const in
               let _std_space = theta_curr._std_space |> Prms.value |> Maths.const in
               let _std_time = theta_curr._std_time |> Prms.value |> Maths.const in
               PP.{ _Fx_prod; _Fu_prod; _c; _b; _std_o; _std_u; _std_space; _std_time }
@@ -564,11 +575,6 @@ module Make (D : Do_with_T) = struct
           in
           (* avg error *)
           Convenience.print [%message (iter : int) (loss_avg : float)];
-          (* let learned_std_o =
-            let theta_curr = O.params new_state in
-            theta_curr._std_o |> Prms.value |> Tensor.norm |> Tensor.to_float0_exn
-          in
-          Convenience.print [%message (learned_std_o : float)]; *)
           let t = iter in
           Owl.Mat.(
             save_txt
@@ -601,7 +607,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(1e-3 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(0.1 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = true
       ; rank_one = false
@@ -613,10 +619,14 @@ module Do_with_SOFO : Do_with_T = struct
 
   let name =
     let init_config = config_f ~iter:0 in
+    let gamma_name =
+      Option.value_map init_config.damping ~default:"none" ~f:Float.to_string
+    in
     sprintf
-      "true_fisher_lr_%s_sqrt_%s"
+      "true_fisher_lr_%s_sqrt_%s_damp_%s"
       (Float.to_string (Option.value_exn init_config.learning_rate))
       (Bool.to_string init_config.sqrt)
+      gamma_name
 
   let init = O.init ~config:(config_f ~iter:0) LGS.init
 end
@@ -637,7 +647,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 1500 in
+  let max_iter = 1000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->
