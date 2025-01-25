@@ -725,7 +725,7 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
               let with_emission =
                 match f_p._c with
                 | Some c -> Tensor.(noise + tmp_einsum new_x c)
-                | None -> noise
+                | None -> Tensor.(noise + new_x)
               in
               let with_b =
                 match f_p._b with
