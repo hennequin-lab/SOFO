@@ -402,13 +402,21 @@ module Default = struct
   let device = Torch.Device.cuda_if_available ()
 end
 
+let within x (a, b) = Float.(a < x) && Float.(x < b)
+
 (* make sure fx is stable *)
 let sample_stable ~a =
-  let a = Mat.gaussian a a in
+  (* TODO: constrain to 0.8 *)
+  (* let a = Mat.gaussian a a in
   let r =
     a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
   in
-  Mat.(Float.(0.8 / r) $* a)
+  Mat.(Float.(0.2 / r) $* a) *)
+  let q, r, _ = Owl.Linalg.D.qr Mat.(gaussian a a) in
+  let q = Mat.(q * signum (diag r)) in
+  let d = Mat.gaussian 1 a |> Mat.abs in
+  let a = Mat.(transpose (sqrt d) * q * sqrt (reci (d +$ 1.))) in
+  a
 
 let sample_fx_pri ~batch_const ~m ~a =
   if batch_const
@@ -719,8 +727,7 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
               let noise =
                 let eps = sample_tensor [ X.m; X.o ] in
                 let cov_sqrt = Tensor.linalg_cholesky ~upper:true _cov in
-                let eqn = if X.batch_const then "ma,ab->mb" else "ma,mab->mb" in
-                Tensor.einsum ~equation:eqn [ eps; cov_sqrt ] ~path:None
+                tmp_einsum eps cov_sqrt
               in
               let with_emission =
                 match f_p._c with
