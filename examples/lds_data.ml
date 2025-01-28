@@ -406,17 +406,26 @@ let within x (a, b) = Float.(a < x) && Float.(x < b)
 
 (* make sure fx is stable *)
 let sample_stable ~a =
-  (* TODO: constrain to 0.8 *)
+  (* M1 *)
   (* let a = Mat.gaussian a a in
   let r =
     a |> Linalg.eigvals |> Owl.Dense.Matrix.Z.abs |> Owl.Dense.Matrix.Z.re |> Mat.max'
   in
-  Mat.(Float.(0.2 / r) $* a) *)
-  let q, r, _ = Owl.Linalg.D.qr Mat.(gaussian a a) in
+  Mat.(Float.(0.8 / r) $* a) *)
+  (* M2: same as ilqr-vae *)
+  (* let q, r, _ = Owl.Linalg.D.qr Mat.(gaussian a a) in
   let q = Mat.(q * signum (diag r)) in
   let d = Mat.gaussian 1 a |> Mat.abs in
   let a = Mat.(transpose (sqrt d) * q * sqrt (reci (d +$ 1.))) in
-  a
+  a *)
+  (* M3: discretising continuous dynamics *)
+  let w =
+    let tmp = Mat.gaussian a a in
+    let r = tmp |> Linalg.eigvals |> Owl.Dense.Matrix.Z.re |> Mat.max' in
+    Mat.(Float.(0.8 / r) $* tmp)
+  in
+  let w_i = Mat.(0.1 $* w - eye a) in
+  Owl.Linalg.Generic.expm w_i
 
 let sample_fx_pri ~batch_const ~m ~a =
   if batch_const

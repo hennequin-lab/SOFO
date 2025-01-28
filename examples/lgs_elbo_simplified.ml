@@ -33,7 +33,7 @@ let tmp_einsum a b = Maths.einsum [ a, "ma"; b, "ab" ] "mb"
 let sample_stable ~a =
   let w =
     let tmp = Mat.gaussian a a in
-    let r = tmp |> Linalg.eigvals |> Z.abs |> Z.re |> Mat.max' in
+    let r = tmp |> Linalg.eigvals |> Z.re |> Mat.max' in
     Mat.(Float.(0.8 / r) $* tmp)
   in
   let w_i = Mat.(0.1 $* w - eye a) in
@@ -42,7 +42,7 @@ let sample_stable ~a =
 (* -----------------------------------------
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
-let n = 15
+let n = 24
 let m = 10
 let o = 40
 let tmax = 10
@@ -572,9 +572,9 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(3e-3 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(1e-5 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 128
-      ; sqrt = true
+      ; sqrt = false
       ; rank_one = false
       ; damping = None
       ; momentum = None
@@ -612,7 +612,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 1000 in
+  let max_iter = 2000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

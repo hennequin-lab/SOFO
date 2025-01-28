@@ -16,7 +16,7 @@ let n_fisher = 100
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
 module Dims = struct
-  let a = 15
+  let a = 24
   let b = 10
   let o = 40
   let tmax = 10
@@ -604,7 +604,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(1e-2 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(3e-3 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = true
       ; rank_one = false
@@ -620,7 +620,7 @@ module Do_with_SOFO : Do_with_T = struct
       Option.value_map init_config.damping ~default:"none" ~f:Float.to_string
     in
     sprintf
-      "true_fisher_lr_%s_sqrt_%s_damp_%s"
+      "true_fisher_lr_%s_sqrt_%s_damp_%s_no_rep"
       (Float.to_string (Option.value_exn init_config.learning_rate))
       (Bool.to_string init_config.sqrt)
       gamma_name
