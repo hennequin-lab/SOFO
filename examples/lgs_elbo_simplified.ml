@@ -28,16 +28,12 @@ let base =
    ----------------------------------------- *)
 
 let tmp_einsum a b = Maths.einsum [ a, "ma"; b, "ab" ] "mb"
-let within x (a, b) = Float.(a < x) && Float.(x < b)
-let a_d_bounds = 0.2, 0.8
 
 (* make sure fx is stable *)
 let sample_stable ~a =
   let w =
     let tmp = Mat.gaussian a a in
-    let r =
-      tmp |> Linalg.eigvals |> Z.abs |> Z.re |> Mat.max'
-    in
+    let r = tmp |> Linalg.eigvals |> Z.abs |> Z.re |> Mat.max' in
     Mat.(Float.(0.8 / r) $* tmp)
   in
   let w_i = Mat.(0.1 $* w - eye a) in
@@ -100,7 +96,6 @@ let base =
     }
 
 let laplace = false
-let sample = false
 
 module PP = struct
   (* note that all std live in log space *)
@@ -174,7 +169,7 @@ module LGS = struct
 
   (* special care to be taken when dealing with elbo loss *)
   module Elbo_loss = struct
-    let fisher ?(fisher_batched = false) ~n lik_term =
+    let fisher ?(fisher_batched = false) ~n:_ lik_term =
       let neg_lik_t =
         Maths.(tangent lik_term) |> Option.value_exn
         (* |> fun x -> Tensor.(x / f Float.(of_int n)) *)
@@ -361,7 +356,7 @@ module LGS = struct
     in
     optimal_u_list, u_list
 
-  let elbo ~o_list ~u_list ~optimal_u_list ~sample (theta : P.M.t) =
+  let elbo ~o_list ~u_list ~optimal_u_list (theta : P.M.t) =
     (* calculate the likelihood term *)
     let u_o_list = List.map2_exn u_list o_list ~f:(fun u o -> u, o) in
     let _Fx_prod = _Fx_prod theta in
@@ -419,13 +414,7 @@ module LGS = struct
     let optimal_u_list, u_list = pred_u ~data theta in
     let neg_elbo =
       Maths.(
-        neg
-          (elbo
-             ~o_list:(List.map data ~f:Maths.const)
-             ~u_list
-             ~optimal_u_list
-             theta
-             ~sample))
+        neg (elbo ~o_list:(List.map data ~f:Maths.const) ~u_list ~optimal_u_list theta))
     in
     match update with
     | `loss_only u -> u init (Some neg_elbo)
