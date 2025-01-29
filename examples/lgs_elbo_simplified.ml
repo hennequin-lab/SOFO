@@ -36,7 +36,7 @@ let sample_stable ~a =
     let r = tmp |> Linalg.eigvals |> Z.re |> Mat.max' in
     Mat.(Float.(0.8 / r) $* tmp)
   in
-  let w_i = Mat.(0.1 $* w - eye a) in
+  let w_i = Mat.((w - eye a) *$ 0.1) in
   Owl.Linalg.Generic.expm w_i
 
 (* -----------------------------------------
@@ -67,9 +67,8 @@ let traj_rollout ~x0 ~_Fx ~_Fu ~_c ~_std_o ~u_list =
   in
   List.rev x_list, List.rev o_list
 
-(* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
+(* in the linear gaussian case, _Fx, _Fu, c and cov invariant across time *)
 let _std_o = Tensor.(ones ~device:base.device ~kind:base.kind [ o ])
-let _std_u = Tensor.ones ~device:base.device ~kind:base.kind [ m ]
 let _Fx = sample_stable ~a:n |> Tensor.of_bigarray ~device:base.device
 let _Fu = Tensor.randn ~device:base.device ~kind:base.kind [ m; n ]
 let _c = Tensor.randn ~device:base.device ~kind:base.kind [ n; o ]
@@ -78,7 +77,7 @@ let sample_data () =
   (* generate ground truth params and data *)
   let u_list =
     List.init tmax ~f:(fun _ ->
-      Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ] * _std_u))
+      Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]))
   in
   let x_list, o_list = traj_rollout ~x0 ~_Fx ~_Fu ~_c ~_std_o ~u_list in
   u_list, x_list, o_list
@@ -96,20 +95,21 @@ let base =
     }
 
 let laplace = false
+let step = 0.1
 
 module PP = struct
   (* note that all std live in log space *)
   type 'a p =
-    { _D : 'a
-    ; _Q : 'a (* generative model; Fx = (D Q (D^2 + I)^{-1/2}) *)
-    ; _Fu_prod : 'a
-    ; _c : 'a
-    ; _b : 'a
-    ; _std_o : 'a (* sqrt of the diagonal of covariance of emission noise *)
-    ; _std_u : 'a (* sqrt of the diagonal of covariance of prior over u *)
-    ; _std_space : 'a
+    { _S_params : 'a
+    ; _L_params : 'a
+      (* generative model; Fx = (1-step) I + step * W, W = I + (-I + S - S^T) LL^T *)
+      (* _Fx_prod_params : 'a *)
+    ; _Fu_prod_params : 'a
+    ; _c_params : 'a
+    ; _std_o_params : 'a (* sqrt of the diagonal of covariance of emission noise *)
+    ; _std_space_params : 'a
       (* recognition model; sqrt of the diagonal of covariance of space factor *)
-    ; _std_time : 'a (* sqrt of the diagonal of covariance of the time factor *)
+    ; _std_time_params : 'a (* sqrt of the diagonal of covariance of the time factor *)
     }
   [@@deriving prms]
 end
@@ -123,12 +123,20 @@ module LGS = struct
   type data = Tensor.t list
 
   let _Fx_prod (theta : P.M.t) =
-    let f =
+    (* theta._Fx_prod_params *)
+    let eye_tmp = Maths.const (Tensor.eye ~n ~options:(base.kind, base.device)) in
+    let _W =
       Maths.(
-        transpose theta._D ~dim0:1 ~dim1:0 * theta._Q * sqrt (f 1. / (1. $+ sqr theta._D)))
+        eye_tmp
+        + ((theta._S_params - transpose theta._S_params ~dim0:1 ~dim1:0 - eye_tmp)
+           *@ (theta._L_params *@ transpose theta._L_params ~dim0:1 ~dim1:0)))
     in
-    (* Tensor.print (Maths.primal f); *)
-    f
+    let tmp1 = Maths.(f (1. -. step) * eye_tmp) in
+    let tmp2 = Maths.(f step * _W) in
+    Maths.(tmp1 + tmp2)
+
+  let step ~_Fx_prod ~_Fu_prod ~u ~prev_x =
+    Maths.(tmp_einsum prev_x _Fx_prod + tmp_einsum u _Fu_prod)
 
   (* 1/ (x^2) *)
   let sqr_inv x = Maths.(1. $/ sqr x)
@@ -170,10 +178,7 @@ module LGS = struct
   (* special care to be taken when dealing with elbo loss *)
   module Elbo_loss = struct
     let fisher ?(fisher_batched = false) ~n:_ lik_term =
-      let neg_lik_t =
-        Maths.(tangent lik_term) |> Option.value_exn
-        (* |> fun x -> Tensor.(x / f Float.(of_int n)) *)
-      in
+      let neg_lik_t = Maths.(tangent lik_term) |> Option.value_exn in
       let n_tangents = List.hd_exn (Tensor.shape neg_lik_t) in
       let fisher =
         if fisher_batched
@@ -191,7 +196,7 @@ module LGS = struct
     (* this is u sampled from posterior *)
     let true_fisher ~u_list (theta : P.M.t) =
       let _std_o_extended =
-        theta._std_o
+        theta._std_o_params
         |> Maths.primal
         |> Tensor.exp
         |> Tensor.unsqueeze ~dim:0
@@ -204,10 +209,8 @@ module LGS = struct
           ~init:(Maths.const x0, Tensor.f 0.)
           ~f:(fun accu u ->
             let prev_x, fisher_accu = accu in
-            let new_x =
-              Maths.(tmp_einsum prev_x _Fx_prod + tmp_einsum u theta._Fu_prod)
-            in
-            let new_o = Maths.(tmp_einsum new_x theta._c + theta._b) in
+            let new_x = step ~_Fx_prod ~_Fu_prod:theta._Fu_prod_params ~u ~prev_x in
+            let new_o = tmp_einsum new_x theta._c_params in
             let new_o_primal = Maths.primal new_o in
             let new_o_unsqueezed =
               List.init n_fisher ~f:(fun _ -> Maths.unsqueeze new_o ~dim:0)
@@ -225,7 +228,7 @@ module LGS = struct
             let lik_term_sampled_batched =
               gaussian_llh
                 ~mu:new_o_unsqueezed
-                ~std:(Maths.exp theta._std_o)
+                ~std:(Maths.exp theta._std_o_params)
                 ~fisher_batched:true
                 o_samples_batched
             in
@@ -245,36 +248,6 @@ module LGS = struct
       |> Tensor.to_bigarray ~kind:base.ba_kind
       |> Owl.Mat.save_txt ~out:(in_dir (sprintf "svals"));
       fisher
-
-    let ggn ~u_list (theta : P.M.t) =
-      let hess = theta._std_o |> Maths.exp |> sqr_inv |> Maths.primal in
-      let _Fx_prod = _Fx_prod theta in
-      let _, ggn_rollout =
-        List.fold
-          u_list
-          ~init:(Maths.const x0, Tensor.f 0.)
-          ~f:(fun accu u ->
-            let prev_x, ggn_accu = accu in
-            let new_x =
-              Maths.(tmp_einsum prev_x _Fx_prod + tmp_einsum u theta._Fu_prod)
-            in
-            let new_o = Maths.(tmp_einsum new_x theta._c + theta._b) in
-            let vtgt = Maths.tangent new_o |> Option.value_exn in
-            let vtgt_hess =
-              Tensor.einsum ~equation:"kma,a->kma" [ vtgt; hess ] ~path:None
-            in
-            let increment =
-              Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_hess; vtgt ] ~path:None
-            in
-            new_x, Tensor.(increment + ggn_accu))
-      in
-      let ggn = Tensor.(ggn_rollout / f (Float.of_int tmax)) in
-      let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false ggn in
-      final_s
-      |> Tensor.reshape ~shape:[ -1; 1 ]
-      |> Tensor.to_bigarray ~kind:base.ba_kind
-      |> Owl.Mat.save_txt ~out:(in_dir (sprintf "ggn_svals"));
-      ggn
   end
 
   (* create params for lds from f *)
@@ -283,20 +256,11 @@ module LGS = struct
     =
     (* set o at time 0 as 0 *)
     let o_list_tmp = Tensor.zeros_like (List.hd_exn o_list) :: o_list in
-    let _cov_u_inv =
-      theta._std_u
-      |> Maths.exp
-      |> sqr_inv
-      |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
-    in
-    let c_trans = Maths.transpose theta._c ~dim0:1 ~dim1:0 in
-    let _cov_o_inv = theta._std_o |> Maths.exp |> sqr_inv in
+    let _cov_u_inv = Tensor.eye ~n:m ~options:(base.kind, base.device) |> Maths.const in
+    let c_trans = Maths.transpose theta._c_params ~dim0:1 ~dim1:0 in
+    let _cov_o_inv = theta._std_o_params |> Maths.exp |> sqr_inv in
     let _Cxx =
-      let tmp = Maths.(einsum [ theta._c, "ab"; _cov_o_inv, "b" ] "ab") in
-      Maths.(tmp *@ c_trans)
-    in
-    let _cx_common =
-      let tmp = Maths.(einsum [ theta._b, "ab"; _cov_o_inv, "b" ] "ab") in
+      let tmp = Maths.(einsum [ theta._c_params, "ab"; _cov_o_inv, "b" ] "ab") in
       Maths.(tmp *@ c_trans)
     in
     let _Fx_prod = _Fx_prod theta in
@@ -306,12 +270,12 @@ module LGS = struct
           List.map o_list_tmp ~f:(fun o ->
             let _cx =
               let tmp = Maths.(einsum [ const o, "ab"; _cov_o_inv, "b" ] "ab") in
-              Maths.(_cx_common - (tmp *@ c_trans))
+              Maths.(neg (tmp *@ c_trans))
             in
             Lds_data.Temp.
               { _f = None
               ; _Fx_prod
-              ; _Fu_prod = theta._Fu_prod
+              ; _Fu_prod = theta._Fu_prod_params
               ; _cx = Some _cx
               ; _cu = None
               ; _Cxx
@@ -326,7 +290,7 @@ module LGS = struct
     let _Fx_prod = _Fx_prod theta in
     let _, x_list =
       List.fold u_list ~init:(x0_tan, [ x0_tan ]) ~f:(fun (x, x_list) u ->
-        let new_x = Maths.(tmp_einsum x _Fx_prod + tmp_einsum u theta._Fu_prod) in
+        let new_x = step ~_Fx_prod ~_Fu_prod:theta._Fu_prod_params ~u ~prev_x:x in
         new_x, new_x :: x_list)
     in
     List.rev x_list
@@ -345,9 +309,11 @@ module LGS = struct
       let xi =
         Tensor.randn ~device:base.device ~kind:base.kind [ bs; m; tmax ] |> Maths.const
       in
-      let xi_space = Maths.einsum [ xi, "mbt"; Maths.exp theta._std_space, "b" ] "mbt" in
+      let xi_space =
+        Maths.einsum [ xi, "mbt"; Maths.exp theta._std_space_params, "b" ] "mbt"
+      in
       let xi_time =
-        Maths.einsum [ xi_space, "mat"; Maths.exp theta._std_time, "t" ] "mat"
+        Maths.einsum [ xi_space, "mat"; Maths.exp theta._std_time_params, "t" ] "mat"
       in
       let meaned = Maths.(xi_time + optimal_u) in
       List.init tmax ~f:(fun i ->
@@ -367,15 +333,13 @@ module LGS = struct
           ~init:(Maths.const x0, None)
           ~f:(fun t accu (u, o) ->
             if t % 1 = 0 then Stdlib.Gc.major ();
-            let x_prev, llh_summed = accu in
-            let new_x =
-              Maths.(tmp_einsum x_prev _Fx_prod + tmp_einsum u theta._Fu_prod)
-            in
+            let prev_x, llh_summed = accu in
+            let new_x = step ~_Fx_prod ~_Fu_prod:theta._Fu_prod_params ~u ~prev_x in
             let increment =
               gaussian_llh
                 ~mu:o
-                ~std:(Maths.exp theta._std_o)
-                Maths.(tmp_einsum new_x theta._c + theta._b)
+                ~std:(Maths.exp theta._std_o_params)
+                (tmp_einsum new_x theta._c_params)
             in
             let new_llh_summed =
               match llh_summed with
@@ -390,21 +354,20 @@ module LGS = struct
     let optimal_u = concat_time optimal_u_list in
     let kl =
       (* calculate the kl term analytically *)
-      let std2 = Maths.(kron (exp theta._std_space) (exp theta._std_time)) in
+      let std2 =
+        Maths.(kron (exp theta._std_space_params) (exp theta._std_time_params))
+      in
       let det1 = Maths.(2. $* sum (log std2)) in
-      let det2 = Maths.(Float.(2. * of_int tmax) $* sum theta._std_u) in
       let _const = Float.of_int (m * tmax) in
-      let _cov_u_inv = theta._std_u |> Maths.exp |> sqr_inv in
       let tr =
-        let tmp2 = Maths.(_cov_u_inv * sqr (exp theta._std_space)) in
-        let tmp3 = Maths.(kron tmp2 (sqr (exp theta._std_time))) in
+        let tmp2 = Maths.(sqr (exp theta._std_space_params)) in
+        let tmp3 = Maths.(kron tmp2 (sqr (exp theta._std_time_params))) in
         Maths.sum tmp3
       in
       let quad =
-        let tmp1 = Maths.einsum [ optimal_u, "mbt"; _cov_u_inv, "b" ] "mbt" in
-        Maths.einsum [ tmp1, "mbt"; optimal_u, "mbt" ] "m" |> Maths.unsqueeze ~dim:1
+        Maths.einsum [ optimal_u, "mbt"; optimal_u, "mbt" ] "m" |> Maths.unsqueeze ~dim:1
       in
-      let tmp = Maths.(det2 - det1 + tr -$ _const) |> Maths.reshape ~shape:[ 1; 1 ] in
+      let tmp = Maths.(tr - det1 -$ _const) |> Maths.reshape ~shape:[ 1; 1 ] in
       Maths.(tmp + quad) |> Maths.squeeze ~dim:1
     in
     Maths.((llh - kl) /$ Float.of_int tmax)
@@ -423,16 +386,7 @@ module LGS = struct
       u init (Some (neg_elbo, Some ggn))
 
   let init : P.tagged =
-    let _D =
-      Convenience.gaussian_tensor_2d_normed
-        ~device:base.device
-        ~kind:base.kind
-        ~a:n
-        ~b:1
-        ~sigma:0.1
-      |> Prms.free
-    in
-    let _Q =
+    let _S_params =
       Convenience.gaussian_tensor_2d_normed
         ~device:base.device
         ~kind:base.kind
@@ -441,7 +395,25 @@ module LGS = struct
         ~sigma:0.1
       |> Prms.free
     in
-    let _Fu_prod =
+    let _L_params =
+      Convenience.gaussian_tensor_2d_normed
+        ~device:base.device
+        ~kind:base.kind
+        ~a:n
+        ~b:n
+        ~sigma:0.1
+      |> Prms.free
+    in
+    (* let _Fx_prod_params =
+      Convenience.gaussian_tensor_2d_normed
+        ~device:base.device
+        ~kind:base.kind
+        ~a:n
+        ~b:n
+        ~sigma:0.1
+      |> Prms.free 
+    in *)
+    let _Fu_prod_params =
       Convenience.gaussian_tensor_2d_normed
         ~device:base.device
         ~kind:base.kind
@@ -450,7 +422,7 @@ module LGS = struct
         ~sigma:0.1
       |> Prms.free
     in
-    let _c =
+    let _c_params =
       Convenience.gaussian_tensor_2d_normed
         ~device:base.device
         ~kind:base.kind
@@ -459,39 +431,43 @@ module LGS = struct
         ~sigma:0.1
       |> Prms.free
     in
-    let _b = Tensor.zeros ~device:base.device ~kind:base.kind [ 1; o ] |> Prms.const in
-    let _std_o =
+    let _std_o_params =
       Prms.create
         ~above:(Tensor.f (-5.))
         Tensor.(zeros ~device:base.device ~kind:base.kind [ o ])
     in
-    let _std_u =
+    let _std_space_params =
       Prms.create
         ~above:(Tensor.f (-5.))
         Tensor.(zeros ~device:base.device ~kind:base.kind [ m ])
     in
-    let _std_space =
-      Prms.create
-        ~above:(Tensor.f (-5.))
-        Tensor.(zeros ~device:base.device ~kind:base.kind [ m ])
-    in
-    let _std_time =
+    let _std_time_params =
       Prms.create
         ~above:(Tensor.f (-5.))
         Tensor.(zeros ~device:base.device ~kind:base.kind [ tmax ])
     in
-    { _D; _Q; _Fu_prod; _c; _b; _std_o; _std_u; _std_space; _std_time }
+    { _S_params
+    ; _L_params (* _Fx_prod_params *)
+    ; _Fu_prod_params
+    ; _c_params
+    ; _std_o_params
+    ; _std_space_params
+    ; _std_time_params
+    }
 
-  (* calculate the error between latents *)
+  (* calculate the error between observations *)
   let simulate ~data ~(theta : P.M.t) =
     (* rollout under the given u *)
-    let x_list, u_list = data in
+    let u_list, _, o_list = data in
     (* rollout to obtain x *)
     let rolled_out_x_list =
-      rollout_x ~u_list:(List.map u_list ~f:Maths.const) ~x0 theta
+      rollout_x ~u_list:(List.map u_list ~f:Maths.const) ~x0 theta |> List.tl_exn
+    in
+    let rolled_out_o_list =
+      List.map rolled_out_x_list ~f:(fun x -> tmp_einsum x theta._c_params)
     in
     let error =
-      List.fold2_exn rolled_out_x_list x_list ~init:0. ~f:(fun accu x1 x2 ->
+      List.fold2_exn rolled_out_o_list o_list ~init:0. ~f:(fun accu x1 x2 ->
         let error = Tensor.(norm (Maths.primal x1 - x2)) |> Tensor.to_float0_exn in
         accu +. error)
     in
@@ -538,8 +514,7 @@ module Make (D : Do_with_T) = struct
         then (
           (* simulation error *)
           let o_error =
-            let u_list, x_list, _ = sample_data () in
-            let data = x_list, u_list in
+            let data = sample_data () in
             LGS.simulate ~theta:(LGS.P.const (LGS.P.value (O.params new_state))) ~data
           in
           (* avg error *)
@@ -572,7 +547,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(1e-5 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(1e-3 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false

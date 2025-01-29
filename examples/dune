@@ -11,7 +11,7 @@
   lgs_elbo_laplace
   lorenz_elbo_gru
   arm_ilqr
-  e_plot)
+  test_bs)
  (libraries cmdargs bos sofo owl domainslib owl-ode lqr ilqr)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))
