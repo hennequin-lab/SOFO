@@ -25,7 +25,10 @@ type 'a theta =
   }
 
 (* (1 + e^-x)^{-2} (e^-x)*)
-let d_sigmoid x = Tensor.(sigmoid x * (f 1. - sigmoid x))
+let d_sigmoid x =
+  (* let tmp = Tensor.(f 1. / square (f 1. + exp (neg x))) in
+  Tensor.(tmp * exp (neg x)) *)
+Tensor.(sigmoid x * (f 1. - sigmoid x)) 
 
 let soft_relu x =
   let tmp = Tensor.(square x + f 4.) in
@@ -36,27 +39,29 @@ let soft_relu x =
 let d_soft_relu x =
   let tmp = Tensor.(square x + f 4.) in
   let tmp2 = Tensor.(f 1. / sqrt tmp) in
-  Tensor.(div_scalar ((tmp2 * x) + f 1.) (Scalar.f 2.))
+  Tensor.(((tmp2 * x) + f 1.) / f 2.)
+
+let pre_sig x theta = Tensor.(matmul theta._U_f x + theta._b_f)
+let pre_g ~f_t x theta = Tensor.(matmul theta._U_h (f_t * x) + theta._b_h)
 
 let f ~x ~u theta =
-  let pre_sig = Tensor.(matmul theta._U_f x + theta._b_f) in
+  let pre_sig = pre_sig x theta in
   let f_t = Tensor.sigmoid pre_sig in
-  let pre_g = Tensor.(matmul theta._U_h (f_t * x) + theta._b_h) in
+  let pre_g = pre_g ~f_t x theta in
   let x_hat = Tensor.(soft_relu pre_g + matmul theta._W u) in
   Tensor.(((f 1. - f_t) * x) + (f_t * x_hat))
 
 let _Fu ~x theta =
-  let pre_sig = Tensor.(matmul theta._U_f x + theta._b_f) in
+  let pre_sig = pre_sig x theta in
   let f_t = Tensor.sigmoid pre_sig in
   Tensor.einsum ~equation:"a,ab->ab" [ Tensor.squeeze f_t; theta._W ] ~path:None
 
 let _Fx ~x ~u theta =
-  let pre_sig = Tensor.(matmul theta._U_f x + theta._b_f) in
+  let pre_sig = pre_sig x theta in
   let f_t = Tensor.sigmoid pre_sig in
-  let pre_g = Tensor.(matmul theta._U_h (f_t * x) + theta._b_h) in
+  let pre_g = pre_g ~f_t x theta in
   let x_hat = Tensor.(soft_relu pre_g + matmul theta._W u) in
   let tmp_einsum2 a b = Tensor.einsum ~equation:"ab,a->ab" [ a; b ] ~path:None in
-  (* Tensor.einsum ~equation:"ab,a->ab" [ a; b ] ~path:None in *)
   let term1 =
     Tensor.diag_embed Tensor.(f 1. - squeeze f_t) ~offset:0 ~dim1:(-2) ~dim2:(-1)
   in

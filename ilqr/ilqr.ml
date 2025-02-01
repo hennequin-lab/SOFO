@@ -55,8 +55,9 @@ let forward
       ~(tau_opt : t option Solution.p list)
       ~(bck : backward_info list)
       ~conv_threshold
+      ~max_iter
   =
-  let rec fwd_loop ~stop ~alpha ~tau_prev ~cost_prev =
+  let rec fwd_loop ~stop  ~i ~alpha ~tau_prev ~cost_prev =
     if stop
     then tau_prev
     else (
@@ -91,18 +92,21 @@ let forward
       if Float.(is_nan cost_curr)
       then failwith "current cost value is nan"
       else (
-        let stop = Float.(pct_change < conv_threshold) in
-        fwd_loop ~stop ~alpha ~tau_prev:tau_curr ~cost_prev:cost_curr))
+        cleanup ();
+        let stop = Float.(pct_change < conv_threshold) || (i = max_iter)  in
+        fwd_loop ~stop ~i:Int.(i+1) ~alpha ~tau_prev:tau_curr ~cost_prev:cost_curr))
   in
   let alpha = 1. in
   let cost_init = cost_func ~batch_const tau_opt p in
-  fwd_loop ~stop:false ~alpha ~tau_prev:tau_opt ~cost_prev:cost_init
+  fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt ~cost_prev:cost_init
 
 let rec ilqr_loop
           ~batch_const
           ~laplace
           ~conv_threshold
-          ~stop
+          ~stop 
+          ~max_iter
+          ~i
           ~cost_prev
           ~params_func
           ~cost_func
@@ -134,16 +138,19 @@ let rec ilqr_loop
         ~tau_opt:tau_prev
         ~bck
         ~conv_threshold
+        ~max_iter
     in
     let cost_curr = cost_func ~batch_const tau_curr p_curr in
     let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
-    let stop = Float.(pct_change < conv_threshold) in
+    let stop = Float.(pct_change < conv_threshold)|| (i = max_iter) in
     cleanup ();
     ilqr_loop
       ~batch_const
       ~laplace
       ~conv_threshold
       ~stop
+      ~max_iter
+      ~i:Int.(i+1)
       ~params_func
       ~cost_func
       ~f_theta
@@ -175,6 +182,7 @@ let _isolve
       ~params_func
       ~conv_threshold
       ~tau_init
+      ~max_iter 
   =
   (* step 1: init params and cost *)
   let p_init = params_func tau_init in
@@ -186,6 +194,8 @@ let _isolve
       ~laplace
       ~conv_threshold
       ~stop:false
+      ~max_iter 
+      ~i:0
       ~params_func
       ~cost_func
       ~f_theta

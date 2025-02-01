@@ -591,7 +591,7 @@ let ilqr ~targets_batched =
                 ; _Fx_prod = _Fx ~x:s.x ~u:s.u
                 ; _Fu_prod = _Fu ~x:s.x
                 ; _cx =
-                Some _cx
+                    Some _cx
                     (* (if i = tmax
                      then Some _cx
                      else
@@ -603,7 +603,7 @@ let ilqr ~targets_batched =
                                [ batch_size; a ]))) *)
                 ; _cu = None
                 ; _Cxx =
-                _Cxx_batched
+                    _Cxx_batched
                     (* (if i = tmax
                      then _Cxx_batched
                      else
@@ -634,6 +634,7 @@ let ilqr ~targets_batched =
       ~params_func
       ~conv_threshold
       ~tau_init
+      ~max_iter:200
   in
   sol
 

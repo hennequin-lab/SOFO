@@ -428,7 +428,7 @@ module LGS = struct
         ~kind:base.kind
         ~a:n
         ~b:o
-        ~sigma:0.1
+        ~sigma:1.
       |> Prms.free
     in
     let _std_o_params =
@@ -547,7 +547,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(1e-3 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(3e-1 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
