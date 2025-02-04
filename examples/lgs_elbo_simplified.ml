@@ -69,6 +69,7 @@ let traj_rollout ~x0 ~_Fx ~_Fu ~_c ~_std_o ~u_list =
 
 (* in the linear gaussian case, _Fx, _Fu, c and cov invariant across time *)
 let _std_o = Tensor.(ones ~device:base.device ~kind:base.kind [ o ])
+let _std_o_log = Tensor.(zeros ~device:base.device ~kind:base.kind [ o ])
 let _Fx = sample_stable ~a:n |> Tensor.of_bigarray ~device:base.device
 let _Fu = Tensor.randn ~device:base.device ~kind:base.kind [ m; n ]
 let _c = Tensor.randn ~device:base.device ~kind:base.kind [ n; o ]
@@ -501,6 +502,10 @@ module Make (D : Do_with_T) = struct
       let t0 = Unix.gettimeofday () in
       let config = config_f ~iter in
       let loss, new_state = O.step ~config ~state ~data:o_list ~args:() in
+      let std_o_mean =
+        let a = LGS.P.value (O.params state) in
+        a._std_o_params |> Tensor.mean |> Tensor.to_float0_exn
+      in
       let t1 = Unix.gettimeofday () in
       let time_elapsed = Float.(time_elapsed + t1 - t0) in
       let running_avg =
@@ -512,6 +517,44 @@ module Make (D : Do_with_T) = struct
         (* save params *)
         if iter % 10 = 0
         then (
+          (* elbo when std_o_params is the true std_o *)
+          let elbo_std_o_true =
+            let theta_std_o_true =
+              let theta_curr = O.params state in
+              let _L_params = theta_curr._L_params |> Prms.value |> Maths.const in
+              let _S_params = theta_curr._S_params |> Prms.value |> Maths.const in
+              let _Fu_prod_params =
+                theta_curr._Fu_prod_params |> Prms.value |> Maths.const
+              in
+              let _c_params = theta_curr._c_params |> Prms.value |> Maths.const in
+              let _std_o_params = _std_o_log |> Maths.const in
+              let _std_space_params =
+                theta_curr._std_space_params |> Prms.value |> Maths.const
+              in
+              let _std_time_params =
+                theta_curr._std_time_params |> Prms.value |> Maths.const
+              in
+              PP.
+                { _S_params
+                ; _L_params
+                ; _Fu_prod_params
+                ; _c_params
+                ; _std_o_params
+                ; _std_space_params
+                ; _std_time_params
+                }
+            in
+            let optimal_u_list, u_list = LGS.pred_u ~data:o_list theta_std_o_true in
+            LGS.elbo
+              ~o_list:(List.map o_list ~f:Maths.const)
+              ~u_list
+              ~optimal_u_list
+              theta_std_o_true
+            |> Maths.primal
+            |> Tensor.neg
+            |> Tensor.mean
+            |> Tensor.to_float0_exn
+          in
           (* simulation error *)
           let o_error =
             let data = sample_data () in
@@ -524,7 +567,16 @@ module Make (D : Do_with_T) = struct
             save_txt
               ~append:true
               ~out:(in_dir name)
-              (of_array [| Float.of_int t; time_elapsed; loss_avg; o_error |] 1 4));
+              (of_array
+                 [| Float.of_int t
+                  ; time_elapsed
+                  ; loss_avg
+                  ; o_error
+                  ; std_o_mean
+                  ; elbo_std_o_true
+                 |]
+                 1
+                 6));
           O.W.P.T.save
             (LGS.P.value (O.params new_state))
             ~kind:base.ba_kind
@@ -547,7 +599,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(3e-1 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(1e-2 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
@@ -563,7 +615,7 @@ module Do_with_SOFO : Do_with_T = struct
       Option.value_map init_config.damping ~default:"none" ~f:Float.to_string
     in
     sprintf
-      "true_fisher_lr_%s_sqrt_%s_damp_%s"
+      "true_fisher_lr_%s_sqrt_%s_damp_%s_std_o_mean_std_o_true_sep_o"
       (Float.to_string (Option.value_exn init_config.learning_rate))
       (Bool.to_string init_config.sqrt)
       gamma_name
@@ -576,7 +628,7 @@ end
      -------------------------------- *)
 
 module Do_with_Adam : Do_with_T = struct
-  let name = "adam"
+  let name = "adam_std_o_mean_std_o_true"
 
   module O = Optimizer.Adam (LGS)
 

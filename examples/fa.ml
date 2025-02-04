@@ -58,9 +58,10 @@ let theta =
       Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ])
   in
   let sigma_u_prms =
-    Prms.create
+    Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ]) |> Prms.const
+    (* Prms.create
       ~above:(Tensor.f (-5.))
-      Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ])
+      Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ]) *)
   in
   let d_prms = Prms.create ~above:(Tensor.f (-5.)) Maths.(primal (f (-2.) * ones_u)) in
   PP.{ c; sigma_o_prms; sigma_u_prms; d_prms }
