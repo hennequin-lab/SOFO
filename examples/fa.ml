@@ -24,7 +24,7 @@ type pred_cond =
   | EmpFisher
   | TrueFisher
 
-let pred_cond = TrueFisher
+let pred_cond = GGN
 let sampling = false
 let n_fisher = 30
 let m = 10
@@ -40,8 +40,7 @@ let make_c (m, o) =
 
 module PP = struct
   type 'a p =
-    { sigma_u_prms : 'a
-    ; c : 'a
+    { c : 'a
     ; sigma_o_prms : 'a
     ; d_prms : 'a
     }
@@ -57,14 +56,8 @@ let theta =
       ~above:(Tensor.f (-5.))
       Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ])
   in
-  let sigma_u_prms =
-    Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ]) |> Prms.const
-    (* Prms.create
-      ~above:(Tensor.f (-5.))
-      Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ]) *)
-  in
   let d_prms = Prms.create ~above:(Tensor.f (-5.)) Maths.(primal (f (-2.) * ones_u)) in
-  PP.{ c; sigma_o_prms; sigma_u_prms; d_prms }
+  PP.{ c; sigma_o_prms; d_prms }
 
 let sample_data =
   let sigma_o = Maths.(f 0.1) in
@@ -148,13 +141,15 @@ module M = struct
   type args = unit
 
   let f ~update ~data:y ~init ~args:() (theta : P.M.t) =
-    let sigma_o = Maths.(exp (theta.sigma_o_prms * ones_o)) in
+    let sigma_o = Maths.exp theta.sigma_o_prms in
+    let precision = Maths.(f 1. / sqr sigma_o) in
+    let sigma_o_extended = Maths.(sigma_o * ones_o) in
     let d = Maths.(exp theta.d_prms) in
-    let u_opt = u_opt ~c:theta.c ~sigma_o y in
+    let u_opt = u_opt ~c:theta.c ~sigma_o:sigma_o_extended y in
     let u_diff = Maths.(const (Tensor.randn_like (primal u_opt)) * unsqueeze ~dim:0 d) in
     let u_sampled = Maths.(u_opt + u_diff) in
     let y_pred = Maths.(u_sampled *@ theta.c) in
-    let lik_term = gaussian_llh ~mu:y_pred ~std:sigma_o y in
+    let lik_term = gaussian_llh ~mu:y_pred ~std:sigma_o_extended y in
     let kl_term =
       if sampling
       then (
@@ -163,17 +158,12 @@ module M = struct
         Maths.(q_term - prior_term))
       else (
         let det1 = Maths.(2. $* sum theta.d_prms) in
-        let det2 = Maths.(2. $* sum theta.sigma_u_prms) in
         let _const = Maths.const (Tensor.f Float.(of_int m)) in
-        let tr = Maths.(d / exp theta.sigma_u_prms) |> Maths.sqr |> Maths.sum in
+        let tr = d |> Maths.sqr |> Maths.sum in
         let quad =
-          let u_inv =
-            theta.sigma_u_prms |> Maths.exp |> Maths.sqr |> fun x -> Maths.(1. $/ x)
-          in
-          let tmp1 = Maths.(einsum [ u_opt, "mb"; u_inv, "b" ] "mb") in
-          Maths.(einsum [ tmp1, "mb"; u_opt, "mb" ] "m") |> Maths.reshape ~shape:[ -1 ]
+          Maths.(einsum [ u_opt, "mb"; u_opt, "mb" ] "m") |> Maths.reshape ~shape:[ -1 ]
         in
-        let tmp = Maths.(tr - _const - det1 + det2) |> Maths.reshape ~shape:[ 1 ] in
+        let tmp = Maths.(tr - _const - det1) |> Maths.reshape ~shape:[ 1 ] in
         Maths.(0.5 $* tmp + quad))
     in
     let neg_elbo =
@@ -192,7 +182,7 @@ module M = struct
             in
             let y_pred_primal = Maths.primal y_pred |> Tensor.unsqueeze ~dim:0 in
             let sigma_extended =
-              sigma_o
+              sigma_o_extended
               |> Maths.primal
               |> Tensor.unsqueeze ~dim:0
               |> Tensor.unsqueeze ~dim:0
@@ -212,7 +202,7 @@ module M = struct
             let lik_term_sampled_batched =
               gaussian_llh
                 ~mu:y_pred_unsqueezed
-                ~std:sigma_o
+                ~std:sigma_o_extended
                 ~fisher_batched:true
                 y_samples_batched
             in
@@ -222,23 +212,23 @@ module M = struct
           true_fisher
         | EmpFisher -> fisher ~n:o lik_term
         | GGN ->
-          let llh_ggn =
-            let like_hess =
-              Tensor.(
-                f 1.
-                / square (Maths.primal sigma_o)
-                * ones ~device:base.device ~kind:base.kind [ o ])
-            in
+          let ggn_y =
             let vtgt = Maths.tangent y_pred |> Option.value_exn in
-            ggn ~like_hess ~vtgt
+            let vtgt_h = Tensor.(vtgt / Maths.(primal (sqr sigma_o))) in
+            Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_h; vtgt ] ~path:None
           in
-          (* TODO: should we include the prior ggn? *)
-          let prior_ggn =
-            let like_hess = Tensor.ones ~device:base.device ~kind:base.kind [ m ] in
-            let vtgt = Maths.tangent u_sampled |> Option.value_exn in
-            ggn ~like_hess ~vtgt
+          let ggn_sigma_o =
+            let vtgt = Maths.tangent precision |> Option.value_exn in
+            let vtgt_h =
+              Tensor.(
+                f Float.(of_int o * of_int bs / 2.)
+                * square (square (Maths.primal sigma_o))
+                * vtgt
+               )
+            in
+            Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
           in
-          Tensor.(llh_ggn)
+          Tensor.(ggn_y + ggn_sigma_o)
       in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false preconditioner in
       final_s
@@ -316,13 +306,13 @@ module Do_with_SOFO : Do_with_T = struct
     match pred_cond with
     | TrueFisher -> "true_fisher"
     | EmpFisher -> "emp_fisher"
-    | GGN -> "ggn"
+    | GGN -> "ggn_20"
 
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.01
-      ; n_tangents = 128
+      ; learning_rate = Some 20.
+      ; n_tangents = 64
       ; sqrt = false
       ; rank_one = false
       ; damping = Some 1e-3
@@ -364,7 +354,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 500 in
+  let max_iter = 2000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->
