@@ -87,8 +87,24 @@ module SOFO (W : Wrapper.T) = struct
     }
 
   (* initialise tangents, where each tangent is normalised. *)
-  (* TODO: this is for shape of std_o=40 only! *)
+  (* TODO: this is for shape of std_o=1 only! *)
   let init_tangents ~base ~rank_one ~n_tangents theta =
+    (* let std_o_size = 1 in
+    let sample_rest x =
+      let zeros =
+        Tensor.zeros
+          (std_o_size :: Tensor.shape x)
+          ~device:(Tensor.device x)
+          ~kind:(Tensor.kind x)
+      in
+      let rest =
+        sample_rand_tensor
+          ~base
+          ~rank_one
+          ~shape:((n_tangents - std_o_size) :: Tensor.shape x)
+      in
+      Tensor.concat [ zeros; rest ] ~dim:0
+    in *)
     let vs =
       W.P.map theta ~f:(function
         | Prms.Const x ->
@@ -96,10 +112,40 @@ module SOFO (W : Wrapper.T) = struct
             ~device:(Tensor.device x)
             ~kind:(Tensor.kind x)
             (n_tangents :: Tensor.shape x)
-        | Prms.Free x ->
-          sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
+        | Prms.Free x -> sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
+          (* sample_rest x *)
         | Prms.Bounded (x, _, _) ->
-          sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
+          (* M0: sample random tangents *)
+          sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x) 
+          (* if Int.(List.hd_exn (Tensor.shape x) = std_o_size)
+          then (
+            (* M1: separate tangent for std_o *)
+            (* let id = Tensor.eye ~n:std_o_size ~options:(Tensor.kind x, Tensor.device x) in
+            let rest =
+              Tensor.zeros
+                ((n_tangents - std_o_size) :: [ std_o_size ])
+                ~device:(Tensor.device x)
+                ~kind:(Tensor.kind x)
+            in 
+            Tensor.concat [ id; rest ] ~dim:0*)
+            (* M2: single tangent for std_o and 0 everywhere else *)
+            (* let id =
+              Tensor.randn
+                ~device:(Tensor.device x)
+                ~kind:(Tensor.kind x)
+                [ 1; std_o_size ]
+            in
+            let rest =
+              Tensor.zeros
+                ((n_tangents - 1) :: [ std_o_size ])
+                ~device:(Tensor.device x)
+                ~kind:(Tensor.kind x)
+            in    
+            Tensor.concat [ id; rest ] ~dim:0*)
+
+         )
+          else sample_rest x *)
+          )
     in
     (* normalise each tangent *)
     let normalize vs =

@@ -168,58 +168,51 @@ module GRU = struct
       in
       fisher
 
-    (* this is u sampled from posterior *)
-    let true_fisher ~u_list (theta : P.M.t) =
-      let _std_o_extended =
-        theta._std_o_params
-        |> Maths.primal
-        |> Tensor.exp
-        |> Tensor.unsqueeze ~dim:0
-        |> Tensor.unsqueeze ~dim:0
+    let llh_increment ~_std_o_vec ~_std_o_extended ~new_o =
+      let noise =
+        Tensor.(
+          _std_o_extended
+          * randn (n_fisher :: Maths.shape new_o) ~device:base.device ~kind:base.kind)
       in
-      let _, fisher_rollout =
+      let new_o_unsqueezed =
+        List.init n_fisher ~f:(fun _ -> Maths.unsqueeze new_o ~dim:0)
+        |> Maths.concat_list ~dim:0
+      in
+      let o_samples_batched = Maths.(const Tensor.(Maths.primal new_o + noise)) in
+      gaussian_llh
+        ~mu:new_o_unsqueezed
+        ~std:_std_o_vec
+        ~fisher_batched:true
+        o_samples_batched
+
+
+    let true_fisher ~u_list (theta : P.M.t) =
+      let _std_o_vec =
+        Maths.(
+          const (Tensor.ones ~device:base.device ~kind:base.kind [ o ])
+          * theta._std_o_params)
+        |> Maths.exp
+      in
+      let _std_o_extended =
+        _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
+      in
+      let _, llh_rollout =
         List.fold
           u_list
-          ~init:(Maths.const x0, Tensor.f 0.)
+          ~init:(Maths.const x0, Maths.f 0.)
           ~f:(fun accu u ->
-            let prev_x, fisher_accu = accu in
+            let prev_x, llh_accu = accu in
             let new_x = rollout_one_step ~x:prev_x ~u theta in
             let new_o = Maths.(tmp_einsum new_x theta._c_params + theta._b_params) in
-            let new_o_primal = Maths.primal new_o in
-            let new_o_unsqueezed =
-              List.init n_fisher ~f:(fun _ -> Maths.unsqueeze new_o ~dim:0)
-              |> Maths.concat_list ~dim:0
-            in
-            let noise =
-              Tensor.(
-                _std_o_extended
-                * randn
-                    (n_fisher :: Maths.shape new_o)
-                    ~device:base.device
-                    ~kind:base.kind)
-            in
-            let o_samples_batched = Maths.(const Tensor.(new_o_primal + noise)) in
-            let lik_term_sampled_batched =
-              gaussian_llh
-                ~mu:new_o_unsqueezed
-                ~std:(Maths.exp theta._std_o_params)
-                ~fisher_batched:true
-                o_samples_batched
-            in
-            let fisher =
-              let fisher_tot = fisher lik_term_sampled_batched ~fisher_batched:true in
-              Tensor.mean_dim fisher_tot ~dim:(Some [ 0 ]) ~keepdim:false ~dtype:base.kind
-            in
+            let increment = llh_increment ~_std_o_vec ~_std_o_extended ~new_o in
             Stdlib.Gc.major ();
-            new_x, Tensor.(fisher + fisher_accu))
+            new_x, Maths.(increment + llh_accu))
       in
-      let fisher = Tensor.(fisher_rollout / f (Float.of_int tmax)) in
-      let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false fisher in
-      final_s
-      |> Tensor.reshape ~shape:[ -1; 1 ]
-      |> Tensor.to_bigarray ~kind:base.ba_kind
-      |> Owl.Dense.Matrix.S.save_txt ~out:(in_dir (sprintf "svals"));
-      fisher
+      let fisher_rollout =
+        let fisher_batched = fisher  llh_rollout ~fisher_batched:true in
+        Tensor.mean_dim fisher_batched ~dim:(Some [ 0 ]) ~keepdim:false ~dtype:base.kind
+      in
+      Tensor.(fisher_rollout / f (Float.of_int tmax))
   end
 
   (* (1 + e^-x)^{-2} (e^-x)*)

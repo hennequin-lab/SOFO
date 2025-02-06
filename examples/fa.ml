@@ -112,12 +112,8 @@ let gaussian_llh ?mu ?(fisher_batched = false) ~std x =
   in
   Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
 
-let fisher ?(fisher_batched = false) ~n lik_term =
-  let neg_lik_t =
-    Maths.(tangent lik_term)
-    |> Option.value_exn
-    |> fun x -> Tensor.(x / f Float.(of_int n))
-  in
+let fisher ?(fisher_batched = false) ~n:_ lik_term =
+  let neg_lik_t = Maths.(tangent lik_term) |> Option.value_exn in
   let n_tangents = List.hd_exn (Tensor.shape neg_lik_t) in
   let fisher =
     if fisher_batched
@@ -214,7 +210,7 @@ module M = struct
         | GGN ->
           let ggn_y =
             let vtgt = Maths.tangent y_pred |> Option.value_exn in
-            let vtgt_h = Tensor.(vtgt / Maths.(primal (sqr sigma_o))) in
+            let vtgt_h = Tensor.(vtgt * Maths.(primal precision)) in
             Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_h; vtgt ] ~path:None
           in
           let ggn_sigma_o =
@@ -222,9 +218,8 @@ module M = struct
             let vtgt_h =
               Tensor.(
                 f Float.(of_int o * of_int bs / 2.)
-                * square (square (Maths.primal sigma_o))
                 * vtgt
-               )
+                / square (Maths.primal precision))
             in
             Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
           in
@@ -306,12 +301,12 @@ module Do_with_SOFO : Do_with_T = struct
     match pred_cond with
     | TrueFisher -> "true_fisher"
     | EmpFisher -> "emp_fisher"
-    | GGN -> "ggn_20"
+    | GGN -> "ggn"
 
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 20.
+      ; learning_rate = Some 30.
       ; n_tangents = 64
       ; sqrt = false
       ; rank_one = false
