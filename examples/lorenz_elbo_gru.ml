@@ -522,7 +522,7 @@ module GRU = struct
         ~kind:base.kind
         ~a:n
         ~b:n
-        ~sigma:0.1
+        ~sigma:1.
       |> Prms.free
     in
     let _U_h_params =
@@ -531,7 +531,7 @@ module GRU = struct
         ~kind:base.kind
         ~a:n
         ~b:n
-        ~sigma:0.1
+        ~sigma:1.
       |> Prms.free
     in
     let _b_f_params = Tensor.zeros ~device:base.device [ 1; n ] |> Prms.free in
@@ -681,7 +681,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.01 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(0.03 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 60
       ; sqrt = false
       ; rank_one = false

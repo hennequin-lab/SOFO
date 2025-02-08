@@ -26,6 +26,7 @@ type pred_cond =
 
 let pred_cond = GGN
 let sampling = false
+let std_o_weight = 8.
 let n_fisher = 30
 let m = 10
 let o = 40
@@ -223,7 +224,7 @@ module M = struct
             in
             Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
           in
-          Tensor.(ggn_y + ggn_sigma_o)
+          Tensor.(ggn_y + f std_o_weight * ggn_sigma_o)
       in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false preconditioner in
       final_s
@@ -259,6 +260,10 @@ module Make (D : Do_with_T) = struct
       let _, y = sample_data () in
       let t0 = Unix.gettimeofday () in
       let loss, new_state = O.step ~config ~state ~data:y ~args:() in
+      let std_o_mean =
+        let a = M.P.value (O.params state) in
+        a.sigma_o_prms |> Tensor.mean |> Tensor.to_float0_exn
+      in
       let t1 = Unix.gettimeofday () in
       let time_elapsed = Float.(time_elapsed + t1 - t0) in
       let running_avg =
@@ -277,7 +282,7 @@ module Make (D : Do_with_T) = struct
             save_txt
               ~append:true
               ~out:(in_dir name)
-              (of_array [| Float.of_int t; time_elapsed; loss_avg |] 1 3));
+              (of_array [| Float.of_int t; time_elapsed; loss_avg; std_o_mean |] 1 4));
           O.W.P.T.save
             (M.P.value (O.params new_state))
             ~kind:base.ba_kind
@@ -301,12 +306,12 @@ module Do_with_SOFO : Do_with_T = struct
     match pred_cond with
     | TrueFisher -> "true_fisher"
     | EmpFisher -> "emp_fisher"
-    | GGN -> "ggn"
+    | GGN -> sprintf "ggn_std_o_weight_%s"  (Float.to_string std_o_weight)
 
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 30.
+      ; learning_rate = Some 40.
       ; n_tangents = 64
       ; sqrt = false
       ; rank_one = false
