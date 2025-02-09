@@ -104,7 +104,7 @@ let base =
 
 let laplace = false
 let step = 0.1
-let std_o_weight = 100.
+let std_o_weight = 10000.
 
 module PP = struct
   (* note that all std live in log space *)
@@ -220,12 +220,13 @@ module LGS = struct
         o_samples_batched
 
     let true_fisher ~u_list (theta : P.M.t) =
-      let _std_o_vec =
+      (* let _std_o_vec =
         Maths.(
           const (Tensor.ones ~device:base.device ~kind:base.kind [ o ])
           * theta._std_o_params)
         |> Maths.exp
-      in
+      in *)
+      let _std_o_vec = Maths.(exp theta._std_o_params) in
       let _std_o_extended =
         _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
       in
@@ -260,7 +261,10 @@ module LGS = struct
       in
       let ggn_sigma_increment =
         let vtgt = precision |> Maths.tangent |> Option.value_exn in
-        let vtgt_h = Tensor.(hess_sigma_o * vtgt) in
+        (* let vtgt_h = Tensor.(hess_sigma_o * vtgt) in *)
+        let vtgt_h =
+          Tensor.einsum ~equation:"ka,a->ka" [ vtgt; hess_sigma_o ] ~path:None
+        in
         Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
       in
       Tensor.(ggn_y_increment + (f std_o_weight * ggn_sigma_increment))
@@ -268,14 +272,14 @@ module LGS = struct
     let ggn ~u_list (theta : P.M.t) =
       let _Fx_prod = _Fx_prod theta in
       let _std_o = Maths.exp theta._std_o_params in
-      let _std_o_vec =
+      let _std_o_vec = _std_o in
+      (* let _std_o_vec =
         Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]) * _std_o)
-      in
+      in *)
       let precision = _std_o |> sqr_inv in
       let hess_y = _std_o_vec |> sqr_inv |> Maths.primal in
       let hess_sigma_o =
-        Tensor.(
-          f Float.(of_int o * of_int bs / 2.) * square (square (Maths.primal _std_o)))
+        Tensor.(f Float.(of_int bs / 2.) * square (square (Maths.primal _std_o)))
       in
       let _std_o_extended =
         _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
@@ -301,9 +305,10 @@ module LGS = struct
     let ggn_fisher ~u_list (theta : P.M.t) =
       let _Fx_prod = _Fx_prod theta in
       let _std_o = Maths.exp theta._std_o_params in
-      let _std_o_vec =
+      let _std_o_vec = _std_o in
+      (* let _std_o_vec =
         Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]) * _std_o)
-      in
+      in *)
       let _std_o_extended =
         _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
       in
@@ -321,11 +326,11 @@ module LGS = struct
             let ggn_increment =
               let vtgt = _std_o |> sqr_inv |> Maths.tangent |> Option.value_exn in
               let hess_sigma_o =
-                Tensor.(
-                  f Float.(of_int o * of_int bs / 2.)
-                  * square (square (Maths.primal _std_o)))
+                Tensor.(f Float.(of_int bs / 2.) * square (square (Maths.primal _std_o)))
               in
-              let vtgt_h = Tensor.(hess_sigma_o * vtgt) in
+              let vtgt_h =
+                Tensor.einsum ~equation:"ka,a->ka" [ vtgt; hess_sigma_o ] ~path:None
+              in
               Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
             in
             let llh_increment = llh_increment ~_std_o_vec ~_std_o_extended ~new_o in
@@ -347,12 +352,14 @@ module LGS = struct
     let o_list_tmp = Tensor.zeros_like (List.hd_exn o_list) :: o_list in
     let _cov_u_inv = Tensor.eye ~n:m ~options:(base.kind, base.device) |> Maths.const in
     let c_trans = Maths.transpose theta._c_params ~dim0:1 ~dim1:0 in
-    let _std_o_vec =
+    (* let _std_o_vec =
       Maths.(
         const (Tensor.ones ~device:base.device ~kind:base.kind [ o ])
         * theta._std_o_params)
       |> Maths.exp
-    in
+    in *)
+    let _std_o = Maths.exp theta._std_o_params in
+    let _std_o_vec = _std_o in
     let _cov_o_inv = _std_o_vec |> sqr_inv in
     let _Cxx =
       let tmp = Maths.(einsum [ theta._c_params, "ab"; _cov_o_inv, "b" ] "ab") in
@@ -421,12 +428,13 @@ module LGS = struct
     (* calculate the likelihood term *)
     let u_o_list = List.map2_exn u_list o_list ~f:(fun u o -> u, o) in
     let _Fx_prod = _Fx_prod theta in
-    let _std_o_vec =
+    (* let _std_o_vec =
       Maths.(
         const (Tensor.ones ~device:base.device ~kind:base.kind [ o ])
         * theta._std_o_params)
       |> Maths.exp
-    in
+    in *)
+    let _std_o_vec = Maths.exp theta._std_o_params in
     let llh =
       let _, llh =
         List.foldi
@@ -532,7 +540,7 @@ module LGS = struct
     let _std_o_params =
       Prms.create
         ~above:(Tensor.f (-5.))
-        Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ])
+        Tensor.(zeros ~device:base.device ~kind:base.kind [ o ])
       (* |> Prms.const *)
     in
     let _std_space_params =
@@ -697,7 +705,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.7 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(1. / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
