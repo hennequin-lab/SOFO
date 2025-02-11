@@ -65,11 +65,19 @@ let tmp_einsum a b =
   then Maths.einsum [ a, "ma"; b, "ab" ] "mb"
   else Maths.einsum [ a, "ma"; b, "mab" ] "mb"
 
+let save_svals m =
+  let _, s, _ = Tensor.svd ~some:true ~compute_uv:false m in
+  s
+  |> Tensor.reshape ~shape:[ -1; 1 ]
+  |> Tensor.to_bigarray ~kind:base.ba_kind
+  |> Owl.Mat.save_txt ~out:(in_dir (sprintf "svals"))
+
 (* -----------------------------------------
    -- Model setup and optimizer
    ----------------------------------------- *)
 
 let laplace = false
+let std_o_weight = 1.
 let n_fisher = 30
 let conv_threshold = 0.01
 let max_iter_ilqr = 200
@@ -185,7 +193,6 @@ module GRU = struct
         ~fisher_batched:true
         o_samples_batched
 
-
     let true_fisher ~u_list (theta : P.M.t) =
       let _std_o_vec =
         Maths.(
@@ -209,10 +216,58 @@ module GRU = struct
             new_x, Maths.(increment + llh_accu))
       in
       let fisher_rollout =
-        let fisher_batched = fisher  llh_rollout ~fisher_batched:true in
+        let fisher_batched = fisher llh_rollout ~fisher_batched:true in
         Tensor.mean_dim fisher_batched ~dim:(Some [ 0 ]) ~keepdim:false ~dtype:base.kind
       in
-      Tensor.(fisher_rollout / f (Float.of_int tmax))
+      let final = Tensor.(fisher_rollout / f (Float.of_int tmax)) in
+      save_svals final;
+      final
+
+    let ggn_increment ~new_o ~hess_y =
+      let ggn_y_increment =
+        let vtgt = Maths.tangent new_o |> Option.value_exn in
+        let vtgt_hess =
+          Tensor.einsum ~equation:"kma,a->kma" [ vtgt; hess_y ] ~path:None
+        in
+        Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_hess; vtgt ] ~path:None
+      in
+      Tensor.(ggn_y_increment)
+
+    let ggn ~u_list (theta : P.M.t) =
+      let _std_o = Maths.exp theta._std_o_params in
+      let _std_o_vec = _std_o in
+      let precision = _std_o |> sqr_inv in
+      let hess_y = _std_o_vec |> sqr_inv |> Maths.primal in
+      let hess_sigma_o =
+        Tensor.(f Float.(of_int m / 2.) * square (square (Maths.primal _std_o)))
+      in
+      let _std_o_extended =
+        _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
+      in
+      let _, ggn_rollout =
+        List.fold
+          u_list
+          ~init:(Maths.const x0, Tensor.f 0.)
+          ~f:(fun accu u ->
+            let prev_x, ggn_accu = accu in
+            let new_x = rollout_one_step ~x:prev_x ~u theta in
+            let new_o = Maths.(tmp_einsum new_x theta._c_params + theta._b_params) in
+            let increment = ggn_increment ~new_o ~hess_y in
+            Stdlib.Gc.major ();
+            new_x, Tensor.(increment + ggn_accu))
+      in
+      let ggn_sigma =
+        let vtgt = precision |> Maths.tangent |> Option.value_exn in
+        let vtgt_h =
+          Tensor.einsum ~equation:"ka,a->ka" [ vtgt; hess_sigma_o ] ~path:None
+        in
+        Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
+      in
+      let final =
+        Tensor.((ggn_rollout / f (Float.of_int tmax)) + (f std_o_weight * ggn_sigma))
+      in
+      save_svals final;
+      final
   end
 
   (* (1 + e^-x)^{-2} (e^-x)*)
@@ -490,7 +545,7 @@ module GRU = struct
           Maths.einsum [ tmp1, "mbt"; optimal_u, "mbt" ] "m" |> Maths.unsqueeze ~dim:1
         in
         let tmp = Maths.(det2 - det1 - _const + tr) |> Maths.reshape ~shape:[ 1; 1 ] in
-        Maths.(tmp + quad) |> Maths.squeeze ~dim:1)
+        Maths.(0.5 $* (tmp + quad)) |> Maths.squeeze ~dim:1)
     in
     Maths.((llh - kl) /$ Float.of_int tmax)
 

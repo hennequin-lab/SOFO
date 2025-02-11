@@ -366,7 +366,8 @@ module LGS = struct
             let increment =
               gaussian_llh
                 ~std:
-                  (Tensor.eye ~n:Dims.b ~options:(base.kind, base.device) |> Maths.const)
+                  (Tensor.ones [ Dims.b ] ~device:base.device ~kind:base.kind
+                   |> Maths.const)
                 u
             in
             match accu with
@@ -396,7 +397,7 @@ module LGS = struct
           |> Maths.unsqueeze ~dim:1
         in
         let tmp = Maths.(tr - det1 -$ _const) |> Maths.reshape ~shape:[ 1; 1 ] in
-        Maths.(tmp + quad) |> Maths.squeeze ~dim:1)
+        Maths.(0.5 $* (tmp + quad)) |> Maths.squeeze ~dim:1)
     in
     Maths.((llh - kl) /$ Float.of_int Dims.tmax)
 
