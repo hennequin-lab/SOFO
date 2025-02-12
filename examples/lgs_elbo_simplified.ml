@@ -77,6 +77,7 @@ let traj_rollout ~x0 ~_Fx ~_Fu ~_c ~_std_o ~u_list =
 
 (* in the linear gaussian case, _Fx, _Fu, c and cov invariant across time *)
 let _std_o = Tensor.(ones ~device:base.device ~kind:base.kind [ o ])
+let ones_o = Tensor.(ones ~device:base.device ~kind:base.kind [ o ])
 let _std_o_log = Tensor.(log _std_o)
 let _Fx = sample_stable ~a:n |> Tensor.of_bigarray ~device:base.device
 let _Fu = Tensor.randn ~device:base.device ~kind:base.kind [ m; n ]
@@ -148,7 +149,8 @@ let base =
     }
 
 let laplace = false
-let sample = true
+let sample = false
+let natural = true
 let step = 0.1
 let std_o_weight = 1.
 
@@ -266,7 +268,7 @@ module LGS = struct
         o_samples_batched
 
     let true_fisher ~u_list (theta : P.M.t) =
-      let _std_o_vec = Maths.(exp theta._std_o_params) in
+      let _std_o_vec = Maths.(exp theta._std_o_params * const ones_o) in
       let _std_o_extended =
         _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
       in
@@ -304,11 +306,12 @@ module LGS = struct
     let ggn ~u_list (theta : P.M.t) =
       let _Fx_prod = _Fx_prod theta in
       let _std_o = Maths.exp theta._std_o_params in
-      let _std_o_vec = _std_o in
+      let _std_o_vec = Maths.(_std_o * const ones_o) in
       let precision = _std_o |> sqr_inv in
       let hess_y = _std_o_vec |> sqr_inv |> Maths.primal in
       let hess_sigma_o =
-        Tensor.(f Float.(of_int bs / 2.) * square (square (Maths.primal _std_o)))
+        Tensor.(
+          f Float.(of_int Int.(bs * o) / 2.) * square (square (Maths.primal _std_o)))
       in
       let _std_o_extended =
         _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
@@ -340,10 +343,66 @@ module LGS = struct
       save_svals final;
       final
 
+    let ggn_natural ~u_list (theta : P.M.t) =
+      let _Fx_prod = _Fx_prod theta in
+      let _std_o = Maths.exp theta._std_o_params in
+      (* o_mean has shape [m x o x T] *)
+      let o_mean =
+        let _, o_mean_list =
+          List.fold
+            u_list
+            ~init:(Maths.const x0, [])
+            ~f:(fun accu u ->
+              let prev_x, o_mean_accu = accu in
+              let new_x =
+                Maths.(tmp_einsum prev_x _Fx_prod + tmp_einsum u theta._Fu_prod_params)
+              in
+              let new_o_mean =
+                Maths.(tmp_einsum new_x theta._c_params) |> Maths.unsqueeze ~dim:2
+              in
+              Stdlib.Gc.major ();
+              new_x, new_o_mean :: o_mean_accu)
+        in
+        Maths.concat_list o_mean_list ~dim:2
+      in
+      let beta = Maths.(f 1. / sqr _std_o) in
+      let alpha =
+        Maths.einsum [ Maths.unsqueeze ~dim:3 o_mean, "mdtc"; beta, "c" ] "mdt"
+      in
+      let alpha_pri = Maths.primal alpha in
+      let beta_pri = Maths.primal beta in
+      let alpha_sum =
+        Tensor.einsum ~equation:"mdt,mdt->m" [ alpha_pri; alpha_pri ] ~path:None
+        |> Tensor.sum
+      in
+      let h_11 = Tensor.(f 1. / beta_pri) in
+      let h_12 = Tensor.(neg alpha_pri / square beta_pri) in
+      let h_22 =
+        Tensor.(
+          ((f (Float.of_int Int.(o * bs * tmax)) / (f 2. * beta_pri))
+           + (alpha_sum / square beta_pri))
+          / beta_pri)
+      in
+      let alpha_t = Maths.tangent alpha |> Option.value_exn in
+      let beta_t = Maths.tangent beta |> Option.value_exn |> Tensor.squeeze in
+      (* H JV *)
+      let tmp1 =
+        Tensor.(
+          (alpha_t * h_11) + einsum ~equation:"mdt,k->kmdt" [ h_12; beta_t ] ~path:None)
+      in
+      let tmp2 =
+        Tensor.(
+          einsum ~equation:"mdt,kmdt->k" [ h_12; alpha_t ] ~path:None + (h_22 * beta_t))
+      in
+      (* J^T V^T H JV *)
+      let tmp3 = Tensor.einsum ~equation:"kmdt,jmdt->kj" [ alpha_t; tmp1 ] ~path:None in
+      let tmp4 = Tensor.einsum ~equation:"k,j->kj" [ beta_t; tmp2 ] ~path:None in
+      Tensor.((tmp3 + tmp4)  / f (Float.of_int tmax))
+
     let ggn_fisher ~u_list (theta : P.M.t) =
       let _Fx_prod = _Fx_prod theta in
       let _std_o = Maths.exp theta._std_o_params in
-      let _std_o_vec = _std_o in
+      let _std_o_vec = Maths.(_std_o * const ones_o) in
       let _std_o_extended =
         _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
       in
@@ -361,7 +420,9 @@ module LGS = struct
             let ggn_increment =
               let vtgt = _std_o |> sqr_inv |> Maths.tangent |> Option.value_exn in
               let hess_sigma_o =
-                Tensor.(f Float.(of_int bs / 2.) * square (square (Maths.primal _std_o)))
+                Tensor.(
+                  f Float.(of_int Int.(bs * o) / 2.)
+                  * square (square (Maths.primal _std_o)))
               in
               let vtgt_h =
                 Tensor.einsum ~equation:"ka,a->ka" [ vtgt; hess_sigma_o ] ~path:None
@@ -388,7 +449,7 @@ module LGS = struct
     let _cov_u_inv = Tensor.eye ~n:m ~options:(base.kind, base.device) |> Maths.const in
     let c_trans = Maths.transpose theta._c_params ~dim0:1 ~dim1:0 in
     let _std_o = Maths.exp theta._std_o_params in
-    let _std_o_vec = _std_o in
+    let _std_o_vec = Maths.(_std_o * const ones_o) in
     let _cov_o_inv = _std_o_vec |> sqr_inv in
     let _Cxx =
       let tmp = Maths.(einsum [ theta._c_params, "ab"; _cov_o_inv, "b" ] "ab") in
@@ -457,7 +518,8 @@ module LGS = struct
     (* calculate the likelihood term *)
     let u_o_list = List.map2_exn u_list o_list ~f:(fun u o -> u, o) in
     let _Fx_prod = _Fx_prod theta in
-    let _std_o_vec = Maths.exp theta._std_o_params in
+    let _std_o = Maths.exp theta._std_o_params in
+    let _std_o_vec = Maths.(_std_o * const ones_o) in
     let llh =
       let _, llh =
         List.foldi
@@ -523,7 +585,7 @@ module LGS = struct
           |> Maths.unsqueeze ~dim:1
         in
         let tmp = Maths.(tr - det1 -$ _const) |> Maths.reshape ~shape:[ 1; 1 ] in
-        Maths.(0.5 $* (tmp + quad)) |> Maths.squeeze ~dim:1)
+        Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1)
     in
     Maths.((llh - kl) /$ Float.of_int tmax)
 
@@ -537,7 +599,7 @@ module LGS = struct
     match update with
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
-      let ggn = L.ggn ~u_list theta in
+      let ggn = (if natural then L.ggn_natural else L.ggn) ~u_list theta in
       u init (Some (neg_elbo, Some ggn))
 
   let init : P.tagged =
@@ -580,7 +642,7 @@ module LGS = struct
     let _std_o_params =
       Prms.create
         ~above:(Tensor.f (-5.))
-        Tensor.(zeros ~device:base.device ~kind:base.kind [ o ])
+        Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ])
       (* |> Prms.const *)
     in
     let _std_space_params =
@@ -724,7 +786,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.2 / (1. +. (0. * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(1. / (1. +. (0. * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
@@ -740,11 +802,12 @@ module Do_with_SOFO : Do_with_T = struct
       Option.value_map init_config.damping ~default:"none" ~f:Float.to_string
     in
     sprintf
-      "ggn_lr_%s_sqrt_%s_damp_%s_std_o_weight_%s"
+      "ggn_lr_%s_sqrt_%s_damp_%s_std_o_weight_%s_natural_%s"
       (Float.to_string (Option.value_exn init_config.learning_rate))
       (Bool.to_string init_config.sqrt)
       gamma_name
       (Float.to_string std_o_weight)
+      (Bool.to_string natural)
 
   let init = O.init ~config:(config_f ~iter:0) LGS.init
 end

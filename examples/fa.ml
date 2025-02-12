@@ -26,7 +26,7 @@ type pred_cond =
 
 let pred_cond = GGN
 let sampling = false
-let std_o_weight = 8.
+let std_o_weight = 1.
 let n_fisher = 30
 let m = 10
 let o = 40
@@ -127,9 +127,56 @@ let fisher ?(fisher_batched = false) ~n:_ lik_term =
   in
   fisher
 
-let ggn ~like_hess ~vtgt =
-  let vtgt_hess = Tensor.einsum ~equation:"kma,a->kma" [ vtgt; like_hess ] ~path:None in
-  Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_hess; vtgt ] ~path:None
+let ggn ~y_pred ~std_o =
+  let precision = Maths.(f 1. / sqr std_o) in
+  let ggn_y =
+    let vtgt = Maths.tangent y_pred |> Option.value_exn in
+    let vtgt_h = Tensor.(vtgt * Maths.(primal precision)) in
+    Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_h; vtgt ] ~path:None
+  in
+  let ggn_sigma_o =
+    let vtgt = Maths.tangent precision |> Option.value_exn in
+    let vtgt_h =
+      Tensor.(
+        f Float.(of_int o * of_int bs / 2.) * vtgt / square (Maths.primal precision))
+    in
+    Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
+  in
+  Tensor.(ggn_y + (f std_o_weight * ggn_sigma_o))
+
+let ggn_natural ~y_pred ~std_o =
+  let _mean = y_pred in
+  let beta = Maths.(f 1. / sqr std_o) in
+  let alpha = Maths.einsum [ Maths.unsqueeze ~dim:2 _mean, "mdc"; beta, "c" ] "md" in
+  let alpha_pri = Maths.primal alpha in
+  let beta_pri = Maths.primal beta in
+  let alpha_sum =
+    Tensor.einsum ~equation:"mo,mo->m" [ alpha_pri; alpha_pri ] ~path:None |> Tensor.sum
+  in
+  (* TODO: how should we set h11? *)
+  let h_11 = Tensor.(f 1. / beta_pri) in
+  let h_12 = Tensor.(neg alpha_pri / square beta_pri) in
+  let h_22 =
+    Tensor.(
+      ((f (Float.of_int Int.(o * bs)) / (f 2. * beta_pri)) + (alpha_sum / (square beta_pri)))
+      / beta_pri)
+  in
+  let alpha_t = Maths.tangent alpha |> Option.value_exn in
+  let beta_t = Maths.tangent beta |> Option.value_exn |> Tensor.squeeze in
+  (* H JV *)
+  let tmp1 =
+    Tensor.((alpha_t * h_11) + einsum ~equation:"md,k->kmd" [ h_12; beta_t ] ~path:None)
+  in
+  let tmp2 =
+    Tensor.(einsum ~equation:"md,kmd->k" [ h_12; alpha_t ] ~path:None + (h_22 * beta_t))
+  in
+
+  (* J^T V^T H JV *)
+  let tmp3 = Tensor.einsum ~equation:"kmd,jmd->kj" [ alpha_t; tmp1 ] ~path:None in
+  let tmp4 =
+    Tensor.einsum ~equation:"k,j->kj" [ beta_t; tmp2 ] ~path:None
+  in
+  Tensor.(tmp3 + tmp4)
 
 module M = struct
   module P = P
@@ -209,22 +256,11 @@ module M = struct
           true_fisher
         | EmpFisher -> fisher ~n:o lik_term
         | GGN ->
-          let ggn_y =
-            let vtgt = Maths.tangent y_pred |> Option.value_exn in
-            let vtgt_h = Tensor.(vtgt * Maths.(primal precision)) in
-            Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_h; vtgt ] ~path:None
-          in
-          let ggn_sigma_o =
-            let vtgt = Maths.tangent precision |> Option.value_exn in
-            let vtgt_h =
-              Tensor.(
-                f Float.(of_int o * of_int bs / 2.)
-                * vtgt
-                / square (Maths.primal precision))
-            in
-            Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
-          in
-          Tensor.(ggn_y + f std_o_weight * ggn_sigma_o)
+
+          (* ggn ~y_pred ~std_o:sigma_o *)
+          ggn_natural ~y_pred ~std_o:sigma_o
+
+        (* ggn_natural ~_mean:y_pred ~std:sigma_o *)
       in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false preconditioner in
       final_s
@@ -306,12 +342,12 @@ module Do_with_SOFO : Do_with_T = struct
     match pred_cond with
     | TrueFisher -> "true_fisher"
     | EmpFisher -> "emp_fisher"
-    | GGN -> sprintf "ggn_std_o_weight_%s"  (Float.to_string std_o_weight)
+    | GGN -> sprintf "ggn_std_o_weight_%s_natural" (Float.to_string std_o_weight)
 
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 40.
+      ; learning_rate = Some 30.
       ; n_tangents = 64
       ; sqrt = false
       ; rank_one = false
