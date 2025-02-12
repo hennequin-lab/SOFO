@@ -23,19 +23,19 @@ let base =
 
 let bs = 256
 let full_batch_size = 60_000
-let num_epochs_to_run = 1
+let num_epochs_to_run = 5
 
 let num_train_loops =
   Convenience.num_train_loops ~full_batch_size ~batch_size:bs num_epochs_to_run
 
 let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size:bs t
-let sampling = false
+let sampling = true
 let input_dim = 28 * 28
-let h_dim1 = 100
+let h_dim1 = 20
 let latent_dim = 10
 
 let encoder_hidden_layers =
-  [| input_dim, h_dim1;  h_dim1, latent_dim; h_dim1, latent_dim |]
+  [| input_dim, h_dim1; h_dim1, latent_dim; h_dim1, latent_dim |]
 
 let decoder_hidden_layers = [| latent_dim, h_dim1; h_dim1, input_dim |]
 let n_encoder = Array.length encoder_hidden_layers
@@ -84,29 +84,37 @@ module VAE = struct
     in
     Maths.sigmoid h_
 
-  let gaussian_llh ?mu ?(fisher_batched = false) ~std x =
+  let gaussian_llh ?mu ?(fisher_batched = false) ?(std_batched = false) ~std x =
     let inv_std = Maths.(f 1. / std) in
+    let std_eq = if std_batched then "ma" else "a" in
     let error_term =
       if fisher_batched
       then (
         (* batch dimension l is number of fisher samples *)
         let error =
           match mu with
-          | None -> Maths.(einsum [ x, "lma"; inv_std, "a" ] "lma")
-          | Some mu -> Maths.(einsum [ x - mu, "lma"; inv_std, "a" ] "lma")
+          | None -> Maths.(einsum [ x, "lma"; inv_std, std_eq ] "lma")
+          | Some mu -> Maths.(einsum [ x - mu, "lma"; inv_std, std_eq ] "lma")
         in
         Maths.einsum [ error, "lma"; error, "lma" ] "lm")
       else (
         let error =
           match mu with
-          | None -> Maths.(einsum [ x, "ma"; inv_std, "a" ] "ma")
-          | Some mu -> Maths.(einsum [ x - mu, "ma"; inv_std, "a" ] "ma")
+          | None -> Maths.(einsum [ x, "ma"; inv_std, std_eq ] "ma")
+          | Some mu -> Maths.(einsum [ x - mu, "ma"; inv_std, std_eq ] "ma")
         in
         Maths.einsum [ error, "ma"; error, "ma" ] "m")
     in
     let cov_term =
-      let cov_term_shape = if fisher_batched then [ 1; 1 ] else [ 1 ] in
-      Maths.(sum (log (sqr std))) |> Maths.reshape ~shape:cov_term_shape
+      match fisher_batched, std_batched with
+      | true, false -> Maths.(sum (log (sqr std))) |> Maths.reshape ~shape:[ 1; 1 ]
+      | false, false -> Maths.(sum (log (sqr std))) |> Maths.reshape ~shape:[ 1 ]
+      | true, true ->
+        Maths.(sum_dim (log (sqr std)) ~dim:(Some [ 1 ]) ~keepdim:false)
+        |> Maths.reshape ~shape:[ -1; bs ]
+      | false, true ->
+        Maths.(sum_dim (log (sqr std)) ~dim:(Some [ 1 ]) ~keepdim:false)
+        |> Maths.reshape ~shape:[ bs ]
     in
     let const_term =
       let o = x |> Maths.primal |> Tensor.shape |> List.last_exn in
@@ -123,11 +131,9 @@ module VAE = struct
     let z = reparam ~_mean ~log_std in
     let x_hat = decoder z theta in
     (* how close the reconstructed image is to the original *)
-    let lik_term =
-      gaussian_llh
-        ~mu:(Maths.const x)
-        ~std:(Tensor.ones [ input_dim ] ~device:base.device ~kind:base.kind |> Maths.const)
-        x_hat
+    let rec_error =
+      let diff = Maths.(x_hat - const x) in
+      Maths.einsum [ diff, "ma"; diff, "ma" ] "m"
     in
     let kl_term =
       if sampling
@@ -137,25 +143,31 @@ module VAE = struct
             ~std:
               (Tensor.ones [ latent_dim ] ~device:base.device ~kind:base.kind
                |> Maths.const)
-            x_hat
+            z
         in
-        let q_term = gaussian_llh ~mu:(Maths.const x) ~std:(Maths.exp log_std) x_hat in
-        Maths.(q_term - prior_term))
+        let neg_entropy =
+          gaussian_llh ~std_batched:true ~mu:_mean ~std:(Maths.exp log_std) z
+        in
+        Maths.(neg_entropy - prior_term))
       else (
-        let det1 = Maths.(2. $* sum log_std) in
-        let _const = Maths.const (Tensor.f Float.(of_int latent_dim)) in
-        let tr = log_std |> Maths.exp |> Maths.sqr |> Maths.sum in
-        let quad =
-          Maths.(einsum [ z, "mb"; z, "mb" ] "m") |> Maths.reshape ~shape:[ -1; 1 ]
+        let det1 = Maths.(2. $* sum_dim ~dim:(Some [ 1 ]) ~keepdim:true log_std) in
+        let _const = Float.(of_int latent_dim) in
+        let tr =
+          log_std
+          |> Maths.exp
+          |> Maths.sqr
+          |> Maths.sum_dim ~dim:(Some [ 1 ]) ~keepdim:true
         in
-        let tmp = Maths.(tr - _const - det1) |> Maths.reshape ~shape:[ 1; 1 ] in
+        let quad =
+          Maths.(einsum [ _mean, "mb"; _mean, "mb" ] "m")
+          |> Maths.reshape ~shape:[ -1; 1 ]
+        in
+        let tmp = Maths.(tr - f _const - det1) in
         Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1)
     in
-    let neg_elbo =
-      Maths.((lik_term - kl_term) /$ Float.(of_int input_dim)) |> Maths.neg
-    in
+    let loss = Maths.(rec_error + kl_term) in
     match update with
-    | `loss_only u -> u init (Some neg_elbo)
+    | `loss_only u -> u init (Some loss)
     | `loss_and_ggn u ->
       let ggn = ggn ~x_hat in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false ggn in
@@ -163,7 +175,7 @@ module VAE = struct
       |> Tensor.reshape ~shape:[ -1; 1 ]
       |> Tensor.to_bigarray ~kind:base.ba_kind
       |> Owl.Mat.save_txt ~out:(in_dir (sprintf "svals"));
-      u init (Some (neg_elbo, Some ggn))
+      u init (Some (loss, Some ggn))
 
   let init =
     let open MLP_Layer in
@@ -287,11 +299,11 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.08 / (1. +. (0. * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(5. / (1. +. (0. * sqrt (of_int iter))))
       ; n_tangents = 256
       ; sqrt = false
       ; rank_one = false
-      ; damping = Some 1e-5
+      ; damping = Some 1e-3
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None
@@ -321,7 +333,7 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (VAE)
 
   let config_f ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 5e-4 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 1e-3 }
 
   let init = O.init VAE.init
 end
