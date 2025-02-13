@@ -25,12 +25,11 @@ type pred_cond =
   | TrueFisher
 
 let pred_cond = GGN
-let sampling = false
-let std_o_weight = 1.
+let sampling = true
 let n_fisher = 30
 let m = 10
 let o = 40
-let bs = 128
+let bs = 64
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
 
@@ -43,7 +42,6 @@ module PP = struct
   type 'a p =
     { c : 'a
     ; sigma_o_prms : 'a
-    ; d_prms : 'a
     }
   [@@deriving prms]
 end
@@ -57,11 +55,10 @@ let theta =
       ~above:(Tensor.f (-5.))
       Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ])
   in
-  let d_prms = Prms.create ~above:(Tensor.f (-5.)) Maths.(primal (f (-2.) * ones_u)) in
-  PP.{ c; sigma_o_prms; d_prms }
+  PP.{ c; sigma_o_prms }
 
 let sample_data =
-  let sigma_o = Maths.(f 0.1) in
+  let sigma_o = Maths.(f 0.001) in
   let c = make_c (m, o) in
   fun () ->
     let us =
@@ -82,6 +79,15 @@ let u_opt ~c ~sigma_o y =
   let a = Maths.(a + diag_embed ~offset:0 ~dim1:0 ~dim2:1 (sqr sigma_o)) in
   let solution = solver a y in
   Maths.(einsum [ c, "ij"; solution, "mj" ] "mi")
+
+let d_opt_inv ~c ~sigma_o =
+  let sigma_o_inv_vec =
+    Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]) / sqr sigma_o)
+  in
+  let cct = Maths.(einsum [ c, "ij"; c, "kj" ] "ik") in
+  let a = Maths.(einsum [ cct, "ik"; sigma_o_inv_vec, "k" ] "ik") in
+  let d_opt_inv = Maths.(const (Tensor.eye ~n:m ~options:(base.kind, base.device)) + a) in
+  d_opt_inv
 
 let gaussian_llh ?mu ?(fisher_batched = false) ~std x =
   let inv_std = Maths.(f 1. / std) in
@@ -106,6 +112,26 @@ let gaussian_llh ?mu ?(fisher_batched = false) ~std x =
   let cov_term =
     let cov_term_shape = if fisher_batched then [ 1; 1 ] else [ 1 ] in
     Maths.(sum (log (sqr std))) |> Maths.reshape ~shape:cov_term_shape
+  in
+  let const_term =
+    let o = x |> Maths.primal |> Tensor.shape |> List.last_exn in
+    Float.(log (2. * pi) * of_int o)
+  in
+  Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
+
+let gaussian_llh_chol ?mu ~chol x =
+  let ell_t = Maths.transpose ~dim0:0 ~dim1:1 chol in
+  let error_term =
+    let error =
+      match mu with
+      | None -> x
+      | Some mu -> Maths.(x - mu)
+    in
+    let error = Maths.linsolve_triangular ~left:false ~upper:true ell_t error in
+    Maths.einsum [ error, "ma"; error, "ma" ] "m"
+  in
+  let cov_term =
+    Maths.(sum (log (sqr (diagonal ~offset:0 chol))) |> reshape ~shape:[ 1 ])
   in
   let const_term =
     let o = x |> Maths.primal |> Tensor.shape |> List.last_exn in
@@ -142,7 +168,7 @@ let ggn ~y_pred ~std_o =
     in
     Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
   in
-  Tensor.(ggn_y + (f std_o_weight * ggn_sigma_o))
+  Tensor.(ggn_y + ggn_sigma_o)
 
 let ggn_natural ~y_pred ~std_o =
   let _mean = y_pred in
@@ -158,7 +184,7 @@ let ggn_natural ~y_pred ~std_o =
   let h_12 = Tensor.(neg alpha_pri / square beta_pri) in
   let h_22 =
     Tensor.(
-      ((f (Float.of_int Int.(o * bs)) / (f 2. * beta_pri)) + (alpha_sum / (square beta_pri)))
+      ((f (Float.of_int Int.(o * bs)) / (f 2. * beta_pri)) + (alpha_sum / square beta_pri))
       / beta_pri)
   in
   let alpha_t = Maths.tangent alpha |> Option.value_exn in
@@ -170,12 +196,9 @@ let ggn_natural ~y_pred ~std_o =
   let tmp2 =
     Tensor.(einsum ~equation:"md,kmd->k" [ h_12; alpha_t ] ~path:None + (h_22 * beta_t))
   in
-
   (* J^T V^T H JV *)
   let tmp3 = Tensor.einsum ~equation:"kmd,jmd->kj" [ alpha_t; tmp1 ] ~path:None in
-  let tmp4 =
-    Tensor.einsum ~equation:"k,j->kj" [ beta_t; tmp2 ] ~path:None
-  in
+  let tmp4 = Tensor.einsum ~equation:"k,j->kj" [ beta_t; tmp2 ] ~path:None in
   Tensor.(tmp3 + tmp4)
 
 module M = struct
@@ -186,11 +209,20 @@ module M = struct
 
   let f ~update ~data:y ~init ~args:() (theta : P.M.t) =
     let sigma_o = Maths.exp theta.sigma_o_prms in
-    let precision = Maths.(f 1. / sqr sigma_o) in
     let sigma_o_extended = Maths.(sigma_o * ones_o) in
-    let d = Maths.(exp theta.d_prms) in
+    let d_opt_chol =
+      let d_opt_inv = d_opt_inv ~c:theta.c ~sigma_o in
+      let d_opt_inv_chol = Maths.cholesky d_opt_inv in
+      Maths.linsolve
+        d_opt_inv_chol
+        (Maths.const (Tensor.eye ~n:m ~options:(base.kind, base.device)))
+        ~left:true
+    in
     let u_opt = u_opt ~c:theta.c ~sigma_o:sigma_o_extended y in
-    let u_diff = Maths.(const (Tensor.randn_like (primal u_opt)) * unsqueeze ~dim:0 d) in
+    let u_diff =
+      let e = Maths.(const (Tensor.randn_like (primal u_opt))) in
+      Maths.einsum [ e, "mj"; d_opt_chol, "ij" ] "mi"
+    in
     let u_sampled = Maths.(u_opt + u_diff) in
     let y_pred = Maths.(u_sampled *@ theta.c) in
     let lik_term = gaussian_llh ~mu:y_pred ~std:sigma_o_extended y in
@@ -198,12 +230,13 @@ module M = struct
       if sampling
       then (
         let prior_term = gaussian_llh ~std:ones_u u_sampled in
-        let q_term = gaussian_llh ~std:d u_diff in
+        let q_term = gaussian_llh_chol ~chol:d_opt_chol u_diff in
         Maths.(q_term - prior_term))
       else (
-        let det1 = Maths.(2. $* sum theta.d_prms) in
+        let d_opt_chol_diag = Maths.diagonal d_opt_chol ~offset:0 in
+        let det1 = Maths.(2. $* sum d_opt_chol_diag) in
         let _const = Maths.const (Tensor.f Float.(of_int m)) in
-        let tr = d |> Maths.sqr |> Maths.sum in
+        let tr = d_opt_chol_diag |> Maths.sqr |> Maths.sum in
         let quad =
           Maths.(einsum [ u_opt, "mb"; u_opt, "mb" ] "m") |> Maths.reshape ~shape:[ -1 ]
         in
@@ -255,11 +288,7 @@ module M = struct
           in
           true_fisher
         | EmpFisher -> fisher ~n:o lik_term
-        | GGN ->
-
-          (* ggn ~y_pred ~std_o:sigma_o *)
-          ggn_natural ~y_pred ~std_o:sigma_o
-
+        | GGN -> ggn ~y_pred ~std_o:sigma_o
         (* ggn_natural ~_mean:y_pred ~std:sigma_o *)
       in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false preconditioner in
@@ -338,26 +367,35 @@ end
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (M)
 
-  let name =
-    match pred_cond with
-    | TrueFisher -> "true_fisher"
-    | EmpFisher -> "emp_fisher"
-    | GGN -> sprintf "ggn_std_o_weight_%s_natural" (Float.to_string std_o_weight)
+  
 
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 30.
+      ; learning_rate = Some 40.
       ; n_tangents = 64
       ; sqrt = false
       ; rank_one = false
-      ; damping = Some 1e-3
+      ; damping = None
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None
       }
 
   let init = O.init ~config theta
+
+  let name =
+    match pred_cond with
+    | TrueFisher -> "true_fisher"
+    | EmpFisher -> "emp_fisher"
+    | GGN -> let gamma_name =
+      Option.value_map config.damping ~default:"none" ~f:Float.to_string
+    in
+    sprintf
+      "ggn_lr_%s_damp_%s_k_%s"
+      (Float.to_string (Option.value_exn config.learning_rate))
+      gamma_name
+      (Int.to_string (config.n_tangents))
 end
 
 (* --------------------------------

@@ -397,7 +397,7 @@ module LGS = struct
           |> Maths.unsqueeze ~dim:1
         in
         let tmp = Maths.(tr - det1 -$ _const) |> Maths.reshape ~shape:[ 1; 1 ] in
-        Maths.(0.5 $* (tmp + quad)) |> Maths.squeeze ~dim:1)
+        Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1)
     in
     Maths.((llh - kl) /$ Float.of_int Dims.tmax)
 

@@ -1,4 +1,4 @@
-(* Linear Gaussian Dynamics, with same state/control/cost parameters constant across trials and across time *)
+(* variational autoencoder on mnist *)
 open Printf
 open Base
 open Forward_torch
@@ -29,9 +29,9 @@ let num_train_loops =
   Convenience.num_train_loops ~full_batch_size ~batch_size:bs num_epochs_to_run
 
 let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size:bs t
-let sampling = true
+let sampling = false
 let input_dim = 28 * 28
-let h_dim1 = 20
+let h_dim1 = 100
 let latent_dim = 10
 
 let encoder_hidden_layers =
@@ -40,6 +40,7 @@ let encoder_hidden_layers =
 let decoder_hidden_layers = [| latent_dim, h_dim1; h_dim1, input_dim |]
 let n_encoder = Array.length encoder_hidden_layers
 let n_decoder = Array.length decoder_hidden_layers
+let beta = 0.1
 
 module VAE = struct
   module MLP_Layer = struct
@@ -78,9 +79,9 @@ module VAE = struct
     Maths.(_mean + (std * const (Tensor.rand_like (Maths.primal _mean))))
 
   let decoder z (theta : P.M.t) =
-    let theta_encoder = Array.sub theta ~pos:n_encoder ~len:n_decoder in
+    let theta_decoder = Array.sub theta ~pos:n_encoder ~len:n_decoder in
     let h_ =
-      Array.fold theta_encoder ~init:z ~f:(fun accu p -> phi Maths.((accu *@ p.w) + p.b))
+      Array.fold theta_decoder ~init:z ~f:(fun accu p -> phi Maths.((accu *@ p.w) + p.b))
     in
     Maths.sigmoid h_
 
@@ -126,7 +127,7 @@ module VAE = struct
     let vtgt = Maths.tangent x_hat |> Option.value_exn in
     Tensor.einsum ~equation:"kma,jma->kj" [ vtgt; vtgt ] ~path:None
 
-  let f ~update ~data:x ~init ~args:() (theta : P.M.t) =
+  let loss ~data:x theta =
     let _mean, log_std = encoder x theta in
     let z = reparam ~_mean ~log_std in
     let x_hat = decoder z theta in
@@ -165,7 +166,10 @@ module VAE = struct
         let tmp = Maths.(tr - f _const - det1) in
         Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1)
     in
-    let loss = Maths.(rec_error + kl_term) in
+    Maths.(rec_error + (f beta * kl_term)), x_hat
+
+  let f ~update ~data:x ~init ~args:() (theta : P.M.t) =
+    let loss, x_hat = loss ~data:x theta in
     match update with
     | `loss_only u -> u init (Some loss)
     | `loss_and_ggn u ->
@@ -267,8 +271,17 @@ module Make (D : Do_with_T) = struct
           | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
         in
         (* save params *)
-        if iter % 1 = 0
+        if iter % 10 = 0
         then (
+          let data_test = sample_data test_set bs in
+          let test_loss =
+            let loss_t, _ =
+              VAE.loss
+                ~data:data_test
+                (VAE.P.map ~f:Maths.const (VAE.P.value (O.params new_state)))
+            in
+            loss_t |> Maths.primal |> Tensor.mean |> Tensor.to_float0_exn
+          in
           (* avg error *)
           let t = epoch_of iter in
           Convenience.print [%message (t : float) (loss_avg : float)];
@@ -276,7 +289,7 @@ module Make (D : Do_with_T) = struct
             save_txt
               ~append:true
               ~out:(in_dir name)
-              (of_array [| t; time_elapsed; loss_avg |] 1 3));
+              (of_array [| t; time_elapsed; loss_avg; test_loss |] 1 4));
           O.W.P.T.save
             (VAE.P.value (O.params new_state))
             ~kind:base.ba_kind
@@ -299,7 +312,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(5. / (1. +. (0. * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(0.1 / (1. +. (0. * sqrt (of_int iter))))
       ; n_tangents = 256
       ; sqrt = false
       ; rank_one = false
