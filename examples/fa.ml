@@ -25,7 +25,7 @@ type pred_cond =
   | TrueFisher
 
 let pred_cond = GGN
-let sampling = true
+let sampling = false
 let n_fisher = 30
 let m = 10
 let o = 40
@@ -58,7 +58,7 @@ let theta =
   PP.{ c; sigma_o_prms }
 
 let sample_data =
-  let sigma_o = Maths.(f 0.001) in
+  let sigma_o = Maths.(f 0.1) in
   let c = make_c (m, o) in
   fun () ->
     let us =
@@ -234,7 +234,7 @@ module M = struct
         Maths.(q_term - prior_term))
       else (
         let d_opt_chol_diag = Maths.diagonal d_opt_chol ~offset:0 in
-        let det1 = Maths.(2. $* sum d_opt_chol_diag) in
+        let det1 = Maths.(2. $* sum (log (d_opt_chol_diag))) in
         let _const = Maths.const (Tensor.f Float.(of_int m)) in
         let tr = d_opt_chol_diag |> Maths.sqr |> Maths.sum in
         let quad =
@@ -372,7 +372,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 40.
+      ; learning_rate = Some 20.
       ; n_tangents = 64
       ; sqrt = false
       ; rank_one = false
