@@ -51,21 +51,16 @@ let save_svals m =
 
 (* everything has to be optional, because
    perhaps none of those input parameters will have tangents *)
-type ('a, 'prod) momentary_params_common =
-  { _Fx_prod : 'prod option (* Av product *)
-  ; _Fx_prod2 : 'prod option (* vA product *)
-  ; _Fu_prod : 'prod option (* Bv produt *)
-  ; _Fu_prod2 : 'prod option (* vB product *)
+type 'a momentary_params_common =
+  { _A : 'a option
+  ; _B : 'a option
   ; _Cxx : 'a option
   ; _Cxu : 'a option
   ; _Cuu : 'a option
   }
 
-(* everything has to be optional, because
-   perhaps none of those input parameters will have tangents.
-   common refers to what is commoro both primal and tangent LQR problems. *)
-type ('a, 'prod) momentary_params =
-  { common : ('a, 'prod) momentary_params_common
+type 'a momentary_params =
+  { common : 'a momentary_params_common
   ; _f : 'a option
   ; _cx : 'a option
   ; _cu : 'a option
@@ -100,7 +95,6 @@ type backward_info =
   ; _k : Maths.t option
   }
 
-let zeros_like a = Torch.Tensor.zeros_like (Maths.primal a) |> Maths.const
 let maybe_btr = Option.map ~f:Maths.btr
 
 let ( +? ) a b =
@@ -110,9 +104,13 @@ let ( +? ) a b =
   | None, Some b -> Some b
   | Some a, Some b -> Some Maths.(a + b)
 
-let ( *? ) f v =
-  match f, v with
-  | Some f, Some v -> Some (f v)
+let ( @? ) a b =
+  match a, b with
+  | Some a, Some b ->
+    (match List.length (Maths.shape b) with
+     | 3 -> Some (Maths.einsum [ a, "ab"; b, "mbc" ] "mac")
+     | 2 -> Some (Maths.einsum [ a, "ab"; b, "mb" ] "ma")
+     | _ -> failwith "not batch multipliable")
   | _ -> None
 
 let maybe_unsqueeze ~dim a =
@@ -144,7 +142,7 @@ let neg_inv_symm ~is_vector _b (ell, ell_T) =
   | _ -> None
 
 (* backward recursion: all the (most expensive) common bits. common goes from 0 to T *)
-let backward_common (common : (Maths.t, Maths.t -> Maths.t) momentary_params_common list) =
+let backward_common (common : Maths.t momentary_params_common list) =
   let _V =
     match List.last common with
     | None -> failwith "LQR needs a time horizon >= 1"
@@ -157,19 +155,17 @@ let backward_common (common : (Maths.t, Maths.t -> Maths.t) momentary_params_com
       cleanup ();
       let _Quu, _Qxx, _Qux =
         let _V_unsqueezed = maybe_unsqueeze _V ~dim:0 in
-        let tmp = z._Fx_prod *? _V_unsqueezed in
+        let tmp = z._A @? _V_unsqueezed in
         let _Quu =
-          let tmp2 =
-            z._Fu_prod *? maybe_btr (z._Fu_prod *? _V_unsqueezed) |> maybe_squeeze ~dim:0
-          in
+          let tmp2 = z._B @? maybe_btr (z._B @? _V_unsqueezed) |> maybe_squeeze ~dim:0 in
           z._Cuu +? tmp2
         in
         let _Qxx =
-          let tmp2 = z._Fx_prod *? maybe_btr tmp |> maybe_squeeze ~dim:0 in
+          let tmp2 = z._A @? maybe_btr tmp |> maybe_squeeze ~dim:0 in
           z._Cxx +? tmp2
         in
         let _Qux =
-          let tmp2 = z._Fu_prod *? maybe_btr tmp |> maybe_squeeze ~dim:0 in
+          let tmp2 = z._B @? maybe_btr tmp |> maybe_squeeze ~dim:0 in
           maybe_btr z._Cxu +? tmp2
         in
         _Quu, _Qxx, _Qux
@@ -197,9 +193,9 @@ let _k ~z ~_f _qu =
     in
     Some _k
 
-let _qu_qx ~z ~_cu ~_cx ~_f ~_Fu_prod ~_Fx_prod _v =
+let _qu_qx ~z ~_cu ~_cx ~_f ~_B ~_A _v =
   let tmp = _v +? maybe_einsum (z._V, "ab") (_f, "mb") "ma" in
-  _cu +? (_Fu_prod *? tmp), _cx +? (_Fx_prod *? tmp)
+  _cu +? (_B @? tmp), _cx +? (_A @? tmp)
 
 let v ~_K ~_qx ~_qu = _qx +? maybe_einsum (_K, "ba") (_qu, "mb") "ma"
 
@@ -207,8 +203,7 @@ let v ~_K ~_qx ~_qu = _qx +? maybe_einsum (_K, "ba") (_qu, "mb") "ma"
    computed *)
 let backward
       common_info
-      (params :
-        (Maths.t option, (Maths.t, Maths.t -> Maths.t) momentary_params list) Params.p)
+      (params : (Maths.t option, Maths.t momentary_params list) Params.p)
   =
   let _v =
     match List.last params.params with
@@ -225,14 +220,7 @@ let backward
       ~f:(fun (_v, info_list) z p ->
         cleanup ();
         let _qu, _qx =
-          _qu_qx
-            ~z
-            ~_cu:p._cu
-            ~_cx:p._cx
-            ~_f:p._f
-            ~_Fu_prod:p.common._Fu_prod
-            ~_Fx_prod:p.common._Fx_prod
-            _v
+          _qu_qx ~z ~_cu:p._cu ~_cx:p._cx ~_f:p._f ~_B:p.common._B ~_A:p.common._A _v
         in
         (* compute LQR gain parameters to be used in the subsequent fwd pass *)
         let _k = _k ~z ~_f:p._f _qu in
@@ -243,7 +231,9 @@ let backward
   info
 
 let _u ~_k ~_K ~x = _k +? maybe_einsum (x, "ma") (_K, "ba") "mb"
-let _x ~_f ~_Fx_prod2 ~_Fu_prod2 ~x ~u = _f +? (_Fx_prod2 *? x) +? (_Fu_prod2 *? u)
+
+let _x ~_f ~_A ~_B ~x ~u =
+  _f +? maybe_einsum (x, "ma") (_A, "ab") "mb" +? maybe_einsum (u, "ma") (_B, "ab") "mb"
 
 let forward params (backward_info : backward_info list) =
   let open Params in
@@ -259,10 +249,7 @@ let forward params (backward_info : backward_info list) =
         (* compute the optimal control inputs *)
         let u = _u ~_k:b._k ~_K:b._K ~x in
         (* fold them into the state update *)
-        let x =
-          let _Fx_prod2, _Fu_prod2 = p.common._Fx_prod2, p.common._Fu_prod2 in
-          _x ~_f:p._f ~_Fx_prod2 ~_Fu_prod2 ~x ~u
-        in
+        let x = _x ~_f:p._f ~_A:p.common._A ~_B:p.common._B ~x ~u in
         x, Solution.{ u; x } :: accu)
   in
   List.rev solution
@@ -283,8 +270,8 @@ let _solve p =
 module Temp = struct
   type ('a, 'o) p =
     { _f : 'o
-    ; _Fx_prod : 'a
-    ; _Fu_prod : 'a
+    ; _A : 'a
+    ; _B : 'a
     ; _cx : 'o
     ; _cu : 'o
     ; _Cxx : 'a
@@ -297,27 +284,12 @@ end
 module O = Prms.Option (Prms.P)
 module Input = Params.Make (O) (Prms.List (Temp.Make (Prms.P) (O)))
 
-(* Fv prod; if batch_const, F does not have a leading batch dimension. Assume b always has a leading dimension *)
-let bmm a b =
-  match List.length (Maths.shape b) with
-  | 3 -> Maths.einsum [ a, "ab"; b, "mbc" ] "mac"
-  | 2 -> Maths.einsum [ a, "ab"; b, "mb" ] "ma"
-  | _ -> failwith "not batch multipliable"
-
-(* vF prod *)
-let bmm2 b a =
-  match List.length (Maths.shape a) with
-  | 2 -> Maths.einsum [ a, "ma"; b, "ab" ] "mb"
-  | _ -> failwith "should not happen"
-
 let map_naive (x : Input.M.t) =
   let params =
     List.map x.params ~f:(fun p ->
       { common =
-          { _Fx_prod = Some (bmm p._Fx_prod)
-          ; _Fx_prod2 = Some (bmm2 p._Fx_prod)
-          ; _Fu_prod = Some (bmm p._Fu_prod)
-          ; _Fu_prod2 = Some (bmm2 p._Fu_prod)
+          { _A = Some p._A
+          ; _B = Some p._B
           ; _Cxx = Some p._Cxx
           ; _Cxu = p._Cxu
           ; _Cuu = Some p._Cuu
@@ -339,12 +311,12 @@ let tmax = 10
 let bs = 128
 
 (* x_list goes from 1 to T and o list goes from 1 to T. *)
-let traj_rollout ~x0 ~_Fx ~_Fu ~_c ~_std_o ~u_list =
+let traj_rollout ~x0 ~_A ~_B ~_c ~_std_o ~u_list =
   let tmp_einsum a b = Tensor.einsum ~equation:"ma,ab->mb" [ a; b ] ~path:None in
   let _size = List.hd_exn (Tensor.shape x0) in
   let _, x_list, o_list =
     List.fold u_list ~init:(x0, [], []) ~f:(fun (x, x_list, o_list) u ->
-      let new_x = Tensor.(tmp_einsum x _Fx + tmp_einsum u _Fu) in
+      let new_x = Tensor.(tmp_einsum x _A + tmp_einsum u _B) in
       let new_o =
         let noise =
           let eps = Tensor.randn ~device:base.device ~kind:base.kind [ _size; o ] in
@@ -356,12 +328,12 @@ let traj_rollout ~x0 ~_Fx ~_Fu ~_c ~_std_o ~u_list =
   in
   List.rev x_list, List.rev o_list
 
-(* in the linear gaussian case, _Fx, _Fu, c and cov invariant across time *)
-let _std_o = Tensor.(f 0.001 * ones ~device:base.device ~kind:base.kind [ o ])
+(* in the linear gaussian case, _A, _B, c and cov invariant across time *)
+let _std_o = Tensor.(f 1. * ones ~device:base.device ~kind:base.kind [ o ])
 let ones_o = Tensor.(ones ~device:base.device ~kind:base.kind [ o ])
 let _std_o_log = Tensor.(log _std_o)
-let _Fx = sample_stable ~a:n |> Tensor.of_bigarray ~device:base.device
-let _Fu = Tensor.randn ~device:base.device ~kind:base.kind [ m; n ]
+let _A = sample_stable ~a:n |> Tensor.of_bigarray ~device:base.device
+let _B = Tensor.randn ~device:base.device ~kind:base.kind [ m; n ]
 let _c = Tensor.randn ~device:base.device ~kind:base.kind [ n; o ]
 
 (** generalisation performance *)
@@ -376,7 +348,7 @@ let sample_test_data _size =
     List.init tmax ~f:(fun _ ->
       Tensor.(randn ~device:base.device ~kind:base.kind [ _size; m ]))
   in
-  let x_list, o_list = traj_rollout ~x0 ~_Fx ~_Fu ~_c ~_std_o ~u_list in
+  let x_list, o_list = traj_rollout ~x0 ~_A ~_B ~_c ~_std_o ~u_list in
   u_list, x_list, o_list
 
 (* -----------------------------------------
@@ -390,8 +362,8 @@ let base =
     ; ba_kind = Bigarray.float64
     }
 
-let sample = false
 let n_fisher = 30
+let sample = false
 let step = 0.1
 let std_o_weight = 1.
 
@@ -401,15 +373,13 @@ module PP = struct
     { _S_params : 'a
     ; _L_params : 'a
       (* generative model; Fx = (1-step) I + step * W, W = I + (-I + S - S^T) LL^T *)
-      (* _Fx_prod_params : 'a *)
-    ; _Fu_prod_params : 'a
+      (* _A_params : 'a *)
+    ; _B_params : 'a
     ; _c_params : 'a
-    ; _std_o_params : 'a
-      (* sqrt of the diagonal of covariance of emission noise *)
-      (* ; _std_space_params : 'a
+    ; _std_o_params : 'a (* sqrt of the diagonal of covariance of emission noise *)
+    ; _std_space_params : 'a
       (* recognition model; sqrt of the diagonal of covariance of space factor *)
-    ; _std_time_params : 'a  *)
-      (* sqrt of the diagonal of covariance of the time factor *)
+    ; _std_time_params : 'a (* sqrt of the diagonal of covariance of the time factor *)
     }
   [@@deriving prms]
 end
@@ -422,8 +392,8 @@ module LGS = struct
   type args = unit
   type data = Tensor.t list
 
-  let _Fx_prod (theta : P.M.t) =
-    (* theta._Fx_prod_params *)
+  let _A (theta : P.M.t) =
+    (* theta._A_params *)
     let eye_tmp = Maths.const (Tensor.eye ~n ~options:(base.kind, base.device)) in
     let _W =
       Maths.(
@@ -435,8 +405,7 @@ module LGS = struct
     let tmp2 = Maths.(f step * _W) in
     Maths.(tmp1 + tmp2)
 
-  let step ~_Fx_prod ~_Fu_prod ~u ~prev_x =
-    Maths.(tmp_einsum prev_x _Fx_prod + tmp_einsum u _Fu_prod)
+  let step ~_A ~_B ~u ~prev_x = Maths.(tmp_einsum prev_x _A + tmp_einsum u _B)
 
   (* 1/ (x^2) *)
   let sqr_inv x = Maths.(1. $/ sqr x)
@@ -515,14 +484,14 @@ module LGS = struct
       let _std_o_extended =
         _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
       in
-      let _Fx_prod = _Fx_prod theta in
+      let _A = _A theta in
       let _, llh_rollout =
         List.fold
           u_list
           ~init:(Maths.const x0, Maths.f 0.)
           ~f:(fun accu u ->
             let prev_x, llh_accu = accu in
-            let new_x = step ~_Fx_prod ~_Fu_prod:theta._Fu_prod_params ~u ~prev_x in
+            let new_x = step ~_A ~_B:theta._B_params ~u ~prev_x in
             let new_o = tmp_einsum new_x theta._c_params in
             let increment = llh_increment ~_std_o_vec ~_std_o_extended ~new_o in
             cleanup ();
@@ -547,7 +516,7 @@ module LGS = struct
       ggn_y_increment
 
     let ggn ~u_list (theta : P.M.t) =
-      let _Fx_prod = _Fx_prod theta in
+      let _A = _A theta in
       let _std_o = Maths.exp theta._std_o_params in
       let _std_o_vec = Maths.(_std_o * const ones_o) in
       let precision = _std_o |> sqr_inv in
@@ -565,9 +534,7 @@ module LGS = struct
           ~init:(Maths.const x0, Tensor.f 0.)
           ~f:(fun accu u ->
             let prev_x, ggn_accu = accu in
-            let new_x =
-              Maths.(tmp_einsum prev_x _Fx_prod + tmp_einsum u theta._Fu_prod_params)
-            in
+            let new_x = Maths.(tmp_einsum prev_x _A + tmp_einsum u theta._B_params) in
             let new_o = tmp_einsum new_x theta._c_params in
             let increment = ggn_increment ~new_o ~hess_y in
             cleanup ();
@@ -602,7 +569,7 @@ module LGS = struct
       let tmp = Maths.(einsum [ theta._c_params, "ab"; _cov_o_inv, "b" ] "ab") in
       Maths.(tmp *@ c_trans)
     in
-    let _Fx_prod = _Fx_prod theta in
+    let _A = _A theta in
     Params.
       { x0 = Some x0
       ; params =
@@ -613,8 +580,8 @@ module LGS = struct
             in
             Temp.
               { _f = None
-              ; _Fx_prod
-              ; _Fu_prod = theta._Fu_prod_params
+              ; _A
+              ; _B = theta._B_params
               ; _cx = Some _cx
               ; _cu = None
               ; _Cxx
@@ -626,21 +593,19 @@ module LGS = struct
   (* rollout x list under sampled u *)
   let rollout_x ~u_list ~x0 (theta : P.M.t) =
     let x0_tan = Maths.const x0 in
-    let _Fx_prod = _Fx_prod theta in
+    let _A = _A theta in
     let _, x_list =
       List.fold u_list ~init:(x0_tan, [ x0_tan ]) ~f:(fun (x, x_list) u ->
-        let new_x = step ~_Fx_prod ~_Fu_prod:theta._Fu_prod_params ~u ~prev_x:x in
+        let new_x = step ~_A ~_B:theta._B_params ~u ~prev_x:x in
         new_x, new_x :: x_list)
     in
     List.rev x_list
 
   (* optimal u determined from lqr *)
-  (* let pred_u ~data:o_list (theta : P.M.t) =
+  let pred_u ~data:o_list (theta : P.M.t) =
     (* use lqr to obtain the optimal u *)
-    let p =
-      params_from_f ~x0:(Maths.const x0) ~theta ~o_list |> map_naive ~batch_const
-    in
-    let sol = _solve  p in
+    let p = params_from_f ~x0:(Maths.const x0) ~theta ~o_list |> map_naive  in
+    let sol = _solve p in
     let optimal_u_list = List.map sol ~f:(fun s -> s.u) in
     (* sample u from the kronecker formation *)
     let u_list =
@@ -659,7 +624,7 @@ module LGS = struct
         Maths.slice ~dim:2 ~start:(Some i) ~end_:(Some (i + 1)) ~step:1 meaned
         |> Maths.reshape ~shape:[ bs; m ])
     in
-    optimal_u_list, u_list *)
+    optimal_u_list, u_list
 
   (* u sampled from true posterior via Matheron sampling *)
   let pred_u_matheron ~data:o_list (theta : P.M.t) =
@@ -714,7 +679,7 @@ module LGS = struct
 
   let llh ~o_list ~u_list ~optimal_u_list:_ (theta : P.M.t) =
     let u_o_list = List.map2_exn u_list o_list ~f:(fun u o -> u, o) in
-    let _Fx_prod = _Fx_prod theta in
+    let _A = _A theta in
     let _std_o = Maths.exp theta._std_o_params in
     let _std_o_vec = Maths.(_std_o * const ones_o) in
     let _, llh =
@@ -724,7 +689,7 @@ module LGS = struct
         ~f:(fun t accu (u, o) ->
           if t % 1 = 0 then cleanup ();
           let prev_x, llh_summed = accu in
-          let new_x = step ~_Fx_prod ~_Fu_prod:theta._Fu_prod_params ~u ~prev_x in
+          let new_x = step ~_A ~_B:theta._B_params ~u ~prev_x in
           let increment =
             gaussian_llh ~mu:o ~std:_std_o_vec (tmp_einsum new_x theta._c_params)
           in
@@ -738,7 +703,7 @@ module LGS = struct
     in
     Option.value_exn llh
 
-  (* let kl ~u_list ~optimal_u_list (theta : P.M.t) =
+  let kl ~u_list ~optimal_u_list (theta : P.M.t) =
     let optimal_u = concat_time optimal_u_list in
     if sample
     then (
@@ -785,16 +750,16 @@ module LGS = struct
   let elbo ~o_list ~u_list ~optimal_u_list (theta : P.M.t) =
     let llh = llh ~o_list ~optimal_u_list ~u_list theta in
     let kl = kl ~u_list ~optimal_u_list theta in
-    Maths.(llh - kl) *)
+    Maths.(llh - kl)
 
   let f ~update ~data ~init ~args:() (theta : P.M.t) =
     let module L = Elbo_loss in
     (* TODO: Matheron formulation *)
     let loss, u_list =
-      let optimal_u_list, u_list = pred_u_matheron ~data theta in
+      let optimal_u_list, u_list = pred_u ~data theta in
       let loss_total =
         Maths.neg
-          (llh ~o_list:(List.map data ~f:Maths.const) ~u_list ~optimal_u_list theta)
+          (elbo ~o_list:(List.map data ~f:Maths.const) ~u_list ~optimal_u_list theta)
       in
       Maths.(loss_total / f (Float.of_int tmax)), u_list
     in
@@ -823,7 +788,7 @@ module LGS = struct
         ~sigma:0.1
       |> Prms.free
     in
-    let _Fu_prod_params =
+    let _B_params =
       Convenience.gaussian_tensor_2d_normed
         ~device:base.device
         ~kind:base.kind
@@ -858,12 +823,12 @@ module LGS = struct
         ~above:(Tensor.f (-5.))
     in
     { _S_params
-    ; _L_params (* _Fx_prod_params *)
-    ; _Fu_prod_params
+    ; _L_params (* _A_params *)
+    ; _B_params
     ; _c_params
     ; _std_o_params
-      (* ; _std_space_params
-    ; _std_time_params *)
+    ; _std_space_params
+    ; _std_time_params
     }
 
   (* calculate the error between observations *)
@@ -1004,7 +969,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.05 / (1. +. (0. * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(0.1 / (1. +. (0. * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
