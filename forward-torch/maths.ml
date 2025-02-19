@@ -15,6 +15,7 @@ let all_dims_but_first a = List.range 1 (List.length (Tensor.shape a))
 
 (* get primal, which is the first element *)
 let primal = fst
+let primal_tensor_detach x = Tensor.detach (fst x)
 
 (* get tangent opt, which is instantiated if direct or not instantiated if lazy *)
 let tangent' = function
@@ -572,8 +573,7 @@ let ( + ) (x, dx) (y, dy) =
 let ( - ) (x, dx) (y, dy) =
   let z = Tensor.(x - y) in
   let dz = with_tangents dx dy ~fx:Fn.id ~fy:Tensor.neg ~fxy:Tensor.( - ) in
-  (z, dz) 
-  |> assert_right_shape "( - )"
+  (z, dz) |> assert_right_shape "( - )"
 
 (* z = x * y, dz = y dx + x dy *)
 let ( * ) (x, dx) (y, dy) =

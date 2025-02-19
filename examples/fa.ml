@@ -26,6 +26,7 @@ type pred_cond =
 
 let pred_cond = GGN
 let sampling = false
+let matheron = true
 let n_fisher = 30
 let m = 10
 let o = 40
@@ -58,7 +59,7 @@ let theta =
   PP.{ c; sigma_o_prms }
 
 let sample_data =
-  let sigma_o = Maths.(f 0.1) in
+  let sigma_o = Maths.(f 0.001) in
   let c = make_c (m, o) in
   fun () ->
     let us =
@@ -179,7 +180,6 @@ let ggn_natural ~y_pred ~std_o =
   let alpha_sum =
     Tensor.einsum ~equation:"mo,mo->m" [ alpha_pri; alpha_pri ] ~path:None |> Tensor.sum
   in
-  (* TODO: how should we set h11? *)
   let h_11 = Tensor.(f 1. / beta_pri) in
   let h_12 = Tensor.(neg alpha_pri / square beta_pri) in
   let h_22 =
@@ -223,7 +223,11 @@ module M = struct
       let e = Maths.(const (Tensor.randn_like (primal u_opt))) in
       Maths.einsum [ e, "mj"; d_opt_chol, "ij" ] "mi"
     in
-    let u_sampled = Maths.(u_opt + u_diff) in
+    let u_sampled =
+      if matheron
+      then Maths.(const (primal_tensor_detach (u_opt + u_diff)))
+      else Maths.(u_opt + u_diff)
+    in
     let y_pred = Maths.(u_sampled *@ theta.c) in
     let lik_term = gaussian_llh ~mu:y_pred ~std:sigma_o_extended y in
     let kl_term =
@@ -234,7 +238,7 @@ module M = struct
         Maths.(q_term - prior_term))
       else (
         let d_opt_chol_diag = Maths.diagonal d_opt_chol ~offset:0 in
-        let det1 = Maths.(2. $* sum (log (d_opt_chol_diag))) in
+        let det1 = Maths.(2. $* sum (log d_opt_chol_diag)) in
         let _const = Maths.const (Tensor.f Float.(of_int m)) in
         let tr = d_opt_chol_diag |> Maths.sqr |> Maths.sum in
         let quad =
@@ -244,7 +248,13 @@ module M = struct
         Maths.(0.5 $* tmp + quad))
     in
     let neg_elbo =
-      Maths.(lik_term - kl_term) |> Maths.neg |> fun x -> Maths.(x / f Float.(of_int o))
+      (if matheron
+       then
+         Maths.(lik_term )
+         (* then Maths.(lik_term - const (primal_tensor_detach kl_term)) *)
+       else Maths.(lik_term))
+      |> Maths.neg
+      |> fun x -> Maths.(x / f Float.(of_int o))
     in
     match update with
     | `loss_only u -> u init (Some neg_elbo)
@@ -367,12 +377,10 @@ end
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (M)
 
-  
-
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 20.
+      ; learning_rate = Some 50.
       ; n_tangents = 64
       ; sqrt = false
       ; rank_one = false
@@ -388,14 +396,15 @@ module Do_with_SOFO : Do_with_T = struct
     match pred_cond with
     | TrueFisher -> "true_fisher"
     | EmpFisher -> "emp_fisher"
-    | GGN -> let gamma_name =
-      Option.value_map config.damping ~default:"none" ~f:Float.to_string
-    in
-    sprintf
-      "ggn_lr_%s_damp_%s_k_%s"
-      (Float.to_string (Option.value_exn config.learning_rate))
-      gamma_name
-      (Int.to_string (config.n_tangents))
+    | GGN ->
+      let gamma_name =
+        Option.value_map config.damping ~default:"none" ~f:Float.to_string
+      in
+      sprintf
+        "ggn_lr_%s_damp_%s_k_%s_matheron_no_kl"
+        (Float.to_string (Option.value_exn config.learning_rate))
+        gamma_name
+        (Int.to_string config.n_tangents)
 end
 
 (* --------------------------------
@@ -419,7 +428,7 @@ end
    -------------------------------- *)
 
 module Do_with_Adam : Do_with_T = struct
-  let name = "adam"
+  let name = "adam_matheron_no_kl"
 
   module O = Optimizer.Adam (M)
 

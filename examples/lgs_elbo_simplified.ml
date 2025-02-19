@@ -14,8 +14,6 @@ let _ =
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
-let n_fisher = 100
-
 let base =
   Optimizer.Config.Base.
     { device = Torch.Device.cuda_if_available ()
@@ -26,7 +24,7 @@ let base =
 (* -----------------------------------------
    ----- Utilitiy Functions ------
    ----------------------------------------- *)
-
+let cleanup () = Stdlib.Gc.major ()
 let in_dir = Cmdargs.in_dir "-d"
 let tmp_einsum a b = Maths.einsum [ a, "ma"; b, "ab" ] "mb"
 
@@ -48,14 +46,297 @@ let save_svals m =
   |> Owl.Mat.save_txt ~out:(in_dir (sprintf "svals"))
 
 (* -----------------------------------------
+   ----- LQR Functions ------
+   ----------------------------------------- *)
+
+(* everything has to be optional, because
+   perhaps none of those input parameters will have tangents *)
+type ('a, 'prod) momentary_params_common =
+  { _Fx_prod : 'prod option (* Av product *)
+  ; _Fx_prod2 : 'prod option (* vA product *)
+  ; _Fu_prod : 'prod option (* Bv produt *)
+  ; _Fu_prod2 : 'prod option (* vB product *)
+  ; _Cxx : 'a option
+  ; _Cxu : 'a option
+  ; _Cuu : 'a option
+  }
+
+(* everything has to be optional, because
+   perhaps none of those input parameters will have tangents.
+   common refers to what is commoro both primal and tangent LQR problems. *)
+type ('a, 'prod) momentary_params =
+  { common : ('a, 'prod) momentary_params_common
+  ; _f : 'a option
+  ; _cx : 'a option
+  ; _cu : 'a option
+  }
+
+(* params starts at time idx 0 and ends at time index T. Note that at time index T only _Cxx and _cx is used *)
+module Params = struct
+  type ('a, 'p) p =
+    { x0 : 'a
+    ; params : 'p
+    }
+  [@@deriving prms]
+end
+
+module Solution = struct
+  type 'a p =
+    { u : 'a
+    ; x : 'a
+    }
+  [@@deriving prms]
+end
+
+type backward_common_info =
+  { _Quu_chol : Maths.t option
+  ; _Quu_chol_T : Maths.t option
+  ; _V : Maths.t option
+  ; _K : Maths.t option
+  }
+
+type backward_info =
+  { _K : Maths.t option
+  ; _k : Maths.t option
+  }
+
+let zeros_like a = Torch.Tensor.zeros_like (Maths.primal a) |> Maths.const
+let maybe_btr = Option.map ~f:Maths.btr
+
+let ( +? ) a b =
+  match a, b with
+  | None, None -> None
+  | Some a, None -> Some a
+  | None, Some b -> Some b
+  | Some a, Some b -> Some Maths.(a + b)
+
+let ( *? ) f v =
+  match f, v with
+  | Some f, Some v -> Some (f v)
+  | _ -> None
+
+let maybe_unsqueeze ~dim a =
+  match a with
+  | None -> None
+  | Some a -> Some (Maths.unsqueeze a ~dim)
+
+let maybe_squeeze ~dim a =
+  match a with
+  | None -> None
+  | Some a -> Some (Maths.squeeze a ~dim)
+
+let maybe_einsum (a, opsA) (b, opsB) opsC =
+  match a, b with
+  | Some a, Some b -> Some (Maths.einsum [ a, opsA; b, opsB ] opsC)
+  | _ -> None
+
+let neg_inv_symm ~is_vector _b (ell, ell_T) =
+  match ell, ell_T with
+  | Some ell, Some ell_T ->
+    let _b =
+      if not is_vector
+      then _b
+      else Option.map _b ~f:(fun x -> Maths.reshape x ~shape:(Maths.shape x @ [ 1 ]))
+    in
+    let _y = Option.map _b ~f:(Maths.linsolve_triangular ~left:true ~upper:false ell) in
+    Option.map _y ~f:(fun x ->
+      Maths.linsolve_triangular ~left:true ~upper:true ell_T x |> Maths.neg)
+  | _ -> None
+
+(* backward recursion: all the (most expensive) common bits. common goes from 0 to T *)
+let backward_common (common : (Maths.t, Maths.t -> Maths.t) momentary_params_common list) =
+  let _V =
+    match List.last common with
+    | None -> failwith "LQR needs a time horizon >= 1"
+    | Some z -> z._Cxx
+  in
+  (* info goes from 0 to t-1 *)
+  let _, info =
+    let common_except_last = List.drop_last_exn common in
+    List.fold_right common_except_last ~init:(_V, []) ~f:(fun z (_V, info_list) ->
+      cleanup ();
+      let _Quu, _Qxx, _Qux =
+        let _V_unsqueezed = maybe_unsqueeze _V ~dim:0 in
+        let tmp = z._Fx_prod *? _V_unsqueezed in
+        let _Quu =
+          let tmp2 =
+            z._Fu_prod *? maybe_btr (z._Fu_prod *? _V_unsqueezed) |> maybe_squeeze ~dim:0
+          in
+          z._Cuu +? tmp2
+        in
+        let _Qxx =
+          let tmp2 = z._Fx_prod *? maybe_btr tmp |> maybe_squeeze ~dim:0 in
+          z._Cxx +? tmp2
+        in
+        let _Qux =
+          let tmp2 = z._Fu_prod *? maybe_btr tmp |> maybe_squeeze ~dim:0 in
+          maybe_btr z._Cxu +? tmp2
+        in
+        _Quu, _Qxx, _Qux
+      in
+      (* compute LQR gain parameters to be used in the subsequent fwd pass *)
+      let _Quu_inv = Option.map _Quu ~f:Maths.inv_sqr in
+      let _Quu_chol = Option.map _Quu ~f:Maths.cholesky in
+      let _Quu_chol_T = maybe_btr _Quu_chol in
+      let _K = neg_inv_symm ~is_vector:false _Qux (_Quu_chol, _Quu_chol_T) in
+      (* update the value function *)
+      let _V_new = _Qxx +? maybe_einsum (_Qux, "ab") (_K, "ac") "bc" in
+      _V_new, { _Quu_chol; _Quu_chol_T; _V; _K } :: info_list)
+  in
+  info
+
+let _k ~z ~_f _qu =
+  match _qu with
+  | None -> None
+  | Some _qu ->
+    let _qu_swapped = Some (Maths.permute ~dims:[ 1; 0 ] _qu) in
+    let _k =
+      neg_inv_symm ~is_vector:false _qu_swapped (z._Quu_chol, z._Quu_chol_T)
+      |> Option.value_exn
+      |> Maths.permute ~dims:[ 1; 0 ]
+    in
+    Some _k
+
+let _qu_qx ~z ~_cu ~_cx ~_f ~_Fu_prod ~_Fx_prod _v =
+  let tmp = _v +? maybe_einsum (z._V, "ab") (_f, "mb") "ma" in
+  _cu +? (_Fu_prod *? tmp), _cx +? (_Fx_prod *? tmp)
+
+let v ~_K ~_qx ~_qu = _qx +? maybe_einsum (_K, "ba") (_qu, "mb") "ma"
+
+(* backward recursion; assumes all the common (expensive) stuff has already been
+   computed *)
+let backward
+      common_info
+      (params :
+        (Maths.t option, (Maths.t, Maths.t -> Maths.t) momentary_params list) Params.p)
+  =
+  let _v =
+    match List.last params.params with
+    | None -> failwith "LQR needs a time horizon >= 1"
+    | Some z -> z._cx
+  in
+  (* info (k/K) goes from 0 to T-1 *)
+  let _, info =
+    let params_except_last = List.drop_last_exn params.params in
+    List.fold2_exn
+      (List.rev common_info)
+      (List.rev params_except_last)
+      ~init:(_v, [])
+      ~f:(fun (_v, info_list) z p ->
+        cleanup ();
+        let _qu, _qx =
+          _qu_qx
+            ~z
+            ~_cu:p._cu
+            ~_cx:p._cx
+            ~_f:p._f
+            ~_Fu_prod:p.common._Fu_prod
+            ~_Fx_prod:p.common._Fx_prod
+            _v
+        in
+        (* compute LQR gain parameters to be used in the subsequent fwd pass *)
+        let _k = _k ~z ~_f:p._f _qu in
+        (* update the value function *)
+        let _v = v ~_K:z._K ~_qx ~_qu in
+        _v, { _k; _K = z._K } :: info_list)
+  in
+  info
+
+let _u ~_k ~_K ~x = _k +? maybe_einsum (x, "ma") (_K, "ba") "mb"
+let _x ~_f ~_Fx_prod2 ~_Fu_prod2 ~x ~u = _f +? (_Fx_prod2 *? x) +? (_Fu_prod2 *? u)
+
+let forward params (backward_info : backward_info list) =
+  let open Params in
+  (* u goes from 0 to T-1, x goes from 1 to T *)
+  let _, solution =
+    let params_except_last = List.drop_last_exn params.params in
+    List.fold2_exn
+      params_except_last
+      backward_info
+      ~init:(params.x0, [])
+      ~f:(fun (x, accu) p b ->
+        cleanup ();
+        (* compute the optimal control inputs *)
+        let u = _u ~_k:b._k ~_K:b._K ~x in
+        (* fold them into the state update *)
+        let x =
+          let _Fx_prod2, _Fu_prod2 = p.common._Fx_prod2, p.common._Fu_prod2 in
+          _x ~_f:p._f ~_Fx_prod2 ~_Fu_prod2 ~x ~u
+        in
+        x, Solution.{ u; x } :: accu)
+  in
+  List.rev solution
+
+let _solve p =
+  let common_info = backward_common (List.map p.Params.params ~f:(fun x -> x.common)) in
+  cleanup ();
+  let bck = backward common_info p in
+  cleanup ();
+  let sol =
+    bck
+    |> forward p
+    |> List.map ~f:(fun s ->
+      Solution.{ x = Option.value_exn s.x; u = Option.value_exn s.u })
+  in
+  sol
+
+module Temp = struct
+  type ('a, 'o) p =
+    { _f : 'o
+    ; _Fx_prod : 'a
+    ; _Fu_prod : 'a
+    ; _cx : 'o
+    ; _cu : 'o
+    ; _Cxx : 'a
+    ; _Cxu : 'o
+    ; _Cuu : 'a
+    }
+  [@@deriving prms]
+end
+
+module O = Prms.Option (Prms.P)
+module Input = Params.Make (O) (Prms.List (Temp.Make (Prms.P) (O)))
+
+(* Fv prod; if batch_const, F does not have a leading batch dimension. Assume b always has a leading dimension *)
+let bmm a b =
+  match List.length (Maths.shape b) with
+  | 3 -> Maths.einsum [ a, "ab"; b, "mbc" ] "mac"
+  | 2 -> Maths.einsum [ a, "ab"; b, "mb" ] "ma"
+  | _ -> failwith "not batch multipliable"
+
+(* vF prod *)
+let bmm2 b a =
+  match List.length (Maths.shape a) with
+  | 2 -> Maths.einsum [ a, "ma"; b, "ab" ] "mb"
+  | _ -> failwith "should not happen"
+
+let map_naive (x : Input.M.t) =
+  let params =
+    List.map x.params ~f:(fun p ->
+      { common =
+          { _Fx_prod = Some (bmm p._Fx_prod)
+          ; _Fx_prod2 = Some (bmm2 p._Fx_prod)
+          ; _Fu_prod = Some (bmm p._Fu_prod)
+          ; _Fu_prod2 = Some (bmm2 p._Fu_prod)
+          ; _Cxx = Some p._Cxx
+          ; _Cxu = p._Cxu
+          ; _Cuu = Some p._Cuu
+          }
+      ; _f = p._f
+      ; _cx = p._cx
+      ; _cu = p._cu
+      })
+  in
+  Params.{ x with params }
+
+(* -----------------------------------------
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
 let n = 24
 let m = 10
 let o = 40
 let tmax = 10
-let bs = 32
-let batch_const = true
+let bs = 128
 
 (* x_list goes from 1 to T and o list goes from 1 to T. *)
 let traj_rollout ~x0 ~_Fx ~_Fu ~_c ~_std_o ~u_list =
@@ -76,56 +357,17 @@ let traj_rollout ~x0 ~_Fx ~_Fu ~_c ~_std_o ~u_list =
   List.rev x_list, List.rev o_list
 
 (* in the linear gaussian case, _Fx, _Fu, c and cov invariant across time *)
-let _std_o = Tensor.(f 1. * ones ~device:base.device ~kind:base.kind [ o ])
+let _std_o = Tensor.(f 0.001 * ones ~device:base.device ~kind:base.kind [ o ])
 let ones_o = Tensor.(ones ~device:base.device ~kind:base.kind [ o ])
 let _std_o_log = Tensor.(log _std_o)
 let _Fx = sample_stable ~a:n |> Tensor.of_bigarray ~device:base.device
 let _Fu = Tensor.randn ~device:base.device ~kind:base.kind [ m; n ]
 let _c = Tensor.randn ~device:base.device ~kind:base.kind [ n; o ]
-let train_size = 40
 
-(** data generation *)
-let gen_data _size =
-  (* generate ground truth params and data; [T x m x a] *)
-  let x0 = Tensor.zeros ~device:base.device ~kind:base.kind [ _size; n ] in
-  let u_list =
-    List.init tmax ~f:(fun _ ->
-      Tensor.(randn ~device:base.device ~kind:base.kind [ _size; m ]))
-  in
-  let x_list, o_list = traj_rollout ~x0 ~_Fx ~_Fu ~_c ~_std_o ~u_list in
-  let save_data lst name =
-    let reshaped = List.map lst ~f:(fun x -> Tensor.unsqueeze x ~dim:0) in
-    let array = Tensor.concat reshaped ~dim:0 |> Tensor.to_bigarray ~kind:base.ba_kind in
-    Arr.save_npy ~out:(in_dir name) array
-  in
-  save_data u_list "u_train";
-  save_data x_list "x_train";
-  save_data o_list "o_train"
-
-let _ = gen_data train_size
-
-(** load from pre-generated data *)
-
-let u_data, x_data, o_data =
-  let load_data name = Arr.load_npy (in_dir name) in
-  load_data "u_train", load_data "x_train", load_data "o_train"
-
+(** generalisation performance *)
 let x0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ]
 
-let get_batch data =
-  let n_trials = Arr.(shape data).(1) in
-  let ids = List.range 0 n_trials in
-  fun n ->
-    let slice = List.(sub ~pos:0 ~len:n (permute ids)) in
-    let minibatch = Arr.get_fancy [ R []; L slice ] data in
-    let t = Arr.(shape minibatch).(0) in
-    List.init t ~f:(fun i -> Arr.(squeeze (get_slice [ [ i ] ] minibatch)))
-
-let sample_data bs =
-  let slice_batch bs data =
-    data |> get_batch bs |> List.map ~f:(Tensor.of_bigarray ~device:base.device)
-  in
-  slice_batch u_data bs, slice_batch x_data bs, slice_batch o_data bs
+(** data generation *)
 
 (* test from an unseen set *)
 let sample_test_data _size =
@@ -148,10 +390,8 @@ let base =
     ; ba_kind = Bigarray.float64
     }
 
-let laplace = false
 let sample = false
-let natural = false
-let matheron = true
+let n_fisher = 30
 let step = 0.1
 let std_o_weight = 1.
 
@@ -285,7 +525,7 @@ module LGS = struct
             let new_x = step ~_Fx_prod ~_Fu_prod:theta._Fu_prod_params ~u ~prev_x in
             let new_o = tmp_einsum new_x theta._c_params in
             let increment = llh_increment ~_std_o_vec ~_std_o_extended ~new_o in
-            Stdlib.Gc.major ();
+            cleanup ();
             new_x, Maths.(increment + llh_accu))
       in
       let fisher_rollout =
@@ -304,7 +544,7 @@ module LGS = struct
         in
         Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_hess; vtgt ] ~path:None
       in
-      Tensor.(ggn_y_increment)
+      ggn_y_increment
 
     let ggn ~u_list (theta : P.M.t) =
       let _Fx_prod = _Fx_prod theta in
@@ -328,9 +568,9 @@ module LGS = struct
             let new_x =
               Maths.(tmp_einsum prev_x _Fx_prod + tmp_einsum u theta._Fu_prod_params)
             in
-            let new_o = Maths.(tmp_einsum new_x theta._c_params) in
+            let new_o = tmp_einsum new_x theta._c_params in
             let increment = ggn_increment ~new_o ~hess_y in
-            Stdlib.Gc.major ();
+            cleanup ();
             new_x, Tensor.(increment + ggn_accu))
       in
       let ggn_sigma =
@@ -345,107 +585,11 @@ module LGS = struct
       in
       save_svals final;
       final
-
-    let ggn_natural ~u_list (theta : P.M.t) =
-      let _Fx_prod = _Fx_prod theta in
-      let _std_o = Maths.exp theta._std_o_params in
-      (* o_mean has shape [m x o x T] *)
-      let o_mean =
-        let _, o_mean_list =
-          List.fold
-            u_list
-            ~init:(Maths.const x0, [])
-            ~f:(fun accu u ->
-              let prev_x, o_mean_accu = accu in
-              let new_x =
-                Maths.(tmp_einsum prev_x _Fx_prod + tmp_einsum u theta._Fu_prod_params)
-              in
-              let new_o_mean =
-                Maths.(tmp_einsum new_x theta._c_params) |> Maths.unsqueeze ~dim:2
-              in
-              Stdlib.Gc.major ();
-              new_x, new_o_mean :: o_mean_accu)
-        in
-        Maths.concat_list o_mean_list ~dim:2
-      in
-      let beta = Maths.(f 1. / sqr _std_o) in
-      let alpha =
-        Maths.einsum [ Maths.unsqueeze ~dim:3 o_mean, "mdtc"; beta, "c" ] "mdt"
-      in
-      let alpha_pri = Maths.primal alpha in
-      let beta_pri = Maths.primal beta in
-      let alpha_sum =
-        Tensor.einsum ~equation:"mdt,mdt->m" [ alpha_pri; alpha_pri ] ~path:None
-        |> Tensor.sum
-      in
-      let h_11 = Tensor.(f 1. / beta_pri) in
-      let h_12 = Tensor.(neg alpha_pri / square beta_pri) in
-      let h_22 =
-        Tensor.(
-          ((f (Float.of_int Int.(o * bs * tmax)) / (f 2. * beta_pri))
-           + (alpha_sum / square beta_pri))
-          / beta_pri)
-      in
-      let alpha_t = Maths.tangent alpha |> Option.value_exn in
-      let beta_t = Maths.tangent beta |> Option.value_exn |> Tensor.squeeze in
-      (* H JV *)
-      let tmp1 =
-        Tensor.(
-          (alpha_t * h_11) + einsum ~equation:"mdt,k->kmdt" [ h_12; beta_t ] ~path:None)
-      in
-      let tmp2 =
-        Tensor.(
-          einsum ~equation:"mdt,kmdt->k" [ h_12; alpha_t ] ~path:None + (h_22 * beta_t))
-      in
-      (* J^T V^T H JV *)
-      let tmp3 = Tensor.einsum ~equation:"kmdt,jmdt->kj" [ alpha_t; tmp1 ] ~path:None in
-      let tmp4 = Tensor.einsum ~equation:"k,j->kj" [ beta_t; tmp2 ] ~path:None in
-      Tensor.((tmp3 + tmp4) / f (Float.of_int tmax))
-
-    let ggn_fisher ~u_list (theta : P.M.t) =
-      let _Fx_prod = _Fx_prod theta in
-      let _std_o = Maths.exp theta._std_o_params in
-      let _std_o_vec = Maths.(_std_o * const ones_o) in
-      let _std_o_extended =
-        _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
-      in
-      let _, ggn_rollout, llh_rollout =
-        List.fold
-          u_list
-          ~init:(Maths.const x0, Tensor.f 0., Maths.f 0.)
-          ~f:(fun accu u ->
-            let prev_x, ggn_accu, llh_accu = accu in
-            let new_x =
-              Maths.(tmp_einsum prev_x _Fx_prod + tmp_einsum u theta._Fu_prod_params)
-            in
-            let new_o = Maths.(tmp_einsum new_x theta._c_params) in
-            (* ggn increment only operates on std_o *)
-            let ggn_increment =
-              let vtgt = _std_o |> sqr_inv |> Maths.tangent |> Option.value_exn in
-              let hess_sigma_o =
-                Tensor.(
-                  f Float.(of_int Int.(bs * o) / 2.)
-                  * square (square (Maths.primal _std_o)))
-              in
-              let vtgt_h =
-                Tensor.einsum ~equation:"ka,a->ka" [ vtgt; hess_sigma_o ] ~path:None
-              in
-              Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
-            in
-            let llh_increment = llh_increment ~_std_o_vec ~_std_o_extended ~new_o in
-            Stdlib.Gc.major ();
-            new_x, Tensor.(ggn_increment + ggn_accu), Maths.(llh_increment + llh_accu))
-      in
-      let fisher_rollout =
-        let fisher_batched = fisher ~n:o llh_rollout ~fisher_batched:true in
-        Tensor.mean_dim fisher_batched ~dim:(Some [ 0 ]) ~keepdim:false ~dtype:base.kind
-      in
-      Tensor.((ggn_rollout + fisher_rollout) / f (Float.of_int tmax))
   end
 
   (* create params for lds from f *)
   let params_from_f ~(theta : P.M.t) ~x0 ~o_list
-    : (Maths.t option, (Maths.t, Maths.t option) Lds_data.Temp.p list) Lqr.Params.p
+    : (Maths.t option, (Maths.t, Maths.t option) Temp.p list) Params.p
     =
     (* set o at time 0 as 0 *)
     let o_list_tmp = Tensor.zeros_like (List.hd_exn o_list) :: o_list in
@@ -459,7 +603,7 @@ module LGS = struct
       Maths.(tmp *@ c_trans)
     in
     let _Fx_prod = _Fx_prod theta in
-    Lqr.Params.
+    Params.
       { x0 = Some x0
       ; params =
           List.map o_list_tmp ~f:(fun o ->
@@ -467,7 +611,7 @@ module LGS = struct
               let tmp = Maths.(einsum [ const o, "ab"; _cov_o_inv, "b" ] "ab") in
               Maths.(neg (tmp *@ c_trans))
             in
-            Lds_data.Temp.
+            Temp.
               { _f = None
               ; _Fx_prod
               ; _Fu_prod = theta._Fu_prod_params
@@ -494,9 +638,9 @@ module LGS = struct
   (* let pred_u ~data:o_list (theta : P.M.t) =
     (* use lqr to obtain the optimal u *)
     let p =
-      params_from_f ~x0:(Maths.const x0) ~theta ~o_list |> Lds_data.map_naive ~batch_const
+      params_from_f ~x0:(Maths.const x0) ~theta ~o_list |> map_naive ~batch_const
     in
-    let sol, _ = Lqr._solve ~laplace ~batch_const p in
+    let sol = _solve  p in
     let optimal_u_list = List.map sol ~f:(fun s -> s.u) in
     (* sample u from the kronecker formation *)
     let u_list =
@@ -521,14 +665,11 @@ module LGS = struct
   let pred_u_matheron ~data:o_list (theta : P.M.t) =
     (* use lqr to obtain the optimal u *)
     let optimal_u_list =
-      let p =
-        params_from_f ~x0:(Maths.const x0) ~theta ~o_list
-        |> Lds_data.map_naive ~batch_const
-      in
-      let sol, _ = Lqr._solve ~batch_const p in
+      let p = params_from_f ~x0:(Maths.const x0) ~theta ~o_list |> map_naive in
+      let sol = _solve p in
       List.map sol ~f:(fun s -> s.u)
     in
-    Stdlib.Gc.major ();
+    cleanup ();
     let sample_randn ~_mean ~_std ~dim =
       let eps =
         Tensor.randn ~device:base.device ~kind:base.kind [ bs; dim ] |> Maths.const
@@ -553,26 +694,25 @@ module LGS = struct
         sample_randn ~_mean ~_std:std_o ~dim:o)
     in
     (* lqr on (o - o_sampled) *)
-    let sol_delta_o, _ =
+    let sol_delta_o =
       let delta_o_list =
         List.map2_exn o_list o_sampled ~f:(fun a b -> Tensor.(a - Maths.primal b))
       in
       let p =
-        params_from_f ~x0:(Maths.const x0) ~theta ~o_list:delta_o_list
-        |> Lds_data.map_naive ~batch_const
+        params_from_f ~x0:(Maths.const x0) ~theta ~o_list:delta_o_list |> map_naive
       in
-      Lqr._solve ~batch_const p
+      _solve p
     in
-    Stdlib.Gc.major ();
+    cleanup ();
     (* final u samples *)
     let u_list =
       let optimal_u_list_delta_o = List.map sol_delta_o ~f:(fun s -> s.u) in
       List.map2_exn sampled_u optimal_u_list_delta_o ~f:(fun u delta_u ->
-        Maths.(const (primal (u + delta_u))))
+        Maths.(const (primal_tensor_detach (u + delta_u))))
     in
     optimal_u_list, u_list
 
-  let llh ~o_list ~u_list (theta : P.M.t) =
+  let llh ~o_list ~u_list ~optimal_u_list:_ (theta : P.M.t) =
     let u_o_list = List.map2_exn u_list o_list ~f:(fun u o -> u, o) in
     let _Fx_prod = _Fx_prod theta in
     let _std_o = Maths.exp theta._std_o_params in
@@ -582,7 +722,7 @@ module LGS = struct
         u_o_list
         ~init:(Maths.const x0, None)
         ~f:(fun t accu (u, o) ->
-          if t % 1 = 0 then Stdlib.Gc.major ();
+          if t % 1 = 0 then cleanup ();
           let prev_x, llh_summed = accu in
           let new_x = step ~_Fx_prod ~_Fu_prod:theta._Fu_prod_params ~u ~prev_x in
           let increment =
@@ -593,78 +733,75 @@ module LGS = struct
             | None -> Some increment
             | Some accu -> Some Maths.(accu + increment)
           in
-          Stdlib.Gc.major ();
+          cleanup ();
           new_x, new_llh_summed)
     in
-    Option.value_exn llh |> fun x -> Maths.(x /$ Float.of_int tmax)
+    Option.value_exn llh
 
-  (* let elbo ~o_list ~u_list ~optimal_u_list (theta : P.M.t) =
-    let llh = llh ~o_list ~u_list (theta : P.M.t) in
+  (* let kl ~u_list ~optimal_u_list (theta : P.M.t) =
     let optimal_u = concat_time optimal_u_list in
-    let kl =
-      if sample
-      then (
-        let prior =
-          List.foldi u_list ~init:None ~f:(fun t accu u ->
-            if t % 1 = 0 then Stdlib.Gc.major ();
-            let increment =
-              gaussian_llh
-                ~std:(Tensor.ones [ m ] ~device:base.device ~kind:base.kind |> Maths.const)
-                u
-            in
-            match accu with
-            | None -> Some increment
-            | Some accu -> Some Maths.(accu + increment))
-          |> Option.value_exn
-        in
-        let neg_entropy =
-          let u = concat_time u_list |> Maths.reshape ~shape:[ bs; -1 ] in
-          let optimal_u = Maths.reshape optimal_u ~shape:[ bs; -1 ] in
-          let std =
-            Maths.(kron (exp theta._std_space_params) (exp theta._std_time_params))
+    if sample
+    then (
+      let prior =
+        List.foldi u_list ~init:None ~f:(fun t accu u ->
+          if t % 1 = 0 then cleanup ();
+          let increment =
+            gaussian_llh
+              ~std:(Tensor.ones [ m ] ~device:base.device ~kind:base.kind |> Maths.const)
+              u
           in
-          gaussian_llh ~mu:optimal_u ~std u
-        in
-        Maths.(neg_entropy - prior))
-      else (
-        (* calculate the kl term analytically *)
-        let std2 =
+          match accu with
+          | None -> Some increment
+          | Some accu -> Some Maths.(accu + increment))
+        |> Option.value_exn
+      in
+      let neg_entropy =
+        let u = concat_time u_list |> Maths.reshape ~shape:[ bs; -1 ] in
+        let optimal_u = Maths.reshape optimal_u ~shape:[ bs; -1 ] in
+        let std =
           Maths.(kron (exp theta._std_space_params) (exp theta._std_time_params))
         in
-        let det1 = Maths.(2. $* sum (log std2)) in
-        let _const = Float.of_int (m * tmax) in
-        let tr =
-          let tmp2 = Maths.(sqr (exp theta._std_space_params)) in
-          let tmp3 = Maths.(kron tmp2 (sqr (exp theta._std_time_params))) in
-          Maths.sum tmp3
-        in
-        let quad =
-          Maths.einsum [ optimal_u, "mbt"; optimal_u, "mbt" ] "m"
-          |> Maths.unsqueeze ~dim:1
-        in
-        let tmp = Maths.(tr - det1 -$ _const) |> Maths.reshape ~shape:[ 1; 1 ] in
-        Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1)
-    in
-    Maths.((llh - kl) /$ Float.of_int tmax) *)
+        gaussian_llh ~mu:optimal_u ~std u
+      in
+      Maths.(neg_entropy - prior))
+    else (
+      (* calculate the kl term analytically *)
+      let std2 =
+        Maths.(kron (exp theta._std_space_params) (exp theta._std_time_params))
+      in
+      let det1 = Maths.(2. $* sum (log std2)) in
+      let _const = Float.of_int (m * tmax) in
+      let tr =
+        let tmp2 = Maths.(sqr (exp theta._std_space_params)) in
+        let tmp3 = Maths.(kron tmp2 (sqr (exp theta._std_time_params))) in
+        Maths.sum tmp3
+      in
+      let quad =
+        Maths.einsum [ optimal_u, "mbt"; optimal_u, "mbt" ] "m" |> Maths.unsqueeze ~dim:1
+      in
+      let tmp = Maths.(tr - det1 -$ _const) |> Maths.reshape ~shape:[ 1; 1 ] in
+      Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1)
+
+  let elbo ~o_list ~u_list ~optimal_u_list (theta : P.M.t) =
+    let llh = llh ~o_list ~optimal_u_list ~u_list theta in
+    let kl = kl ~u_list ~optimal_u_list theta in
+    Maths.(llh - kl) *)
 
   let f ~update ~data ~init ~args:() (theta : P.M.t) =
     let module L = Elbo_loss in
+    (* TODO: Matheron formulation *)
     let loss, u_list =
-      let _, u_list = pred_u_matheron ~data theta in
-      Maths.neg (llh ~o_list:(List.map data ~f:Maths.const) ~u_list theta), u_list
-      (* let loss, u_list =
-        let optimal_u_list, u_list =
-           pred_u ~data theta
-        in
-        ( Maths.(
-            neg
-              (elbo ~o_list:(List.map data ~f:Maths.const) ~u_list ~optimal_u_list theta))
-        , u_list ) *)
+      let optimal_u_list, u_list = pred_u_matheron ~data theta in
+      let loss_total =
+        Maths.neg
+          (llh ~o_list:(List.map data ~f:Maths.const) ~u_list ~optimal_u_list theta)
+      in
+      Maths.(loss_total / f (Float.of_int tmax)), u_list
     in
     match update with
     | `loss_only u -> u init (Some loss)
     | `loss_and_ggn u ->
-      let ggn = (if natural then L.ggn_natural else L.ggn) ~u_list theta in
+      let ggn = L.ggn ~u_list theta in
       u init (Some (loss, Some ggn))
 
   let init : P.tagged =
@@ -770,8 +907,8 @@ module Make (D : Do_with_T) = struct
   let optimise max_iter =
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
     let rec loop ~iter ~state ~time_elapsed running_avg =
-      Stdlib.Gc.major ();
-      let _, _, o_list = sample_data bs in
+      cleanup ();
+      let _, _, o_list = sample_test_data bs in
       let t0 = Unix.gettimeofday () in
       let config = config_f ~iter in
       let loss, new_state = O.step ~config ~state ~data:o_list ~args:() in
@@ -795,12 +932,17 @@ module Make (D : Do_with_T) = struct
           let elbo_test =
             let params = LGS.P.map ~f:Maths.const (LGS.P.value (O.params new_state)) in
             (* if matheron *)
-            let _, u_list_test = LGS.pred_u_matheron ~data:test_o_list params in
+            let optimal_u_list, u_list_test =
+              LGS.pred_u_matheron ~data:test_o_list params
+            in
             LGS.llh
               ~o_list:(List.map test_o_list ~f:Maths.const)
               ~u_list:u_list_test
+              ~optimal_u_list
               params
             |> Maths.primal
+            |> fun x ->
+            Tensor.(x / f (Float.of_int tmax))
             |> Tensor.neg
             |> Tensor.mean
             |> Tensor.to_float0_exn
@@ -862,11 +1004,11 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(1. / (1. +. (0. * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(0.05 / (1. +. (0. * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
-      ; damping = Some 1e-3
+      ; damping = None
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None
@@ -897,7 +1039,7 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (LGS)
 
   let config_f ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.05 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.001 }
 
   let init = O.init LGS.init
 end

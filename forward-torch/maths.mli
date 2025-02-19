@@ -5,6 +5,8 @@ val shape : t -> int list
 val const : Tensor.t -> t
 val f : float -> t
 val primal : t -> Tensor.t
+val primal_tensor_detach : t -> Tensor.t
+
 val make_dual : Tensor.t -> t:tangent -> t
 
 (* get tangent value from the tangent type. *)

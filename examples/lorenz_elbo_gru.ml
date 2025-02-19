@@ -70,7 +70,7 @@ let save_svals m =
   s
   |> Tensor.reshape ~shape:[ -1; 1 ]
   |> Tensor.to_bigarray ~kind:base.ba_kind
-  |> Owl.Mat.save_txt ~out:(in_dir (sprintf "svals"))
+  |> Owl.Dense.Matrix.S.save_txt ~out:(in_dir (sprintf "svals"))
 
 (* -----------------------------------------
    -- Model setup and optimizer
@@ -545,7 +545,7 @@ module GRU = struct
           Maths.einsum [ tmp1, "mbt"; optimal_u, "mbt" ] "m" |> Maths.unsqueeze ~dim:1
         in
         let tmp = Maths.(det2 - det1 - _const + tr) |> Maths.reshape ~shape:[ 1; 1 ] in
-        Maths.(0.5 $* (tmp + quad)) |> Maths.squeeze ~dim:1)
+        Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1)
     in
     Maths.((llh - kl) /$ Float.of_int tmax)
 
