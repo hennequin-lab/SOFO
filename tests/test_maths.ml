@@ -160,6 +160,31 @@ let unary_tests =
     ; ( "batch_transpose_with_einsum"
       , [ `specified_unary [ 4; 10; 10 ] ]
       , any_shape (fun a -> Maths.einsum [ a, "kij" ] "kji") )
+    ; ( "$+"
+      , []
+      , any_shape
+          (let z = Random.float 10. in
+           fun x -> Maths.(z $+ x)) )
+    ; ( "-$"
+      , []
+      , any_shape
+          (let z = Random.float 10. in
+           fun x -> Maths.(x -$ z)) )
+    ; ( "$/"
+      , [ `positive ]
+      , any_shape
+          (let z = Random.float 10. in
+           fun x -> Maths.(z $/ x)) )
+    ; ( "/$"
+      , [ `positive ]
+      , any_shape
+          (let z = Random.float 10. in
+           fun x -> Maths.(x /$ z)) )
+    ; ( "$*"
+      , []
+      , any_shape
+          (let z = Random.float 10. in
+           fun x -> Maths.(z $* x)) )
     ; "cos", [], any_shape Maths.cos
     ; "sin", [], any_shape Maths.sin
     ; "sqrt", [ `positive ], any_shape Maths.sqrt

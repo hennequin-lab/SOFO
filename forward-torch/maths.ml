@@ -32,7 +32,10 @@ let assert_right_shape label t =
     and sdx = Tensor.shape dx in
     let n = List.length sx in
     let n' = List.length sdx in
-    if n' <> n + 1 || Poly.(List.tl_exn sdx <> sx) then raise (Wrong_shape label));
+    if n' <> n + 1 || Poly.(List.tl_exn sdx <> sx)
+    then (
+      print [%message (sx : int list) (sdx : int list)];
+      raise (Wrong_shape label)));
   t
 
 (* constant tensor, i.e. no associated tangents *)
@@ -591,20 +594,19 @@ let ( * ) (x, dx) (y, dy) =
 (* z = x / y, dz = 1/y dx - x/(y^2) dy *)
 let ( / ) (x, dx) (y, dy) =
   let z = Tensor.(x / y) in
-  let y2 = Tensor.square y in
   let dz =
     with_tangents
       dx
       dy
       ~fx:(fun dx -> Tensor.(div_ dx y))
-      ~fy:(fun dy -> Tensor.(neg_ (div_ (dy * x) y2)))
-      ~fxy:(fun dx dy -> Tensor.(div_ (sub_ (dx * y) (dy * x)) y2))
+      ~fy:(fun dy -> Tensor.(neg_ (div_ (dy * x) (square y))))
+      ~fxy:(fun dx dy -> Tensor.(div_ (sub_ (dx * y) (dy * x)) (square y)))
   in
   (z, dz) |> assert_right_shape "( / )"
 
 (* x = x + z *)
 let ( $+ ) z (x, dx) = (Tensor.(add_scalar x (Scalar.f z)), dx) |> assert_right_shape "$+"
-let ( -$ ) (x, dx) z = (Tensor.(sub_scalar x (Scalar.f z)), dx) |> assert_right_shape "$-"
+let ( -$ ) (x, dx) z = (Tensor.(sub_scalar x (Scalar.f z)), dx) |> assert_right_shape "-$"
 
 (* x = x *z *)
 let ( $* ) z (x, dx) =
@@ -614,9 +616,10 @@ let ( $* ) z (x, dx) =
 
 let ( $/ ) x (y, dy) =
   let z = Tensor.(mul_scalar (reciprocal y) (Scalar.f x)) in
-  let y2 = Tensor.square y in
   let dz =
-    with_tangent dy ~f:(fun dy -> Tensor.(neg_ (div_ (mul_scalar dy (Scalar.f x)) y2)))
+    with_tangent dy ~f:(fun dy ->
+      let y2 = Tensor.square y in
+      Tensor.(neg_ (div_ (mul_scalar dy (Scalar.f x)) y2)))
   in
   (z, dz) |> assert_right_shape "( $/ )"
 

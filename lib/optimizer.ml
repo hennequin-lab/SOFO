@@ -44,12 +44,9 @@ let rank_one_tensor ~(base : ('a, 'b) Config.Base.t) ~n_tangents shape =
 (* sample tensors from Gaussian *)
 let sample_rand_tensor ~base ~rank_one ~shape =
   let[@warning "-8"] (n_tangents :: param_shape) = shape in
-  let vs =
-    if rank_one
-    then rank_one_tensor ~base ~n_tangents param_shape
-    else Tensor.randn ~device:base.device ~kind:base.kind shape
-  in
-  vs
+  if rank_one
+  then rank_one_tensor ~base ~n_tangents param_shape
+  else Tensor.randn ~device:base.device ~kind:base.kind shape
 
 (* apply momentum to gradient *)
 module Momentum (P : Prms.T) = struct
