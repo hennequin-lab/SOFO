@@ -4,6 +4,9 @@ open Base
 open Forward_torch
 open Torch
 open Sofo
+module Mat = Owl.Dense.Matrix.S
+
+let primal_detach (x, _) = Maths.const Tensor.(detach x)
 
 let _ =
   Random.init 1996;
@@ -15,25 +18,25 @@ let in_dir = Cmdargs.in_dir "-d"
 let base =
   Optimizer.Config.Base.
     { device = Torch.Device.cuda_if_available ()
-    ; kind = Torch_core.Kind.(T f64)
-    ; ba_kind = Bigarray.float64
+    ; kind = Torch_core.Kind.(T f32)
+    ; ba_kind = Bigarray.float32
     }
 
-let m = 10
-let n = 20
+let m = 3
+let n = 10
 let o = 40
-let tmax = 130
+let tmax = 13
 let bs = 32
 let id_m = Maths.(const (Tensor.of_bigarray ~device:base.device (Owl.Mat.eye m)))
+let ones_1 = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ 1 ]))
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
 
 let make_a () =
   let a =
-    let open Owl in
     let w =
       let w = Mat.(gaussian n n) in
-      let sa = Linalg.D.eigvals w |> Dense.Matrix.Z.re |> Mat.max' in
+      let sa = Owl.Linalg.S.eigvals w |> Owl.Dense.Matrix.C.re |> Mat.max' in
       Mat.(Float.(0.8 / sa) $* w)
     in
     (*     let w = Mat.(0.5 $* w + transpose w) in *)
@@ -67,7 +70,7 @@ let true_theta =
   let a = make_a () in
   let b = make_b () in
   let c = make_c () in
-  let sigma_o_prms = Maths.(log (f 0.001)) in
+  let sigma_o_prms = Maths.(ones_1 * log (f 0.01)) in
   PP.{ a; b; c; sigma_o_prms }
 
 let theta =
@@ -87,13 +90,15 @@ let solver a y =
   let _x = Maths.linsolve_triangular ~left:false ~upper:true ell_t y in
   Maths.linsolve_triangular ~left:false ~upper:false ell _x
 
+(* This has been TESTED and it works.
+   Gradients also successfully tested against reverse-mode *)
 let lqr ~a ~b ~c ~inv_sigma_o y =
   let open Maths in
   (* augment observations with dummy y0 *)
   let _T = List.length y in
   let y = f 0. :: y in
-  let _Czz = einsum [ c, "ij"; c, "kj" ] "ik" * sqr inv_sigma_o in
-  let _cz_fun y = neg (einsum [ c, "ji"; y, "mi" ] "mj") * sqr inv_sigma_o in
+  let _Czz = einsum [ c, "ij"; sqr inv_sigma_o, "j"; c, "kj" ] "ik" in
+  let _cz_fun y = neg (einsum [ c, "ij"; sqr inv_sigma_o, "j"; y, "mj" ] "mi") in
   let yT = List.last_exn y in
   let gains, _, _, _ =
     List.fold_right
@@ -145,20 +150,18 @@ let rollout ~a ~b ~c u =
   in
   List.rev y
 
-let sample_data =
-  let sigma_o = Maths.(exp true_theta.sigma_o_prms) in
-  fun () ->
-    let u =
-      List.init tmax ~f:(fun _ ->
-        Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const)
-    in
-    let y =
-      rollout ~a:true_theta.a ~b:true_theta.b ~c:true_theta.c u
-      |> List.map ~f:(fun y ->
-        Maths.(y + (sigma_o * const (Tensor.randn_like (Maths.primal y)))))
-    in
-    Convenience.print [%message (List.length u : int) (List.length y : int)];
-    u, y
+let sample_data (theta : P.M.t) =
+  let sigma_o = Maths.(exp theta.sigma_o_prms) in
+  let u =
+    List.init tmax ~f:(fun _ ->
+      Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const)
+  in
+  let y =
+    rollout ~a:theta.a ~b:theta.b ~c:theta.c u
+    |> List.map ~f:(fun y ->
+      Maths.(y + (sigma_o * const (Tensor.randn_like (Maths.primal y)))))
+  in
+  u, y
 
 let gaussian_llh_chol ?mu ~precision_chol:ell x =
   let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
@@ -188,57 +191,51 @@ let gaussian_llh ?mu ~inv_std x =
   let const_term = Float.(log (2. * pi) * of_int d) in
   Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
 
-(* small test *)
+(* save the first element of the batch as a time series *)
 let save_time_series ~out x =
   List.map x ~f:(fun x ->
     Maths.primal x
     |> Tensor.to_bigarray ~kind:base.ba_kind
-    |> Owl.Mat.get_slice [ [ 0 ] ]
-    |> fun x -> Owl.Mat.reshape x [| 1; -1 |])
+    |> Mat.get_slice [ [ 0 ] ]
+    |> fun x -> Mat.reshape x [| 1; -1 |])
   |> List.to_array
-  |> Owl.Mat.concatenate ~axis:0
-  |> Owl.Mat.save_txt ~out
+  |> Mat.concatenate ~axis:0
+  |> Mat.save_txt ~out
 
-let u, y = sample_data ()
+(*
+   let u, y = sample_data ()
 let _ = save_time_series ~out:(in_dir "u") u
 let _ = save_time_series ~out:(in_dir "y") y
 
 let u_recov =
   let inv_sigma_o = Maths.(exp (neg true_theta.sigma_o_prms)) in
-  lqr ~a:true_theta.a ~b:true_theta.b ~c:true_theta.c ~inv_sigma_o y
-
+  let inv_sigma_o_expanded = Maths.(inv_sigma_o * ones_o) in
+  lqr ~a:true_theta.a ~b:true_theta.b ~c:true_theta.c ~inv_sigma_o:inv_sigma_o_expanded y
 let _ = save_time_series ~out:(in_dir "urecov") u_recov
+*)
 
-let err =
-  List.fold2_exn
-    u
-    u_recov
-    ~init:Maths.(f 0.)
-    ~f:(fun accu u u_recov -> Maths.(accu + sum (sqr (u - u_recov))))
-  |> Maths.primal
-  |> Tensor.to_float0_exn
-
-let _ = Convenience.print [%message (err : float)]
-(*
-   let elbo ~data:(y : Maths.t list) (theta : P.M.t) =
+let elbo ~data:(y : Maths.t list) (theta : P.M.t) =
   let sigma_o = Maths.(exp theta.sigma_o_prms) in
   let inv_sigma_o = Maths.(exp (neg theta.sigma_o_prms)) in
   let inv_sigma_o_expanded = Maths.(inv_sigma_o * ones_o) in
-  let u_opt = lqr ~a:theta.a ~b:theta.b ~c:theta.c ~inv_sigma_o:inv_sigma_o_expanded y in
-  let post_prec_chol =
-    posterior_precision_chol ~c:theta.c ~inv_sigma_o:inv_sigma_o_expanded
+  (* Matheron sampling *)
+  let u_sampled =
+    let utilde, ytilde = sample_data (P.map ~f:primal_detach theta) in
+    let delta_y = List.map2_exn y ytilde ~f:Maths.( - ) in
+    let delta_u =
+      lqr ~a:theta.a ~b:theta.b ~c:theta.c ~inv_sigma_o:inv_sigma_o_expanded delta_y
+    in
+    List.map2_exn utilde delta_u ~f:(fun u du -> Maths.(u + du) |> primal_detach)
   in
-  let u_diff =
-    let e = Maths.(const (Tensor.randn_like (primal u_opt))) in
-    let ell = post_prec_chol in
-    let ell_t = Maths.transpose ~dim0:0 ~dim1:1 ell in
-    let _x = Maths.linsolve_triangular ~left:false ~upper:true ell_t e in
-    Maths.linsolve_triangular ~left:false ~upper:false ell _x
+  let y_pred = rollout ~a:theta.a ~b:theta.b ~c:theta.c u_sampled in
+  let lik_term =
+    List.fold2_exn
+      y
+      y_pred
+      ~init:Maths.(f 0.)
+      ~f:(fun accu y y_pred ->
+        Maths.(accu + gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded y))
   in
-  let u_sampled = Maths.(const (primal (u_opt + u_diff))) in
-  (* m x o *)
-  let y_pred = Maths.(u_sampled *@ theta.c) in
-  let lik_term = gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded y in
   let kl_term =
     Maths.f 0.
     (*
@@ -247,14 +244,16 @@ let _ = Convenience.print [%message (err : float)]
     Maths.(const (primal (q_term - prior_term))) *)
   in
   let neg_elbo =
-    Maths.(lik_term - kl_term) |> Maths.neg |> fun x -> Maths.(x / f Float.(of_int o))
+    Maths.(lik_term - kl_term)
+    |> Maths.neg
+    |> fun x -> Maths.(x / f Float.(of_int o * of_int tmax))
   in
   neg_elbo, y_pred, sigma_o
 
 module M = struct
   module P = P
 
-  type data = Maths.t
+  type data = Maths.t list
   type args = unit
 
   let f ~update ~data:y ~init ~args:() (theta : P.M.t) =
@@ -263,20 +262,24 @@ module M = struct
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
       let preconditioner =
-        let sigma2 = Maths.sqr sigma_o in
-        let sigma2_p = Maths.(const (primal sigma2)) in
-        let sigma2_t = Maths.tangent sigma2 |> Option.value_exn |> Maths.const in
-        let mu_t = Maths.tangent y_pred |> Option.value_exn |> Maths.const in
-        let ggn_part1 = Maths.(einsum [ mu_t, "kmo"; mu_t, "lmo" ] "kl" / sigma2_p) in
-        let ggn_part2 =
+        List.fold y_pred ~init:(Maths.f 0.) ~f:(fun accu y_pred ->
+          let sigma2 = Maths.sqr sigma_o in
+          let sigma2_p = Maths.(const (primal sigma2)) in
+          let sigma2_t = Maths.tangent sigma2 |> Option.value_exn |> Maths.const in
+          let mu_t = Maths.tangent y_pred |> Option.value_exn |> Maths.const in
+          let ggn_part1 = Maths.(einsum [ mu_t, "kmo"; mu_t, "lmo" ] "kl" / sigma2_p) in
+          let ggn_part2 =
+            Maths.(
+              einsum
+                [ f Float.(0.5 * of_int o * of_int bs) * sigma2_t / sqr sigma2_p, "ky"
+                ; sigma2_t, "ly"
+                ]
+                "kl")
+          in
           Maths.(
-            einsum
-              [ f Float.(0.5 * of_int o * of_int bs) * sigma2_t / sqr sigma2_p, "ky"
-              ; sigma2_t, "ly"
-              ]
-              "kl")
-        in
-        Maths.(primal ((ggn_part1 + ggn_part2) / f Float.(of_int o)))
+            accu
+            + const (primal ((ggn_part1 + ggn_part2) / f Float.(of_int o * of_int tmax)))))
+        |> Maths.primal
       in
       u init (Some (neg_elbo, Some preconditioner))
 end
@@ -289,11 +292,11 @@ module type Do_with_T = sig
   module O :
     Optimizer.T
     with type 'a W.P.p = 'a M.P.p
-     and type W.data = Maths.t
+     and type W.data = Maths.t list
      and type W.args = unit
 
   val name : string
-  val config : iter:int -> (float, Bigarray.float64_elt) O.config
+  val config : iter:int -> (float, Bigarray.float32_elt) O.config
   val init : O.state
 end
 
@@ -304,7 +307,7 @@ module Make (D : Do_with_T) = struct
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
     let rec loop ~iter ~state running_avg =
       Stdlib.Gc.major ();
-      let _, y = sample_data () in
+      let _, y = sample_data true_theta in
       let loss, new_state = O.step ~config:(config ~iter) ~state ~data:y ~args:() in
       let running_avg =
         let loss_avg =
@@ -353,11 +356,11 @@ module Do_with_SOFO : Do_with_T = struct
   let config ~iter:_ =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.2)
-      ; n_tangents = 256
+      ; learning_rate = Some Float.(0.1)
+      ; n_tangents = 128
       ; sqrt = false
-      ; rank_one = true
-      ; damping = Some 0.0001
+      ; rank_one = false
+      ; damping = None
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None
@@ -376,7 +379,7 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (M)
 
   let config ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.003 }
 
   let init = O.init theta
 end
@@ -394,4 +397,3 @@ let _ =
     | _ -> failwith "-m [sofo | fgd | adam]"
   in
   optimise max_iter
-*)

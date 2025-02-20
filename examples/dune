@@ -13,7 +13,7 @@
   lorenz_elbo_gru
   arm_ilqr
   vae)
- (libraries cmdargs bos sofo owl domainslib owl-ode lqr ilqr)
+ (libraries cmdargs bos sofo owl domainslib owl-ode lqr ilqr framework)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))
 
