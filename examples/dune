@@ -3,10 +3,10 @@
   linear_regression
   lqr_eg
   lorenz
-  lgs_simplified
   lgs
   lgs_min
   fa
+  lgs_from_scratch
   lgs_elbo
   lgs_elbo_simplified
   lgs_elbo_laplace
