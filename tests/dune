@@ -5,8 +5,9 @@
   test_lqr_implicit
   test_lqr_vae
   test_lqr_vae_elbo
+  test_lqr_vae_elbo_simplified
   test_mgu)
- (libraries framework lqr owl alcotest)
+ (libraries framework lqr owl alcotest sofo)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))
 

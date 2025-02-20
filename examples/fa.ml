@@ -53,7 +53,7 @@ let theta =
   let c = Prms.free (Maths.primal (make_c (m, o))) in
   let sigma_o_prms =
     Prms.create
-      ~above:(Tensor.f (-5.))
+      ~above:(Tensor.f (-7.))
       Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ])
   in
   PP.{ c; sigma_o_prms }
