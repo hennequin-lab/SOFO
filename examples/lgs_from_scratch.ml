@@ -23,14 +23,15 @@ let base =
     }
 
 let m = 3
-let n = 10
+let n = 5
 let o = 40
 let tmax = 13
-let bs = 32
+let bs = 64
 let id_m = Maths.(const (Tensor.of_bigarray ~device:base.device (Owl.Mat.eye m)))
 let ones_1 = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ 1 ]))
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
+let copy x = Maths.(const (Tensor.copy (primal x)))
 
 let make_a () =
   let a =
@@ -39,7 +40,6 @@ let make_a () =
       let sa = Owl.Linalg.S.eigvals w |> Owl.Dense.Matrix.C.re |> Mat.max' in
       Mat.(Float.(0.8 / sa) $* w)
     in
-    (*     let w = Mat.(0.5 $* w + transpose w) in *)
     Mat.(add_diag (0.1 $* w) 0.9)
   in
   Tensor.of_bigarray ~device:base.device a |> Maths.const
@@ -60,6 +60,7 @@ module PP = struct
     ; b : 'a
     ; c : 'a
     ; sigma_o_prms : 'a
+    ; sigma_o_prms_recog : 'a
     }
   [@@deriving prms]
 end
@@ -70,8 +71,9 @@ let true_theta =
   let a = make_a () in
   let b = make_b () in
   let c = make_c () in
-  let sigma_o_prms = Maths.(ones_1 * log (f 0.01)) in
-  PP.{ a; b; c; sigma_o_prms }
+  let sigma_o_prms = Maths.(copy ones_1 * log (f 0.01)) in
+  let sigma_o_prms_recog = Maths.(copy ones_1 * log (f 0.01)) in
+  PP.{ a; b; c; sigma_o_prms; sigma_o_prms_recog }
 
 let theta =
   let a = Prms.free (Maths.primal (make_a ())) in
@@ -79,10 +81,17 @@ let theta =
   let c = Prms.free (Maths.primal (make_c ())) in
   let sigma_o_prms =
     Prms.create
-      ~below:(Tensor.f 5.)
+      ~above:(Tensor.f Float.(log 1e-3))
+      ~below:(Tensor.f Float.(log 100.))
       Tensor.(f 0. + zeros ~device:base.device ~kind:base.kind [ 1 ])
   in
-  PP.{ a; b; c; sigma_o_prms }
+  let sigma_o_prms_recog =
+    Prms.create
+      ~above:(Tensor.f Float.(log 1e-3))
+      ~below:(Tensor.f Float.(log 100.))
+      Tensor.(f 0. + zeros ~device:base.device ~kind:base.kind [ 1 ])
+  in
+  PP.{ a; b; c; sigma_o_prms; sigma_o_prms_recog }
 
 let solver a y =
   let ell = Maths.cholesky a in
@@ -163,20 +172,6 @@ let sample_data (theta : P.M.t) =
   in
   u, y
 
-let gaussian_llh_chol ?mu ~precision_chol:ell x =
-  let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
-  let error =
-    match mu with
-    | None -> x
-    | Some mu -> Maths.(x - mu)
-  in
-  let error_term = Maths.einsum [ error, "ma"; ell, "ai"; ell, "bi"; error, "mb" ] "m" in
-  let cov_term =
-    Maths.(sum (log (sqr (diagonal ~offset:0 ell))) |> reshape ~shape:[ 1 ])
-  in
-  let const_term = Float.(log (2. * pi) * of_int d) in
-  Maths.(0.5 $* (const_term $+ error_term - cov_term)) |> Maths.neg
-
 let gaussian_llh ?mu ~inv_std x =
   let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
   let error_term =
@@ -220,12 +215,13 @@ let elbo ~data:(y : Maths.t list) (theta : P.M.t) =
   let inv_sigma_o_expanded = Maths.(inv_sigma_o * ones_o) in
   (* Matheron sampling *)
   let u_sampled =
-    let utilde, ytilde = sample_data (P.map ~f:primal_detach theta) in
+    let inv_sigma_o = Maths.(exp (neg theta.sigma_o_prms)) in
+    let inv_sigma_o_expanded = Maths.(inv_sigma_o * ones_o) in
+    let p = P.map theta ~f:primal_detach in
+    let utilde, ytilde = sample_data p in
     let delta_y = List.map2_exn y ytilde ~f:Maths.( - ) in
-    let delta_u =
-      lqr ~a:theta.a ~b:theta.b ~c:theta.c ~inv_sigma_o:inv_sigma_o_expanded delta_y
-    in
-    List.map2_exn utilde delta_u ~f:(fun u du -> Maths.(u + du) |> primal_detach)
+    let delta_u = lqr ~a:p.a ~b:p.b ~c:p.c ~inv_sigma_o:inv_sigma_o_expanded delta_y in
+    List.map2_exn utilde delta_u ~f:(fun u du -> Maths.(u + du))
   in
   let y_pred = rollout ~a:theta.a ~b:theta.b ~c:theta.c u_sampled in
   let lik_term =
@@ -262,23 +258,27 @@ module M = struct
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
       let preconditioner =
-        List.fold y_pred ~init:(Maths.f 0.) ~f:(fun accu y_pred ->
-          let sigma2 = Maths.sqr sigma_o in
-          let sigma2_p = Maths.(const (primal sigma2)) in
+        let sigma2 = Maths.sqr sigma_o in
+        let sigma2_p = Maths.(const (primal sigma2)) in
+        let ggn_part1 =
+          List.fold y_pred ~init:(Maths.f 0.) ~f:(fun accu y_pred ->
+            let mu_t = Maths.tangent y_pred |> Option.value_exn |> Maths.const in
+            let ggn_delta = Maths.(einsum [ mu_t, "kmo"; mu_t, "lmo" ] "kl" / sigma2_p) in
+            Maths.(accu + const (primal ggn_delta)))
+        in
+        let ggn_part2 =
           let sigma2_t = Maths.tangent sigma2 |> Option.value_exn |> Maths.const in
-          let mu_t = Maths.tangent y_pred |> Option.value_exn |> Maths.const in
-          let ggn_part1 = Maths.(einsum [ mu_t, "kmo"; mu_t, "lmo" ] "kl" / sigma2_p) in
-          let ggn_part2 =
-            Maths.(
-              einsum
-                [ f Float.(0.5 * of_int o * of_int bs) * sigma2_t / sqr sigma2_p, "ky"
-                ; sigma2_t, "ly"
-                ]
-                "kl")
-          in
           Maths.(
-            accu
-            + const (primal ((ggn_part1 + ggn_part2) / f Float.(of_int o * of_int tmax)))))
+            einsum
+              [ ( f Float.(0.5 * of_int o * of_int bs * of_int tmax)
+                  * sigma2_t
+                  / sqr sigma2_p
+                , "ky" )
+              ; sigma2_t, "ly"
+              ]
+              "kl")
+        in
+        Maths.(const (primal (ggn_part1 + ggn_part2)) / f Float.(of_int o * of_int tmax))
         |> Maths.primal
       in
       u init (Some (neg_elbo, Some preconditioner))
@@ -305,7 +305,7 @@ module Make (D : Do_with_T) = struct
 
   let optimise max_iter =
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
-    let rec loop ~iter ~state running_avg =
+    let rec loop ~iter ~state ~e_step running_avg =
       Stdlib.Gc.major ();
       let _, y = sample_data true_theta in
       let loss, new_state = O.step ~config:(config ~iter) ~state ~data:y ~args:() in
@@ -318,30 +318,45 @@ module Make (D : Do_with_T) = struct
         (* save params *)
         if iter % 10 = 0
         then (
-          let theta = O.params new_state |> O.W.P.value |> O.W.P.const in
+          (* avg error *)
+          Convenience.print [%message (iter : int) (loss_avg : float)];
+          let t = iter in
           let ground_truth_elbo, _, _ = elbo ~data:y true_theta in
           let ground_truth_elbo =
             Maths.primal ground_truth_elbo |> Tensor.mean |> Tensor.to_float0_exn
           in
-          let sigma2_o =
-            Maths.exp theta.sigma_o_prms
-            |> Maths.sum
-            |> Maths.primal
-            |> Tensor.to_float0_exn
+          let sigma_o, sigma_o_recog =
+            let theta = O.params new_state |> O.W.P.value in
+            ( Tensor.(exp theta.sigma_o_prms |> to_float0_exn)
+            , Tensor.(exp theta.sigma_o_prms_recog |> to_float0_exn) )
           in
-          (* avg error *)
-          Convenience.print [%message (iter : int) (loss_avg : float)];
-          let t = iter in
           Owl.Mat.(
             save_txt
               ~append:true
               ~out:(in_dir name)
-              (of_array [| Float.of_int t; loss_avg; ground_truth_elbo; sigma2_o |] 1 4)));
+              (of_array
+                 [| Float.of_int t; loss_avg; ground_truth_elbo; sigma_o; sigma_o_recog |]
+                 1
+                 5)));
         []
       in
-      if iter < max_iter then loop ~iter:(iter + 1) ~state:new_state (loss :: running_avg)
+      let e_step =
+        if iter % 20 <> 0
+        then e_step
+        else
+          O.params new_state
+          |> O.W.P.value
+          |> O.W.P.const
+          |> O.W.P.map ~f:primal_detach
+          |> O.W.P.map ~f:(fun x -> Maths.const (Tensor.copy (Maths.primal x)))
+      in
+      if iter < max_iter
+      then loop ~iter:(iter + 1) ~state:new_state ~e_step (loss :: running_avg)
     in
-    loop ~iter:0 ~state:init []
+    let e_step =
+      O.params init |> O.W.P.value |> O.W.P.const |> O.W.P.map ~f:primal_detach
+    in
+    loop ~iter:0 ~state:init ~e_step []
 end
 
 (* --------------------------------
@@ -356,7 +371,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config ~iter:_ =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.1)
+      ; learning_rate = Some Float.(0.2)
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
