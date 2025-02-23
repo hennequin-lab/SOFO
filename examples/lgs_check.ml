@@ -1,4 +1,4 @@
-(* minimal example of supervised learning on lgs *)
+(* chekcing lqr recovers the ground truth in the limit of small costs *)
 open Printf
 open Base
 open Forward_torch

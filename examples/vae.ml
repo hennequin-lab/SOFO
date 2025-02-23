@@ -23,16 +23,17 @@ let base =
 
 let bs = 256
 let full_batch_size = 60_000
-let num_epochs_to_run = 5
+let num_epochs_to_run = 10
 
 let num_train_loops =
   Convenience.num_train_loops ~full_batch_size ~batch_size:bs num_epochs_to_run
 
 let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size:bs t
 let sampling = false
+let n_fisher = 30
 let input_dim = 28 * 28
-let h_dim1 = 100
-let latent_dim = 10
+let h_dim1 = 10
+let latent_dim = 5
 
 let encoder_hidden_layers =
   [| input_dim, h_dim1; h_dim1, latent_dim; h_dim1, latent_dim |]
@@ -40,7 +41,7 @@ let encoder_hidden_layers =
 let decoder_hidden_layers = [| latent_dim, h_dim1; h_dim1, input_dim |]
 let n_encoder = Array.length encoder_hidden_layers
 let n_decoder = Array.length decoder_hidden_layers
-let beta = 0.1
+let beta = 1.
 
 module VAE = struct
   module MLP_Layer = struct
@@ -76,7 +77,7 @@ module VAE = struct
 
   let reparam ~_mean ~log_std =
     let std = Maths.exp log_std in
-    Maths.(_mean + (std * const (Tensor.rand_like (Maths.primal _mean))))
+    Maths.(_mean + (std * const (Tensor.rand_like (Maths.primal_tensor_detach _mean))))
 
   let decoder z (theta : P.M.t) =
     let theta_decoder = Array.sub theta ~pos:n_encoder ~len:n_decoder in
@@ -85,37 +86,21 @@ module VAE = struct
     in
     Maths.sigmoid h_
 
-  let gaussian_llh ?mu ?(fisher_batched = false) ?(std_batched = false) ~std x =
+  let gaussian_llh ?mu ?(std_batched = false) ~std x =
     let inv_std = Maths.(f 1. / std) in
     let std_eq = if std_batched then "ma" else "a" in
     let error_term =
-      if fisher_batched
-      then (
-        (* batch dimension l is number of fisher samples *)
-        let error =
-          match mu with
-          | None -> Maths.(einsum [ x, "lma"; inv_std, std_eq ] "lma")
-          | Some mu -> Maths.(einsum [ x - mu, "lma"; inv_std, std_eq ] "lma")
-        in
-        Maths.einsum [ error, "lma"; error, "lma" ] "lm")
-      else (
-        let error =
-          match mu with
-          | None -> Maths.(einsum [ x, "ma"; inv_std, std_eq ] "ma")
-          | Some mu -> Maths.(einsum [ x - mu, "ma"; inv_std, std_eq ] "ma")
-        in
-        Maths.einsum [ error, "ma"; error, "ma" ] "m")
+      let error =
+        match mu with
+        | None -> Maths.(einsum [ x, "ma"; inv_std, std_eq ] "ma")
+        | Some mu -> Maths.(einsum [ x - mu, "ma"; inv_std, std_eq ] "ma")
+      in
+      Maths.einsum [ error, "ma"; error, "ma" ] "m"
     in
     let cov_term =
-      match fisher_batched, std_batched with
-      | true, false -> Maths.(sum (log (sqr std))) |> Maths.reshape ~shape:[ 1; 1 ]
-      | false, false -> Maths.(sum (log (sqr std))) |> Maths.reshape ~shape:[ 1 ]
-      | true, true ->
-        Maths.(sum_dim (log (sqr std)) ~dim:(Some [ 1 ]) ~keepdim:false)
-        |> Maths.reshape ~shape:[ -1; bs ]
-      | false, true ->
-        Maths.(sum_dim (log (sqr std)) ~dim:(Some [ 1 ]) ~keepdim:false)
-        |> Maths.reshape ~shape:[ bs ]
+      match std_batched with
+      | false -> Maths.(sum (log (sqr std)))
+      | true -> Maths.(sum_dim (log (sqr std)) ~dim:(Some [ 1 ]) ~keepdim:false)
     in
     let const_term =
       let o = x |> Maths.primal |> Tensor.shape |> List.last_exn in
@@ -127,19 +112,45 @@ module VAE = struct
     let vtgt = Maths.tangent x_hat |> Option.value_exn in
     Tensor.einsum ~equation:"kma,jma->kj" [ vtgt; vtgt ] ~path:None
 
+  let true_fisher ~x_hat =
+    let x_hat_pri = Maths.primal x_hat in
+    let n_tangents =
+      List.hd_exn (Tensor.shape (Option.value_exn (Maths.tangent x_hat)))
+    in
+    let fisher_sampled =
+      List.fold
+        (List.init n_fisher ~f:(fun i -> i))
+        ~init:(Tensor.f 0.)
+        ~f:(fun accu _ ->
+          let eps = Tensor.randn_like x_hat_pri in
+          let x_hat_sample = Tensor.(eps + x_hat_pri) in
+          let llh_t =
+            Maths.(
+              mean_dim ~dim:(Some [ 1 ]) ~keepdim:false (sqr (const x_hat_sample - x_hat)))
+            |> Maths.tangent
+            |> Option.value_exn
+          in
+          let fisher_half = Tensor.reshape llh_t ~shape:[ n_tangents; -1 ] in
+          let fisher =
+            Tensor.einsum ~equation:"ka,ja->kj" [ fisher_half; fisher_half ] ~path:None
+          in
+          Stdlib.Gc.major ();
+          Tensor.(accu + fisher))
+    in
+    Tensor.(fisher_sampled / f (Float.of_int n_fisher))
+
   let loss ~data:x theta =
     let _mean, log_std = encoder x theta in
     let z = reparam ~_mean ~log_std in
     let x_hat = decoder z theta in
     (* how close the reconstructed image is to the original *)
     let rec_error =
-      let diff = Maths.(x_hat - const x) in
-      Maths.einsum [ diff, "ma"; diff, "ma" ] "m"
+      Maths.(sqr (x_hat - const x)) |> Maths.mean_dim ~dim:(Some [ 1 ]) ~keepdim:false
     in
     let kl_term =
       if sampling
       then (
-        let prior_term =
+        let prior =
           gaussian_llh
             ~std:
               (Tensor.ones [ latent_dim ] ~device:base.device ~kind:base.kind
@@ -149,22 +160,18 @@ module VAE = struct
         let neg_entropy =
           gaussian_llh ~std_batched:true ~mu:_mean ~std:(Maths.exp log_std) z
         in
-        Maths.(neg_entropy - prior_term))
+        Maths.(neg_entropy - prior))
       else (
-        let det1 = Maths.(2. $* sum_dim ~dim:(Some [ 1 ]) ~keepdim:true log_std) in
+        let det1 = Maths.(2. $* sum_dim ~dim:(Some [ 1 ]) ~keepdim:false log_std) in
         let _const = Float.(of_int latent_dim) in
         let tr =
           log_std
           |> Maths.exp
           |> Maths.sqr
-          |> Maths.sum_dim ~dim:(Some [ 1 ]) ~keepdim:true
+          |> Maths.sum_dim ~dim:(Some [ 1 ]) ~keepdim:false
         in
-        let quad =
-          Maths.(einsum [ _mean, "mb"; _mean, "mb" ] "m")
-          |> Maths.reshape ~shape:[ -1; 1 ]
-        in
-        let tmp = Maths.(tr - f _const - det1) in
-        Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1)
+        let quad = Maths.(einsum [ _mean, "mb"; _mean, "mb" ] "m") in
+        Maths.(0.5 $* tr - det1 + quad - f _const))
     in
     Maths.(rec_error + (f beta * kl_term)), x_hat
 
@@ -173,13 +180,14 @@ module VAE = struct
     match update with
     | `loss_only u -> u init (Some loss)
     | `loss_and_ggn u ->
-      let ggn = ggn ~x_hat in
-      let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false ggn in
+      (* let ggn = ggn ~x_hat in *)
+      let true_fisher = true_fisher ~x_hat in
+      let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false true_fisher in
       final_s
       |> Tensor.reshape ~shape:[ -1; 1 ]
       |> Tensor.to_bigarray ~kind:base.ba_kind
       |> Owl.Mat.save_txt ~out:(in_dir (sprintf "svals"));
-      u init (Some (loss, Some ggn))
+      u init (Some (loss, Some true_fisher))
 
   let init =
     let open MLP_Layer in
@@ -312,11 +320,11 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.1 / (1. +. (0. * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(0.1/ (1. +. (0. * sqrt (of_int iter))))
       ; n_tangents = 256
       ; sqrt = false
       ; rank_one = false
-      ; damping = Some 1e-3
+      ; damping = Some 1e-5
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None
@@ -328,7 +336,7 @@ module Do_with_SOFO : Do_with_T = struct
       Option.value_map init_config.damping ~default:"none" ~f:Float.to_string
     in
     sprintf
-      "ggn_lr_%s_sqrt_%s_damp_%s"
+      "true_fisher_lr_%s_sqrt_%s_damp_%s"
       (Float.to_string (Option.value_exn init_config.learning_rate))
       (Bool.to_string init_config.sqrt)
       gamma_name

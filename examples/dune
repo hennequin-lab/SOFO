@@ -6,12 +6,14 @@
   lgs
   lgs_min
   fa
+  lgs_check
   lgs_elbo
   lgs_elbo_simplified
   lgs_elbo_laplace
   lorenz_elbo_gru
   arm_ilqr
-  vae)
+  vae
+  ae)
  (libraries cmdargs bos sofo owl domainslib owl-ode lqr ilqr)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))

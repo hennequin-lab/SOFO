@@ -248,7 +248,7 @@ let traj_rollout ~x0 ~_A ~_B ~_c ~_std_o ~u_list =
   List.rev x_list, List.rev o_list
 
 (* in the linear gaussian case, _A, _B, c and cov invariant across time *)
-let _std_o = Tensor.(f 0.001 * ones ~device:base.device ~kind:base.kind [ o ])
+let _std_o = Tensor.(f 1. * ones ~device:base.device ~kind:base.kind [ o ])
 let ones_o = Tensor.(ones ~device:base.device ~kind:base.kind [ o ])
 let _A = sample_stable ~a:n |> Tensor.of_bigarray ~device:base.device
 let _B = Tensor.randn ~device:base.device ~kind:base.kind [ m; n ]
@@ -280,10 +280,8 @@ let base =
     ; ba_kind = Bigarray.float64
     }
 
-let n_fisher = 30
 let sample = false
 let step = 0.1
-let std_o_weight = 1.
 
 module PP = struct
   (* note that all std live in log space *)
@@ -294,12 +292,11 @@ module PP = struct
       (* _A_params : 'a *)
     ; _B_params : 'a
     ; _c_params : 'a
-    ; _std_o_params : 'a
-      (* sqrt of the diagonal of covariance of emission noise *)
-      (* ; _std_space_params : 'a
+    ; _std_o_params : 'a (* sqrt of the diagonal of covariance of emission noise *)
+    (* ; _std_space_params : 'a
       (* recognition model; sqrt of the diagonal of covariance of space factor *)
     ; _std_time_params : 'a *)
-      (* sqrt of the diagonal of covariance of the time factor *)
+     (* sqrt of the diagonal of covariance of the time factor *)
     }
   [@@deriving prms]
 end
@@ -366,65 +363,6 @@ module LGS = struct
 
   (* special care to be taken when dealing with elbo loss *)
   module Elbo_loss = struct
-    let fisher ?(fisher_batched = false) ~n:_ lik_term =
-      let neg_lik_t = Maths.(tangent lik_term) |> Option.value_exn in
-      let n_tangents = List.hd_exn (Tensor.shape neg_lik_t) in
-      let fisher =
-        if fisher_batched
-        then (
-          let fisher_half =
-            Tensor.reshape neg_lik_t ~shape:[ n_tangents; n_fisher; -1 ]
-          in
-          Tensor.einsum ~equation:"kla,jla->lkj" [ fisher_half; fisher_half ] ~path:None)
-        else (
-          let fisher_half = Tensor.reshape neg_lik_t ~shape:[ n_tangents; -1 ] in
-          Tensor.(matmul fisher_half (transpose fisher_half ~dim0:0 ~dim1:1)))
-      in
-      fisher
-
-    let llh_increment ~_std_o_vec ~_std_o_extended ~new_o =
-      let noise =
-        Tensor.(
-          _std_o_extended
-          * randn (n_fisher :: Maths.shape new_o) ~device:base.device ~kind:base.kind)
-      in
-      let new_o_unsqueezed =
-        List.init n_fisher ~f:(fun _ -> Maths.unsqueeze new_o ~dim:0)
-        |> Maths.concat_list ~dim:0
-      in
-      let o_samples_batched = Maths.(const Tensor.(Maths.primal new_o + noise)) in
-      gaussian_llh
-        ~mu:new_o_unsqueezed
-        ~std:_std_o_vec
-        ~fisher_batched:true
-        o_samples_batched
-
-    let true_fisher ~u_list (theta : P.M.t) =
-      let _std_o_vec = Maths.(exp theta._std_o_params * const ones_o) in
-      let _std_o_extended =
-        _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
-      in
-      let _A = _A theta in
-      let _, llh_rollout =
-        List.fold
-          u_list
-          ~init:(Maths.const x0, Maths.f 0.)
-          ~f:(fun accu u ->
-            let prev_x, llh_accu = accu in
-            let new_x = step ~_A ~_B:theta._B_params ~u ~prev_x in
-            let new_o = tmp_einsum new_x theta._c_params in
-            let increment = llh_increment ~_std_o_vec ~_std_o_extended ~new_o in
-            cleanup ();
-            new_x, Maths.(increment + llh_accu))
-      in
-      let fisher_rollout =
-        let fisher_batched = fisher ~n:o llh_rollout ~fisher_batched:true in
-        Tensor.mean_dim fisher_batched ~dim:(Some [ 0 ]) ~keepdim:false ~dtype:base.kind
-      in
-      let final = Tensor.(fisher_rollout / f (Float.of_int tmax)) in
-      save_svals final;
-      final
-
     let ggn_increment ~new_o ~hess_y =
       let ggn_y_increment =
         let vtgt = Maths.tangent new_o |> Option.value_exn in
@@ -467,9 +405,7 @@ module LGS = struct
         in
         Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
       in
-      let final =
-        Tensor.((ggn_rollout / f (Float.of_int tmax)) + (f std_o_weight * ggn_sigma))
-      in
+      let final = Tensor.((ggn_rollout / f (Float.of_int tmax)) + ggn_sigma) in
       save_svals final;
       final
   end
@@ -568,7 +504,7 @@ module LGS = struct
         let _mean = Maths.(x *@ theta._c_params) in
         sample_randn ~_mean ~_std:std_o ~dim:o)
     in
-    (* lqr on (o - o_sampled) *)
+    (* lqr on (o_true - o_sampled) *)
     let sol_delta_o =
       let delta_o_list =
         List.map2_exn o_list o_sampled ~f:(fun a b -> Tensor.(a - Maths.primal b))
@@ -655,9 +591,9 @@ module LGS = struct
         Maths.einsum [ optimal_u, "mbt"; optimal_u, "mbt" ] "m" |> Maths.unsqueeze ~dim:1
       in
       let tmp = Maths.(tr - det1 -$ _const) |> Maths.reshape ~shape:[ 1; 1 ] in
-      Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1)
+      Maths.(0.5 $* tmp + quad) |> Maths.squeeze ~dim:1) *)
 
-  let elbo ~o_list ~u_list ~optimal_u_list (theta : P.M.t) =
+  (* let elbo ~o_list ~u_list ~optimal_u_list (theta : P.M.t) =
     let llh = llh ~o_list ~optimal_u_list ~u_list theta in
     let kl = kl ~u_list ~optimal_u_list theta in
     Maths.(llh - kl) *)
@@ -737,7 +673,7 @@ module LGS = struct
     ; _B_params
     ; _c_params
     ; _std_o_params
-      (* ; _std_space_params
+    (* ; _std_space_params
     ; _std_time_params *)
     }
 
@@ -881,11 +817,11 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.1 / (1. +. (0. * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(0.01 / (1. +. (0. * sqrt (of_int iter))))
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
-      ; damping = None
+      ; damping = Some 1e-3
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None
@@ -897,11 +833,10 @@ module Do_with_SOFO : Do_with_T = struct
       Option.value_map init_config.damping ~default:"none" ~f:Float.to_string
     in
     sprintf
-      "ggn_lr_%s_sqrt_%s_damp_%s_std_o_weight_%s"
+      "ggn_lr_%s_sqrt_%s_damp_%s"
       (Float.to_string (Option.value_exn init_config.learning_rate))
       (Bool.to_string init_config.sqrt)
       gamma_name
-      (Float.to_string std_o_weight)
 
   let init = O.init ~config:(config_f ~iter:0) LGS.init
 end
@@ -916,7 +851,7 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (LGS)
 
   let config_f ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.001 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
 
   let init = O.init LGS.init
 end
