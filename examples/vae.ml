@@ -32,8 +32,8 @@ let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size:bs t
 let sampling = false
 let n_fisher = 30
 let input_dim = 28 * 28
-let h_dim1 = 10
-let latent_dim = 5
+let h_dim1 = 100
+let latent_dim = 10
 
 let encoder_hidden_layers =
   [| input_dim, h_dim1; h_dim1, latent_dim; h_dim1, latent_dim |]
@@ -81,10 +81,9 @@ module VAE = struct
 
   let decoder z (theta : P.M.t) =
     let theta_decoder = Array.sub theta ~pos:n_encoder ~len:n_decoder in
-    let h_ =
-      Array.fold theta_decoder ~init:z ~f:(fun accu p -> phi Maths.((accu *@ p.w) + p.b))
-    in
-    Maths.sigmoid h_
+    Array.foldi theta_decoder ~init:z ~f:(fun i accu p ->
+      let act_fun = if i = n_decoder - 1 then phi else Maths.sigmoid in
+      act_fun Maths.((accu *@ p.w) + p.b))
 
   let gaussian_llh ?mu ?(std_batched = false) ~std x =
     let inv_std = Maths.(f 1. / std) in
@@ -320,7 +319,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.1/ (1. +. (0. * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(5e-2 / (1. +. (0. * sqrt (of_int iter))))
       ; n_tangents = 256
       ; sqrt = false
       ; rank_one = false

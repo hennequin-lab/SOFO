@@ -23,15 +23,15 @@ let base =
 
 let bs = 64
 let full_batch_size = 60_000
-let num_epochs_to_run = 10
+let num_epochs_to_run = 5
 
 let num_train_loops =
   Convenience.num_train_loops ~full_batch_size ~batch_size:bs num_epochs_to_run
 
 let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size:bs t
 let input_dim = 28 * 28
-let h_dim1 = 10
-let latent_dim = 5
+let h_dim1 = 256
+let latent_dim = 128
 let layer_sizes = [| h_dim1; latent_dim; h_dim1; input_dim |]
 
 module VAE = struct
@@ -62,7 +62,8 @@ module VAE = struct
     in
     let pred =
       Array.foldi theta ~init:(Maths.const x) ~f:(fun i accu p ->
-        let act_fun = if i = Array.length layer_sizes then Maths.sigmoid else phi in
+        let act_fun = if i = Int.(Array.length layer_sizes - 1) then 
+          Maths.sigmoid else phi in
         act_fun Maths.((accu *@ p.w) + p.b))
     in
     let reduce_dim_list = Convenience.all_dims_but_first (Maths.primal pred) in
@@ -188,7 +189,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(500. / (1. +. (0. * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(100. / (1. +. (0. * sqrt (of_int iter))))
       ; n_tangents = 256
       ; sqrt = false
       ; rank_one = false
