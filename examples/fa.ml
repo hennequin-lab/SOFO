@@ -19,19 +19,15 @@ let base =
     ; ba_kind = Bigarray.float64
     }
 
-type pred_cond =
-  | GGN
-  | EmpFisher
-  | TrueFisher
-
-let pred_cond = GGN
+let marginal_llh = true
+let marginal_ggn = true
 let sampling = false
-let matheron = true
 let n_fisher = 30
 let m = 10
 let o = 40
 let bs = 64
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
+let id_o = Maths.(const (Tensor.eye ~n:o ~options:(base.kind, base.device)))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
 
 let make_c (m, o) =
@@ -59,8 +55,15 @@ let theta =
   PP.{ c; sigma_o_prms }
 
 let sample_data =
-  let sigma_o = Maths.(f 0.001) in
+  let sigma_o = Maths.(f 0.1) in
   let c = make_c (m, o) in
+  let _ =
+    Maths.(transpose c ~dim0:1 ~dim1:0 *@ c)
+    |> Maths.primal
+    |> Tensor.reshape ~shape:[ -1; 1 ]
+    |> Tensor.to_bigarray ~kind:base.ba_kind
+    |> Owl.Mat.save_txt ~out:(in_dir (sprintf "true_cct"))
+  in
   fun () ->
     let us =
       Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const
@@ -159,47 +162,45 @@ let ggn ~y_pred ~std_o =
   let ggn_y =
     let vtgt = Maths.tangent y_pred |> Option.value_exn in
     let vtgt_h = Tensor.(vtgt * Maths.(primal precision)) in
-    Tensor.einsum ~equation:"kma,jma->kj" [ vtgt_h; vtgt ] ~path:None
+    Tensor.(
+      einsum ~equation:"kma,jma->kj" [ vtgt_h; vtgt ] ~path:None / f (Float.of_int o))
   in
   let ggn_sigma_o =
     let vtgt = Maths.tangent precision |> Option.value_exn in
     let vtgt_h =
-      Tensor.(
-        f Float.(of_int o * of_int bs / 2.) * vtgt / square (Maths.primal precision))
+      Tensor.(f Float.(of_int bs / 2.) * vtgt / square (Maths.primal precision))
     in
     Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
   in
   Tensor.(ggn_y + ggn_sigma_o)
 
-let ggn_natural ~y_pred ~std_o =
-  let _mean = y_pred in
-  let beta = Maths.(f 1. / sqr std_o) in
-  let alpha = Maths.einsum [ Maths.unsqueeze ~dim:2 _mean, "mdc"; beta, "c" ] "md" in
-  let alpha_pri = Maths.primal alpha in
-  let beta_pri = Maths.primal beta in
-  let alpha_sum =
-    Tensor.einsum ~equation:"mo,mo->m" [ alpha_pri; alpha_pri ] ~path:None |> Tensor.sum
+(* ggn matrix when loss is the negative marginal log likelihood *)
+let ggn_marginal ~marginal_cov_chol =
+  let marginal_cov_chol_inv =
+    Maths.linsolve_triangular marginal_cov_chol id_o ~left:true ~upper:false
   in
-  let h_11 = Tensor.(f 1. / beta_pri) in
-  let h_12 = Tensor.(neg alpha_pri / square beta_pri) in
-  let h_22 =
-    Tensor.(
-      ((f (Float.of_int Int.(o * bs)) / (f 2. * beta_pri)) + (alpha_sum / square beta_pri))
-      / beta_pri)
+  let marginal_cov_chol_inv_p = Maths.primal marginal_cov_chol_inv in
+  let marginal_cov_inv_p =
+    Tensor.einsum
+      [ marginal_cov_chol_inv_p; marginal_cov_chol_inv_p ]
+      ~path:None
+      ~equation:"ij,ik->jk"
   in
-  let alpha_t = Maths.tangent alpha |> Option.value_exn in
-  let beta_t = Maths.tangent beta |> Option.value_exn |> Tensor.squeeze in
-  (* H JV *)
-  let tmp1 =
-    Tensor.((alpha_t * h_11) + einsum ~equation:"md,k->kmd" [ h_12; beta_t ] ~path:None)
+  let marginal_cov_t =
+    let marginal_cov =
+      Maths.(marginal_cov_chol *@ transpose marginal_cov_chol ~dim0:1 ~dim1:0)
+    in
+    Maths.tangent marginal_cov |> Option.value_exn
   in
-  let tmp2 =
-    Tensor.(einsum ~equation:"md,kmd->k" [ h_12; alpha_t ] ~path:None + (h_22 * beta_t))
+  let ggn_half =
+    Tensor.einsum
+      [ marginal_cov_t; marginal_cov_inv_p ]
+      ~path:None
+      ~equation:"koq,qp->kop"
   in
-  (* J^T V^T H JV *)
-  let tmp3 = Tensor.einsum ~equation:"kmd,jmd->kj" [ alpha_t; tmp1 ] ~path:None in
-  let tmp4 = Tensor.einsum ~equation:"k,j->kj" [ beta_t; tmp2 ] ~path:None in
-  Tensor.(tmp3 + tmp4)
+  Tensor.(
+    f Float.(of_int bs / (2. * of_int o))
+    * einsum [ ggn_half; ggn_half ] ~path:None ~equation:"kop,jpo->kj")
 
 module M = struct
   module P = P
@@ -207,106 +208,86 @@ module M = struct
   type data = Maths.t
   type args = unit
 
-  let f ~update ~data:y ~init ~args:() (theta : P.M.t) =
+  let kl ~u_sampled ~u_opt ~u_diff ~d_opt_chol =
+    if sampling
+    then (
+      let prior_term = gaussian_llh ~std:ones_u u_sampled in
+      let q_term = gaussian_llh_chol ~chol:d_opt_chol u_diff in
+      Maths.(q_term - prior_term))
+    else (
+      let d_opt_chol_diag = Maths.diagonal d_opt_chol ~offset:0 in
+      let det1 = Maths.(2. $* sum (log d_opt_chol_diag)) in
+      let _const = Maths.const (Tensor.f Float.(of_int m)) in
+      let tr = d_opt_chol_diag |> Maths.sqr |> Maths.sum in
+      let quad =
+        Maths.(einsum [ u_opt, "mb"; u_opt, "mb" ] "m") |> Maths.reshape ~shape:[ -1 ]
+      in
+      let tmp = Maths.(tr - _const - det1) |> Maths.reshape ~shape:[ 1 ] in
+      Maths.(0.5 $* tmp + quad))
+
+  let neg_elbo ~y_pred ~y ~u_sampled ~u_opt ~u_diff ~d_opt_chol (theta : P.M.t) =
     let sigma_o = Maths.exp theta.sigma_o_prms in
     let sigma_o_extended = Maths.(sigma_o * ones_o) in
-    let d_opt_chol =
-      let d_opt_inv = d_opt_inv ~c:theta.c ~sigma_o in
-      let d_opt_inv_chol = Maths.cholesky d_opt_inv in
-      Maths.linsolve
-        d_opt_inv_chol
-        (Maths.const (Tensor.eye ~n:m ~options:(base.kind, base.device)))
-        ~left:true
-    in
-    let u_opt = u_opt ~c:theta.c ~sigma_o:sigma_o_extended y in
+    let llh = gaussian_llh ~mu:y_pred ~std:sigma_o_extended y in
+    let kl = kl ~u_sampled ~u_opt ~u_diff ~d_opt_chol in
+    Maths.(llh - kl) |> Maths.neg
+
+  let marginal_cov_chol (theta : P.M.t) =
+    let sigma_o = Maths.exp theta.sigma_o_prms in
+    let sigma_o_extended = Maths.(sigma_o * ones_o) in
+    Maths.(
+      (transpose theta.c ~dim0:1 ~dim1:0 *@ theta.c)
+      + diag_embed ~offset:0 ~dim1:0 ~dim2:1 (sqr sigma_o_extended))
+    |> Maths.cholesky
+
+  let neg_marginal_llh ~marginal_cov_chol ~y =
+    gaussian_llh_chol ~chol:marginal_cov_chol y |> Maths.neg
+
+  let d_opt_chol (theta : P.M.t) =
+    let sigma_o = Maths.exp theta.sigma_o_prms in
+    let d_opt_inv = d_opt_inv ~c:theta.c ~sigma_o in
+    let d_opt_inv_chol = Maths.cholesky d_opt_inv in
+    Maths.linsolve
+      d_opt_inv_chol
+      (Maths.const (Tensor.eye ~n:m ~options:(base.kind, base.device)))
+      ~left:true
+
+  let f ~update ~data:y ~init ~args:() (theta : P.M.t) =
+    (* sample u *)
+    let d_opt_chol = d_opt_chol theta in
+    let u_opt = u_opt ~c:theta.c ~sigma_o:Maths.(exp theta.sigma_o_prms * ones_o) y in
     let u_diff =
       let e = Maths.(const (Tensor.randn_like (primal u_opt))) in
       Maths.einsum [ e, "mj"; d_opt_chol, "ij" ] "mi"
     in
     let u_sampled =
-      if matheron
-      then Maths.(const (primal_tensor_detach (u_opt + u_diff)))
-      else Maths.(u_opt + u_diff)
+      (* Maths.(const (primal_tensor_detach (u_opt + u_diff))) *)
+      Maths.(u_opt + u_diff)
     in
     let y_pred = Maths.(u_sampled *@ theta.c) in
-    let lik_term = gaussian_llh ~mu:y_pred ~std:sigma_o_extended y in
-    let kl_term =
-      if sampling
-      then (
-        let prior_term = gaussian_llh ~std:ones_u u_sampled in
-        let q_term = gaussian_llh_chol ~chol:d_opt_chol u_diff in
-        Maths.(q_term - prior_term))
-      else (
-        let d_opt_chol_diag = Maths.diagonal d_opt_chol ~offset:0 in
-        let det1 = Maths.(2. $* sum (log d_opt_chol_diag)) in
-        let _const = Maths.const (Tensor.f Float.(of_int m)) in
-        let tr = d_opt_chol_diag |> Maths.sqr |> Maths.sum in
-        let quad =
-          Maths.(einsum [ u_opt, "mb"; u_opt, "mb" ] "m") |> Maths.reshape ~shape:[ -1 ]
-        in
-        let tmp = Maths.(tr - _const - det1) |> Maths.reshape ~shape:[ 1 ] in
-        Maths.(0.5 $* tmp + quad))
-    in
-    let neg_elbo =
-      (if matheron
-       then
-         Maths.(lik_term )
-         (* then Maths.(lik_term - const (primal_tensor_detach kl_term)) *)
-       else Maths.(lik_term))
-      |> Maths.neg
-      |> fun x -> Maths.(x / f Float.(of_int o))
+    let marginal_cov_chol = marginal_cov_chol theta in
+    let loss =
+      let tmp =
+        if marginal_llh
+        then neg_marginal_llh ~marginal_cov_chol ~y
+        else neg_elbo ~y_pred ~y ~u_sampled ~u_opt ~u_diff ~d_opt_chol (theta : P.M.t)
+      in
+      Maths.(tmp / f Float.(of_int o))
     in
     match update with
-    | `loss_only u -> u init (Some neg_elbo)
+    | `loss_only u -> u init (Some loss)
     | `loss_and_ggn u ->
       let preconditioner =
-        match pred_cond with
-        | TrueFisher ->
-          let true_fisher =
-            let y_pred_unsqueezed =
-              let tmp = Maths.unsqueeze ~dim:0 y_pred in
-              List.init n_fisher ~f:(fun _ -> tmp) |> Maths.concat_list ~dim:0
-            in
-            let y_pred_primal = Maths.primal y_pred |> Tensor.unsqueeze ~dim:0 in
-            let sigma_extended =
-              sigma_o_extended
-              |> Maths.primal
-              |> Tensor.unsqueeze ~dim:0
-              |> Tensor.unsqueeze ~dim:0
-            in
-            let y_samples_batched =
-              let noise =
-                Tensor.(
-                  sigma_extended
-                  * Tensor.(
-                      randn
-                        (n_fisher :: Maths.shape y)
-                        ~device:base.device
-                        ~kind:base.kind))
-              in
-              Maths.(const Tensor.(y_pred_primal + noise))
-            in
-            let lik_term_sampled_batched =
-              gaussian_llh
-                ~mu:y_pred_unsqueezed
-                ~std:sigma_o_extended
-                ~fisher_batched:true
-                y_samples_batched
-            in
-            let fisher = fisher ~n:o lik_term_sampled_batched ~fisher_batched:true in
-            Tensor.mean_dim fisher ~dim:(Some [ 0 ]) ~keepdim:false ~dtype:base.kind
-          in
-          true_fisher
-        | EmpFisher -> fisher ~n:o lik_term
-        | GGN -> ggn ~y_pred ~std_o:sigma_o
-        (* ggn_natural ~_mean:y_pred ~std:sigma_o *)
+        if marginal_ggn
+        then ggn_marginal ~marginal_cov_chol
+        else ggn ~y_pred ~std_o:(Maths.exp theta.sigma_o_prms)
       in
       let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false preconditioner in
       final_s
       |> Tensor.reshape ~shape:[ -1; 1 ]
       |> Tensor.to_bigarray ~kind:base.ba_kind
       |> Owl.Mat.save_txt ~out:(in_dir (sprintf "svals"));
-      u init (Some (neg_elbo, Some preconditioner))
+      u init (Some (loss, Some preconditioner))
 end
 
 (* --------------------------------
@@ -321,7 +302,7 @@ module type Do_with_T = sig
      and type W.args = unit
 
   val name : string
-  val config : (float, Bigarray.float64_elt) O.config
+  val config_f : iter:int -> (float, Bigarray.float64_elt) O.config
   val init : O.state
 end
 
@@ -333,6 +314,7 @@ module Make (D : Do_with_T) = struct
     let rec loop ~iter ~state ~time_elapsed running_avg =
       Stdlib.Gc.major ();
       let _, y = sample_data () in
+      let config = config_f ~iter in
       let t0 = Unix.gettimeofday () in
       let loss, new_state = O.step ~config ~state ~data:y ~args:() in
       let std_o_mean =
@@ -350,6 +332,17 @@ module Make (D : Do_with_T) = struct
         (* save params *)
         if iter % 10 = 0
         then (
+          (* learned cct *)
+          let _ =
+            let c =
+              let a = M.P.value (O.params state) in
+              a.c
+            in
+            Tensor.(matmul (transpose c ~dim0:0 ~dim1:1) c)
+            |> Tensor.reshape ~shape:[ -1; 1 ]
+            |> Tensor.to_bigarray ~kind:base.ba_kind
+            |> Owl.Mat.save_txt ~out:(in_dir (sprintf "learned_cct"))
+          in
           (* avg error *)
           Convenience.print [%message (iter : int) (loss_avg : float)];
           let t = iter in
@@ -377,11 +370,11 @@ end
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (M)
 
-  let config =
+  let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 50.
-      ; n_tangents = 64
+      ; learning_rate = Some Float.(0.5 / (1. +. (0. * sqrt (of_int iter))))
+      ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
       ; damping = None
@@ -390,37 +383,17 @@ module Do_with_SOFO : Do_with_T = struct
       ; perturb_thresh = None
       }
 
-  let init = O.init ~config theta
+  let init = O.init ~config:(config_f ~iter:0) theta
 
   let name =
-    match pred_cond with
-    | TrueFisher -> "true_fisher"
-    | EmpFisher -> "emp_fisher"
-    | GGN ->
-      let gamma_name =
-        Option.value_map config.damping ~default:"none" ~f:Float.to_string
-      in
-      sprintf
-        "ggn_lr_%s_damp_%s_k_%s_matheron_no_kl"
-        (Float.to_string (Option.value_exn config.learning_rate))
-        gamma_name
-        (Int.to_string config.n_tangents)
-end
-
-(* --------------------------------
-   -- FGD
-   -------------------------------- *)
-
-module Do_with_FGD : Do_with_T = struct
-  module O = Optimizer.FGD (M)
-
-  let name = "fgd"
-
-  let config =
-    Optimizer.Config.FGD.
-      { default with base; n_tangents = 256; learning_rate = Some 0.03 }
-
-  let init = O.init ~config theta
+    let init_config = config_f ~iter:0 in
+    let gamma_name =
+      Option.value_map init_config.damping ~default:"none" ~f:Float.to_string
+    in
+    sprintf
+      "ggn_lr_%s_damp_%s"
+      (Float.to_string (Option.value_exn init_config.learning_rate))
+      gamma_name
 end
 
 (* --------------------------------
@@ -428,11 +401,13 @@ end
    -------------------------------- *)
 
 module Do_with_Adam : Do_with_T = struct
-  let name = "adam_matheron_no_kl"
+  let name = "adam"
 
   module O = Optimizer.Adam (M)
 
-  let config = Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
+  let config_f ~iter:_ =
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
+
   let init = O.init theta
 end
 
@@ -442,9 +417,6 @@ let _ =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->
       let module X = Make (Do_with_SOFO) in
-      X.optimise
-    | Some "fgd" ->
-      let module X = Make (Do_with_FGD) in
       X.optimise
     | Some "adam" ->
       let module X = Make (Do_with_Adam) in
