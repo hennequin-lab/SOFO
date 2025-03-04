@@ -586,7 +586,8 @@ let ( * ) (x, dx) (y, dy) =
       ~fy:Tensor.(mul x)
       ~fxy:(fun dx dy -> Tensor.(add_ (dx * y) (dy * x)))
   in
-  (z, dz) |> assert_right_shape "( * )"
+  (z, dz)
+   |> assert_right_shape "( * )"
 
 (* z = x / y, dz = 1/y dx - x/(y^2) dy *)
 let ( / ) (x, dx) (y, dy) =

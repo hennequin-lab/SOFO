@@ -25,7 +25,7 @@ let sampling = false
 let n_fisher = 30
 let m = 10
 let o = 40
-let bs = 64
+let bs = 16
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
 let id_o = Maths.(const (Tensor.eye ~n:o ~options:(base.kind, base.device)))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
@@ -45,6 +45,18 @@ end
 
 module P = PP.Make (Prms.P)
 
+let true_theta =
+  let sigma_o_prms = Maths.f 0.1 |> Maths.log in
+  let c = make_c (m, o) in
+  PP.{ sigma_o_prms; c }
+
+let _ =
+  Maths.(transpose true_theta.c ~dim0:1 ~dim1:0 *@ true_theta.c)
+  |> Maths.primal
+  |> Tensor.reshape ~shape:[ -1; 1 ]
+  |> Tensor.to_bigarray ~kind:base.ba_kind
+  |> Owl.Mat.save_txt ~out:(in_dir (sprintf "true_cct"))
+
 let theta =
   let c = Prms.free (Maths.primal (make_c (m, o))) in
   let sigma_o_prms =
@@ -54,23 +66,13 @@ let theta =
   in
   PP.{ c; sigma_o_prms }
 
-let sample_data =
-  let sigma_o = Maths.(f 0.1) in
-  let c = make_c (m, o) in
-  let _ =
-    Maths.(transpose c ~dim0:1 ~dim1:0 *@ c)
-    |> Maths.primal
-    |> Tensor.reshape ~shape:[ -1; 1 ]
-    |> Tensor.to_bigarray ~kind:base.ba_kind
-    |> Owl.Mat.save_txt ~out:(in_dir (sprintf "true_cct"))
+let sample_data () =
+  let us = Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const in
+  let xs = Maths.(us *@ true_theta.c) in
+  let ys =
+    Maths.(xs + (exp true_theta.sigma_o_prms * const (Tensor.randn_like (primal xs))))
   in
-  fun () ->
-    let us =
-      Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const
-    in
-    let xs = Maths.(us *@ c) in
-    let ys = Maths.(xs + (sigma_o * const (Tensor.randn_like (primal xs)))) in
-    us, ys
+  us, ys
 
 let solver a y =
   let ell = Maths.cholesky a in
@@ -373,8 +375,8 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.5 / (1. +. (0. * sqrt (of_int iter))))
-      ; n_tangents = 128
+      ; learning_rate = Some Float.(0.3 / (1. +. (0. * sqrt (of_int iter))))
+      ; n_tangents = 16
       ; sqrt = false
       ; rank_one = false
       ; damping = None
@@ -412,7 +414,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 2000 in
+  let max_iter = 10000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

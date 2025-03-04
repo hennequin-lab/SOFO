@@ -32,8 +32,8 @@ let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size:bs t
 let sampling = false
 let n_fisher = 30
 let input_dim = 28 * 28
-let h_dim1 = 100
-let latent_dim = 10
+let h_dim1 = 10
+let latent_dim = 5
 
 let encoder_hidden_layers =
   [| input_dim, h_dim1; h_dim1, latent_dim; h_dim1, latent_dim |]
@@ -319,8 +319,8 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(5e-2 / (1. +. (0. * sqrt (of_int iter))))
-      ; n_tangents = 256
+      ; learning_rate = Some Float.(1e-6 / (1. +. (0. * sqrt (of_int iter))))
+      ; n_tangents = 512
       ; sqrt = false
       ; rank_one = false
       ; damping = Some 1e-5

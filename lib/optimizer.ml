@@ -650,7 +650,11 @@ module Adam (W : Wrapper.T) = struct
     let loss, true_g =
       let loss = Tensor.mean (Maths.primal final_losses) in
       Tensor.backward loss;
-      Tensor.to_float0_exn loss, W.P.map (W.P.primal theta_dual) ~f:Tensor.grad
+      ( Tensor.to_float0_exn loss
+      , W.P.map2 theta (W.P.primal theta_dual) ~f:(fun tagged p ->
+          match tagged with
+          | Prms.Const _ -> Tensor.(f 0.)
+          | _ -> Tensor.grad p) )
     in
     let new_state : state = update_theta_m_v ~config ~state true_g in
     loss, new_state
