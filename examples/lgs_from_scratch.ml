@@ -91,7 +91,7 @@ let true_theta =
   PP.{ a; b; c; log_obs_var }
 
 let theta =
-  let a = Prms.const (Maths.primal (primal_detach true_theta.a)) in
+  let a = Prms.free (Maths.primal (primal_detach true_theta.a)) in
   let b = Prms.const (Maths.primal (primal_detach true_theta.b)) in
   let c = Prms.free (Maths.primal (make_c ())) in
   let log_obs_var =
@@ -128,8 +128,15 @@ let save_summary ~out (theta : P.M.t) =
     Mat.(obs_var $* eye o)
   in
   let q = Mat.(q + noise_term) in
-  (* let q = Mat.(transpose c *@ transpose b *@ b *@ c) in *)
   q |> (fun x -> Owl.Mat.reshape x [| -1; 1 |]) |> Owl.Mat.save_txt ~out
+
+(* impulse response *)
+(* let u_input = List.init tmax ~f:(fun i ->
+    match i with 
+    | 0 -> Maths.const (Tensor.ones ~device:base.device ~kind:base.kind [bs; m])
+    | _ -> Maths.const (Tensor.zeros ~device:base.device ~kind:base.kind [bs; m])
+    ) in 
+ rollout ~a:theta.a ~b:theta.b ~c:theta.c u_input *)
 
 let _ = save_summary ~out:(in_dir "true_summary") true_theta
 
@@ -157,11 +164,11 @@ let lqr ~a ~b ~c ~obs_precision y =
         (* we only have state costs for t>=1 *)
         let _cz = if t > 0 then _cz_fun y else f 0. in
         let _Czz = if t > 0 then _Czz else f 0. in
-        let _Qzz = _Czz + einsum [ a, "ji"; _V, "jl"; a, "lk" ] "ik" in
-        let _Quz = einsum [ b, "ij"; _V, "jl"; a, "lk" ] "ki" in
+        let _Qzz = _Czz + einsum [ a, "ij"; _V, "jl"; a, "kl" ] "ik" in
+        let _Quz = einsum [ b, "ij"; _V, "jl"; a, "kl" ] "ki" in
         (* or maybe ik *)
         let _Quu = einsum [ b, "ij"; _V, "jl"; b, "kl" ] "ik" + eye_m in
-        let _qz = _cz + einsum [ a, "ji"; _v, "mj" ] "mi" in
+        let _qz = _cz + einsum [ a, "ij"; _v, "mj" ] "mi" in
         let _qu = einsum [ b, "ij"; _v, "mj" ] "mi" in
         let _K = neg (solver _Quu _Quz) in
         let _k = neg (solver _Quu _qu) in
@@ -182,7 +189,7 @@ let lqr ~a ~b ~c ~obs_precision y =
       ~init:([ u0 ], z1)
       ~f:(fun (accu, z) (_k, _K) ->
         let u = _k + einsum [ _K, "ji"; z, "mj" ] "mi" in
-        let z = einsum [ a, "ji"; z, "mi" ] "mj" + einsum [ b, "ij"; u, "mi" ] "mj" in
+        let z = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ b, "ij"; u, "mi" ] "mj" in
         u :: accu, z)
   in
   List.rev us
@@ -197,7 +204,7 @@ let rollout ~a ~b ~c u =
       (List.tl_exn u)
       ~init:([ y_of z1 ], z1)
       ~f:(fun (accu, z) u ->
-        let z' = einsum [ a, "ji"; z, "mi" ] "mj" + einsum [ b, "ij"; u, "mi" ] "mj" in
+        let z' = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ b, "ij"; u, "mi" ] "mj" in
         y_of z' :: accu, z')
   in
   List.rev y
@@ -302,7 +309,296 @@ let _ =
   |> (fun x -> Mat.(transpose x *@ x /$ Float.(of_int Int.(pred n_samples))))
   |> Mat.save_txt ~out:(in_dir "post_cov")
 
-let neg_elbo ~data:(y : Maths.t list) (theta : P.M.t) =
+let inv_symm a =
+  let eye_a =
+    Tensor.(eye ~n:(List.last_exn (Maths.shape a)) ~options:(base.kind, base.device))
+    |> Maths.const
+  in
+  let _a_chol = Maths.cholesky a in
+  let tmp = Maths.linsolve_triangular _a_chol eye_a ~left:true ~upper:false in
+  Maths.(transpose ~dim0:0 ~dim1:1 tmp *@ tmp)
+
+type km_fwd =
+  { filtered_mean : Maths.t
+  ; filtered_cov : Maths.t
+  ; predictive_cov : Maths.t
+  }
+
+(* p(u_t | o_1,...,o_T) *)
+let kl_u_post ~y ~u_sampled (theta : P.M.t) =
+  let noise =
+    Maths.(
+      exp theta.log_obs_var
+      * const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
+    |> Maths.diag_embed ~offset:0 ~dim1:0 ~dim2:1
+  in
+  let _b_inv = theta.b |> Maths.inv_rectangle in
+  (* kalman forward filter *)
+  let _mu_0, _cov_0 =
+    ( Maths.const (Tensor.zeros [ bs; n ] ~device:base.device ~kind:base.kind)
+    , Maths.const (Tensor.zeros [ n; n ] ~device:base.device ~kind:base.kind) )
+  in
+  let _, km_fwd_list_rev =
+    List.fold_left
+      y
+      ~init:((_mu_0, _cov_0), [])
+      ~f:(fun accu y_true ->
+        let (_mu_prev, _cov_prev), km_fwd_accu = accu in
+        let _mu_p_curr = Maths.(_mu_prev *@ theta.a) in
+        let _cov_p_curr =
+          Maths.(
+            einsum [ theta.a, "ab"; _cov_prev, "ac"; theta.a, "cd" ] "bd"
+            + einsum [ theta.b, "ab"; theta.b, "ac" ] "bc")
+        in
+        let _v_curr = Maths.(y_true - (_mu_p_curr *@ theta.c)) in
+        let _s_curr =
+          Maths.(einsum [ theta.c, "ab"; _cov_p_curr, "ac"; theta.c, "cd" ] "bd" + noise)
+        in
+        (* CHECKED *)
+        let _s_inv = inv_symm _s_curr in
+        let _k_curr =
+          Maths.(_s_inv *@ transpose theta.c ~dim0:1 ~dim1:0 *@ _cov_p_curr)
+        in
+        let _mu_curr = Maths.(_mu_p_curr + (_v_curr *@ _k_curr)) in
+        let _cov_curr =
+          let tmp = Maths.(eye_n - transpose ~dim0:0 ~dim1:1 (theta.c *@ _k_curr)) in
+          Maths.(tmp *@ _cov_p_curr)
+        in
+        ( (_mu_curr, _cov_curr)
+        , { filtered_mean = _mu_curr
+          ; filtered_cov = _cov_curr
+          ; predictive_cov = _cov_p_curr
+          }
+          :: km_fwd_accu ))
+  in
+  (* this list goes from 1 to T *)
+  let km_fwd_list = List.rev km_fwd_list_rev in
+  let _mu_smoothed_last, _cov_smoothed_last =
+    let km_fwd_last = List.last_exn km_fwd_list in
+    km_fwd_last.filtered_mean, km_fwd_last.filtered_cov
+  in
+  let (_mu_smoothed_one, _cov_smoothed_one), kl =
+    List.fold
+      List.(rev (range 0 (tmax - 1)))
+      ~init:((_mu_smoothed_last, _cov_smoothed_last), Maths.f 0.)
+      ~f:(fun ((_mu_smoothed_next, _cov_smoothed_next), accu) i ->
+        let km_fwd_curr = List.nth_exn km_fwd_list i in
+        let km_fwd_next = List.nth_exn km_fwd_list (i + 1) in
+        let _h_curr =
+          Maths.(
+            km_fwd_curr.filtered_cov *@ theta.a *@ inv_symm km_fwd_next.predictive_cov)
+        in
+        let _mu_smoothed_curr =
+          Maths.(
+            km_fwd_curr.filtered_mean
+            + ((_mu_smoothed_next - (km_fwd_curr.filtered_mean *@ theta.a))
+               *@ transpose _h_curr ~dim0:1 ~dim1:0))
+        in
+        let _cov_smoothed_curr =
+          Maths.(
+            km_fwd_curr.filtered_cov
+            + (_h_curr
+               *@ (_cov_smoothed_next - km_fwd_next.predictive_cov)
+               *@ transpose _h_curr ~dim0:1 ~dim1:0))
+        in
+        let _u_mu_smoothed_curr =
+          Maths.((_mu_smoothed_next - (_mu_smoothed_curr *@ theta.a)) *@ _b_inv)
+        in
+        (* TODO: is it fine to ignore corss correlations?*)
+        let _u_cov_smoothed_curr =
+          Maths.(
+            transpose ~dim0:1 ~dim1:0 _b_inv
+            *@ (_cov_smoothed_next
+                + (transpose ~dim0:1 ~dim1:0 theta.a *@ _cov_smoothed_curr *@ theta.a))
+            *@ _b_inv)
+        in
+        (* shift by 1 since u_sampled goes from 0 to T-1 *)
+        let u_sampled_curr = List.nth_exn u_sampled Int.(i + 1) in
+        let prior_term =
+          gaussian_llh
+            ~inv_std:(Tensor.ones [ m ] ~device:base.device ~kind:base.kind |> Maths.const)
+            u_sampled_curr
+        in
+        let neg_entropy_term =
+          gaussian_llh_chol
+            ~mu:_u_mu_smoothed_curr
+            ~chol:(Maths.cholesky _u_cov_smoothed_curr)
+            u_sampled_curr
+        in
+        ( (_mu_smoothed_curr, _cov_smoothed_curr)
+        , Maths.(accu + neg_entropy_term - prior_term) ))
+  in
+  (* kl on u_0 *)
+  let kl_first =
+    let u_sampled_zero = List.hd_exn u_sampled in
+    let _u_mu_smoothed_zero = Maths.(_mu_smoothed_one *@ _b_inv) in
+    let _u_cov_smoothed_zero =
+      Maths.(transpose ~dim0:1 ~dim1:0 _b_inv *@ _cov_smoothed_one *@ _b_inv)
+    in
+    let prior_term =
+      gaussian_llh
+        ~inv_std:(Tensor.ones [ m ] ~device:base.device ~kind:base.kind |> Maths.const)
+        u_sampled_zero
+    in
+    let neg_entropy_term =
+      gaussian_llh_chol
+        ~mu:_u_mu_smoothed_zero
+        ~chol:(Maths.cholesky _u_cov_smoothed_zero)
+        u_sampled_zero
+    in
+    Maths.(neg_entropy_term - prior_term)
+  in
+  Maths.(kl + kl_first)
+
+(* type km_fwd =
+  { _mu_filtered : Maths.t
+  ; _V_filtered : Maths.t
+  ; _P_filtered : Maths.t
+  } *)
+
+(* let kl_u_post ~y ~u_sampled (theta : P.M.t) =
+  let noise =
+    Maths.(
+      exp theta.log_obs_var
+      * const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
+    |> Maths.diag_embed ~offset:0 ~dim1:0 ~dim2:1
+  in
+  let _b_inv = theta.b |> Maths.inv_rectangle in
+  (* kalman forward filter *)
+  let _mu_filtered_0, _P_filtered_0 =
+    ( Maths.const (Tensor.zeros [ bs; n ] ~device:base.device ~kind:base.kind)
+    , Maths.const (Tensor.zeros [ n; n ] ~device:base.device ~kind:base.kind) )
+  in
+  let _, km_fwd_list_rev =
+    List.fold_left
+      y
+      ~init:((_mu_filtered_0, _P_filtered_0), [])
+      ~f:(fun ((_mu_filtered_prev, _P_filtered_prev), km_fwd_accu) y_true ->
+        let _K_curr =
+          let tmp =
+            Maths.(
+              noise + einsum [ theta.c, "ab"; _P_filtered_prev, "ac"; theta.c, "cd" ] "bd")
+          in
+          Maths.einsum [ inv_symm tmp, "ab"; theta.c, "cb"; _P_filtered_prev, "cd" ] "ad"
+        in
+        let _mu_filtered_curr =
+          let tmp1 = Maths.(einsum [ _mu_filtered_prev, "ab"; theta.a, "bc" ] "ac") in
+          let tmp2 =
+            Maths.(
+              y_true
+              - einsum [ _mu_filtered_prev, "ab"; theta.a, "bc"; theta.c, "cd" ] "ad")
+          in
+          Maths.(tmp1 - (tmp2 *@ _K_curr))
+        in
+        let _V_filtered_curr =
+          Maths.(_P_filtered_prev - (_P_filtered_prev *@ theta.c *@ _K_curr))
+        in
+        let _P_filtered_curr =
+          Maths.(
+            einsum [ theta.a, "ab"; _V_filtered_curr, "ac"; theta.a, "cd" ] "bd"
+            + einsum [ theta.b, "ab"; theta.b, "ac" ] "bc")
+        in
+        ( (_mu_filtered_curr, _P_filtered_curr)
+        , { _mu_filtered = _mu_filtered_curr
+          ; _V_filtered = _V_filtered_curr
+          ; _P_filtered = _P_filtered_curr
+          }
+          :: km_fwd_accu ))
+  in
+  let _mu_smoothed_last, _V_smoothed_last =
+    let km_fwd_last = List.hd_exn km_fwd_list_rev in
+    km_fwd_last._mu_filtered, km_fwd_last._V_filtered
+  in
+  let _b_inv = theta.b |> Maths.inv_rectangle in
+  (* this list goes from T-1 to 0 *)
+  let u_sampled_inv = List.rev u_sampled in
+  (* both folded lists go from T-1 to 1 *)
+  let (_mu_smoothed_one, _V_smoothed_one), kl =
+    List.fold2_exn
+      (List.tl_exn km_fwd_list_rev)
+      (List.drop_last_exn u_sampled_inv)
+      ~init:((_mu_smoothed_last, _V_smoothed_last), Maths.f 0.)
+      ~f:(fun ((_mu_smoothed_next, _V_smoothed_next), kl_accu) km_fwd_curr u_sampled ->
+        (* Tensor.print (Maths.primal ((km_fwd_curr._P_filtered))); *)
+
+        (* Tensor.print (Maths.primal (Maths.cholesky (km_fwd_curr._P_filtered))); *)
+        (* let _ = Maths.cholesky km_fwd_curr._P_filtered in *)
+        let _C_curr =
+          Maths.(
+            einsum
+              [ inv_symm (km_fwd_curr._P_filtered + (f 1e-5 * eye_n)), "ab"
+              ; theta.a, "cb"
+              ; km_fwd_curr._V_filtered, "cd"
+              ]
+              "ad")
+        in
+        let _mu_smoothed_curr =
+          Maths.(
+            km_fwd_curr._mu_filtered
+            + ((_mu_smoothed_next - (km_fwd_curr._mu_filtered *@ theta.a)) *@ _C_curr))
+        in
+        let _V_smoothed_curr =
+          Maths.(
+            km_fwd_curr._V_filtered
+            + einsum
+                [ _C_curr, "ab"
+                ; _V_smoothed_next - km_fwd_curr._P_filtered, "ac"
+                ; _C_curr, "cd"
+                ]
+                "bd")
+        in
+        let _u_mu_smoothed_curr =
+          Maths.((_mu_smoothed_next - (_mu_smoothed_curr *@ theta.a)) *@ _b_inv)
+        in
+        let _u_cov_smoothed_curr =
+          Maths.(
+            transpose ~dim0:1 ~dim1:0 _b_inv
+            *@ (_V_smoothed_next
+                (* + (transpose ~dim0:1 ~dim1:0 theta.a *@ _V_smoothed_curr *@ theta.a)
+                (* TODO: ignore cross correlations *)
+                - (_V_smoothed_curr *@ theta.a)
+                - (transpose ~dim0:1 ~dim1:0 theta.a *@ _V_smoothed_curr) *)
+                )
+            *@ _b_inv)
+        in
+        let prior_term =
+          gaussian_llh
+            ~inv_std:(Tensor.ones [ m ] ~device:base.device ~kind:base.kind |> Maths.const)
+            u_sampled
+        in
+        (* Tensor.print (Maths.primal _u_cov_smoothed_curr); *)
+        let neg_entropy_term =
+          gaussian_llh_chol
+            ~mu:_u_mu_smoothed_curr
+            ~chol:(Maths.cholesky _u_cov_smoothed_curr)
+            u_sampled
+        in
+        ( (_mu_smoothed_curr, _V_smoothed_curr)
+        , Maths.(kl_accu + neg_entropy_term - prior_term) ))
+  in
+  (* kl on u_0 *)
+  (* let kl_first =
+    let u_sampled_zero = List.hd_exn u_sampled in
+    let _u_mu_smoothed_zero = Maths.(_mu_smoothed_one *@ _b_inv) in
+    let _u_cov_smoothed_zero =
+      Maths.(transpose ~dim0:1 ~dim1:0 _b_inv *@ _V_smoothed_one *@ _b_inv)
+    in
+    let prior_term =
+      gaussian_llh
+        ~inv_std:(Tensor.ones [ m ] ~device:base.device ~kind:base.kind |> Maths.const)
+        u_sampled_zero
+    in
+    let neg_entropy_term =
+      gaussian_llh_chol
+        ~mu:_u_mu_smoothed_zero
+        ~chol:(Maths.cholesky _u_cov_smoothed_zero)
+        u_sampled_zero
+    in
+    Maths.(neg_entropy_term - prior_term)
+  in *)
+  Maths.(kl) *)
+
+let neg_elbo_matheron ~data:(y : Maths.t list) (theta : P.M.t) =
   (* Matheron sampling *)
   let u_sampled =
     let p = P.map theta ~f:primal_detach in
@@ -325,7 +621,7 @@ let neg_elbo ~data:(y : Maths.t list) (theta : P.M.t) =
       ~f:(fun accu y y_pred ->
         Maths.(accu + gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded y))
   in
-  let kl_term = Maths.f 0. in
+  let kl_term = kl_u_post ~u_sampled ~y (theta : P.M.t) in
   let neg_elbo =
     Maths.(lik_term - kl_term)
     |> Maths.neg
@@ -398,7 +694,7 @@ module M = struct
       let mu_t = Maths.tangent y_pred |> Option.value_exn |> Maths.const in
       let ggn_part1 =
         Maths.(einsum [ mu_t, "kmo"; mu_t, "lmo" ] "kl" * obs_precision_p)
-      in 
+      in
       (* CHECKED this agrees with mine *)
       let ggn_part2 =
         Maths.(
@@ -464,7 +760,8 @@ module M = struct
           in
           let _v_curr = Maths.(y_true - (_mu_p_curr *@ theta.c)) in
           let _s_curr =
-            Maths.(einsum [ theta.c, "ab"; _cov_p_curr, "ac"; theta.c, "cd" ] "bd" + noise)
+            Maths.(
+              einsum [ theta.c, "ab"; _cov_p_curr, "ac"; theta.c, "cd" ] "bd" + noise)
           in
           let _s_inv =
             let _s_chol = Maths.cholesky _s_curr in
@@ -486,7 +783,7 @@ module M = struct
     Tensor.(f Float.(of_int bs / (2. * of_int o * of_int tmax)) * ggn_summed)
 
   let f_elbo ~update ~data:y ~init ~args:() (theta : P.M.t) =
-    let neg_elbo, y_pred = neg_elbo ~data:y theta in
+    let neg_elbo, y_pred = neg_elbo_matheron ~data:y theta in
     match update with
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
@@ -509,7 +806,7 @@ module M = struct
       in
       u init (Some (neg_mll, Some ggn))
 
-  let f = f_marginal
+  let f = f_elbo
 end
 
 (* --------------------------------
@@ -558,10 +855,10 @@ module Make (D : Do_with_T) = struct
             theta_curr.log_obs_var |> Prms.value |> Tensor.exp |> Tensor.to_float0_exn
           in
           let ground_truth_loss =
-            (* let ground_truth_elbo, _ = neg_elbo ~data:y true_theta in
-            Maths.primal ground_truth_elbo |> Tensor.mean |> Tensor.to_float0_exn *)
-            let ground_truth_mll = neg_mll ~data:y true_theta in
-            Maths.primal ground_truth_mll |> Tensor.mean |> Tensor.to_float0_exn
+            let ground_truth_elbo, _ = neg_elbo_matheron ~data:y true_theta in
+            Maths.primal ground_truth_elbo |> Tensor.mean |> Tensor.to_float0_exn
+            (* let ground_truth_mll = neg_mll ~data:y true_theta in
+            Maths.primal ground_truth_mll |> Tensor.mean |> Tensor.to_float0_exn *)
           in
           let ground_truth_std_o_loss =
             let theta_std_o =
@@ -572,12 +869,11 @@ module Make (D : Do_with_T) = struct
                 ; log_obs_var = true_theta.log_obs_var
                 }
             in
-            (* let ground_truth_std_o_elbo, _ = neg_elbo ~data:y theta_std_o in
-            Maths.primal ground_truth_std_o_elbo |> Tensor.mean |> Tensor.to_float0_exn *)
-            let ground_truth_std_o_mll= neg_mll ~data:y theta_std_o in
-            Maths.primal ground_truth_std_o_mll |> Tensor.mean |> Tensor.to_float0_exn
+            let ground_truth_std_o_elbo, _ = neg_elbo_matheron ~data:y theta_std_o in
+            Maths.primal ground_truth_std_o_elbo |> Tensor.mean |> Tensor.to_float0_exn
+            (* let ground_truth_std_o_mll= neg_mll ~data:y theta_std_o in
+            Maths.primal ground_truth_std_o_mll |> Tensor.mean |> Tensor.to_float0_exn *)
           in
-
           Owl.Mat.(
             save_txt
               ~append:true
@@ -613,7 +909,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config ~iter:_ =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.1
+      ; learning_rate = Some 0.001
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
