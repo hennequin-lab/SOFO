@@ -6,6 +6,7 @@
   lgs
   lgs_min
   fa
+  fa_marginal
   lgs_from_scratch
   lgs_elbo
   lgs_elbo_simplified

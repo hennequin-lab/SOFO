@@ -85,59 +85,6 @@ module SOFO (W : Wrapper.T) = struct
 
   (* initialise tangents, where each tangent is normalised. *)
   let init_tangents ~base ~rank_one ~n_tangents theta =
-    (* TODO: this is for shape of std_o=1 only! *)
-    (* let std_o_size = 1 in
-    let sample_rest x =
-      let zeros =
-        Tensor.zeros
-          (std_o_size :: Tensor.shape x)
-          ~device:(Tensor.device x)
-          ~kind:(Tensor.kind x)
-      in
-      let rest =
-        sample_rand_tensor
-          ~base
-          ~rank_one
-          ~shape:((n_tangents - std_o_size) :: Tensor.shape x)
-      in
-      Tensor.concat [ zeros; rest ] ~dim:0
-    in
-    let vs =
-      W.P.map theta ~f:(function
-        | Prms.Const x ->
-          Tensor.zeros
-            ~device:(Tensor.device x)
-            ~kind:(Tensor.kind x)
-            (n_tangents :: Tensor.shape x)
-        | Prms.Free x -> sample_rest x
-        | Prms.Bounded (x, _, _) ->
-          if Int.(List.hd_exn (Tensor.shape x) = std_o_size)
-          then (
-            (* M1: separate tangent for std_o *)
-            (* let id = Tensor.eye ~n:std_o_size ~options:(Tensor.kind x, Tensor.device x) in
-            let rest =
-              Tensor.zeros
-                ((n_tangents - std_o_size) :: [ std_o_size ])
-                ~device:(Tensor.device x)
-                ~kind:(Tensor.kind x)
-            in
-            Tensor.concat [ id; rest ] ~dim:0 *)
-            (* M2: single tangent for std_o and 0 everywhere else *)
-             let id =
-              Tensor.randn
-                ~device:(Tensor.device x)
-                ~kind:(Tensor.kind x)
-                [ 1; std_o_size ]
-            in
-            let rest =
-              Tensor.zeros
-                ((n_tangents - 1) :: [ std_o_size ])
-                ~device:(Tensor.device x)
-                ~kind:(Tensor.kind x)
-            in    
-            Tensor.concat [ id; rest ] ~dim:0)
-          else sample_rest x)
-    in *)
     let vs =
       W.P.map theta ~f:(function
         | Prms.Const x ->
@@ -150,27 +97,18 @@ module SOFO (W : Wrapper.T) = struct
         | Prms.Bounded (x, _, _) ->
           sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
     in
-    (* normalise each tangent *)
-    let normalize vs =
-      let normalizer =
-        W.P.fold vs ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
-          Tensor.(accu + Convenience.sum_except_dim0 (square v)))
-        |> Tensor.sqrt_
-        |> Tensor.reciprocal_
-      in
-      let normed_vs =
-        W.P.map vs ~f:(fun v ->
-          (* reshape normalizer from [n_tangents] to [n_tangents, 1, ...] with same shape as v. *)
-          let normalizer =
-            Tensor.view
-              normalizer
-              ~size:(List.mapi (Tensor.size v) ~f:(fun i si -> if i = 0 then si else 1))
-          in
-          Maths.Direct Tensor.(v * normalizer))
-      in
-      normed_vs
+    let vtv =
+      W.P.fold vs ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
+        let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
+        Tensor.(accu + einsum ~equation:"ij,kj->ik" ~path:None [ v; v ]))
     in
-    normalize vs
+    let u, s, _ = Tensor.svd ~some:true ~compute_uv:true vtv in
+    let normalizer = Tensor.(u / sqrt s |> transpose ~dim0:0 ~dim1:1) in
+    W.P.map vs ~f:(fun v ->
+      let s = Tensor.shape v in
+      let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
+      let v = Tensor.(matmul normalizer v) in
+      Maths.Direct (Tensor.reshape v ~shape:s))
 
   (* fold vs over sets of v_i s, multiply with associated weights. *)
   let weighted_vs_sum vs ~weights =
@@ -210,7 +148,7 @@ module SOFO (W : Wrapper.T) = struct
       Tensor.(theta - mul_scalar g (Scalar.f eta))
     | None -> theta
 
-  let step ~(config : ('a, 'b) config) ~state ~data ~args =
+  let step ?tangents ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     let beta_t =
       Option.map2 state.beta_t config.momentum ~f:(fun b beta -> Float.(b * beta))
@@ -218,11 +156,14 @@ module SOFO (W : Wrapper.T) = struct
     (* initialise tangents *)
     let theta = params state in
     let vs =
-      init_tangents
-        ~base:config.base
-        ~rank_one:config.rank_one
-        ~n_tangents:config.n_tangents
-        theta
+      match tangents with
+      | Some vs -> vs
+      | None ->
+        init_tangents
+          ~base:config.base
+          ~rank_one:config.rank_one
+          ~n_tangents:config.n_tangents
+          theta
     in
     let theta_dual = W.P.make_dual theta ~t:vs in
     (* define update function *)
@@ -452,7 +393,7 @@ module FGD (W : Wrapper.T) = struct
       Tensor.(theta - mul_scalar g (Scalar.f eta))
     | None -> theta
 
-  let step ~(config : ('a, 'b) config) ~state ~data ~args =
+  let step ?tangents:_ ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     let beta_t =
       Option.map2 state.beta_t config.momentum ~f:(fun b beta -> Float.(b * beta))
@@ -534,7 +475,7 @@ module SGD (W : Wrapper.T) = struct
       Tensor.(theta - mul_scalar g (Scalar.f eta))
     | None -> theta
 
-  let step ~(config : ('a, 'b) config) ~state ~data ~args =
+  let step ?tangents:_ ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     let beta_t =
       Option.map2 state.beta_t config.momentum ~f:(fun b beta -> Float.(b * beta))
@@ -626,7 +567,7 @@ module Adam (W : Wrapper.T) = struct
     in
     { theta; m = Some m; v = Some v; beta1_t; beta2_t }
 
-  let step ~(config : ('a, 'b) config) ~state ~data ~args =
+  let step ?tangents:_ ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     (* initialise tangents *)
     let theta = params state in
@@ -647,7 +588,11 @@ module Adam (W : Wrapper.T) = struct
     let loss, true_g =
       let loss = Tensor.mean (Maths.primal final_losses) in
       Tensor.backward loss;
-      Tensor.to_float0_exn loss, W.P.map (W.P.primal theta_dual) ~f:Tensor.grad
+      ( Tensor.to_float0_exn loss
+      , W.P.map2 theta (W.P.primal theta_dual) ~f:(fun tagged p ->
+          match tagged with
+          | Prms.Const _ -> Tensor.(f 0.)
+          | _ -> Tensor.grad p) )
     in
     let new_state : state = update_theta_m_v ~config ~state true_g in
     loss, new_state

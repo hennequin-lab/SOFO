@@ -21,7 +21,9 @@ let base =
 
 let m = 10
 let o = 40
-let bs = 32
+let bs = 128
+let _K = 128
+let n_samples = 1
 let id_m = Maths.(const (Tensor.of_bigarray ~device:base.device (Owl.Mat.eye m)))
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
@@ -43,16 +45,25 @@ end
 module P = PP.Make (Prms.P)
 
 let true_theta =
-  let sigma_o_prms = Maths.(log (f 0.01)) in
+  let sigma_o_prms = Maths.(log (f 0.1) * ones_o) in
   let c = make_c ~sigma:1. (m, o) in
   PP.{ sigma_o_prms; c }
+
+let _ =
+  true_theta.c
+  |> Maths.primal
+  |> Tensor.to_bigarray ~kind:base.ba_kind
+  |> (fun x -> Owl.Mat.(reshape (transpose x *@ x) [| -1; 1 |]))
+  (*   |> (fun x -> Owl.(Mat.reshape (Linalg.D.svdvals x) [| -1; 1 |])) *)
+  |> Owl.Mat.save_txt ~out:(in_dir "true_c")
 
 let theta =
   let c = Prms.free (Maths.primal (make_c ~sigma:1. (m, o))) in
   let sigma_o_prms =
     Prms.create
       ~below:(Tensor.f 5.)
-      Tensor.(f 0. + zeros ~device:base.device ~kind:base.kind [ 1 ])
+      Tensor.(f Float.(log 0.1) + zeros ~device:base.device ~kind:base.kind [ 1 ])
+    |> Prms.pin
   in
   PP.{ c; sigma_o_prms }
 
@@ -83,6 +94,26 @@ let u_opt ~c ~inv_sigma_o y =
   let b = Maths.einsum [ c, "ij"; r, "j"; y, "mj" ] "mi" in
   solver a b
 
+let _ =
+  let u, y = sample_data () in
+  let inv_sigma_o = Maths.(exp (neg true_theta.sigma_o_prms) * ones_o) in
+  let u_recov = u_opt ~c:true_theta.c ~inv_sigma_o y in
+  let u =
+    u
+    |> Maths.primal
+    |> Tensor.to_bigarray ~kind:base.ba_kind
+    |> fun x -> Owl.Mat.reshape x [| -1; 1 |]
+  in
+  let u_recov =
+    u_recov
+    |> Maths.primal
+    |> Tensor.to_bigarray ~kind:base.ba_kind
+    |> fun x -> Owl.Mat.reshape x [| -1; 1 |]
+  in
+  Owl.Mat.(save_txt ~out:(in_dir "u") (u @|| u_recov))
+
+(* log p = -1/2 * (error_term + d * log 2pi + log | Sigma|) *)
+
 let gaussian_llh_chol ?mu ~precision_chol:ell x =
   let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
   let error =
@@ -92,10 +123,10 @@ let gaussian_llh_chol ?mu ~precision_chol:ell x =
   in
   let error_term = Maths.einsum [ error, "ma"; ell, "ai"; ell, "bi"; error, "mb" ] "m" in
   let cov_term =
-    Maths.(sum (log (sqr (diagonal ~offset:0 ell))) |> reshape ~shape:[ 1 ])
+    Maths.(neg (sum (log (sqr (diagonal ~offset:0 ell)))) |> reshape ~shape:[ 1 ])
   in
   let const_term = Float.(log (2. * pi) * of_int d) in
-  Maths.(0.5 $* (const_term $+ error_term - cov_term)) |> Maths.neg
+  Maths.(-0.5 $* (const_term $+ error_term + cov_term))
 
 let gaussian_llh ?mu ~inv_std x =
   let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
@@ -109,7 +140,7 @@ let gaussian_llh ?mu ~inv_std x =
   in
   let cov_term = Maths.(neg (sum (log (sqr inv_std))) |> reshape ~shape:[ 1 ]) in
   let const_term = Float.(log (2. * pi) * of_int d) in
-  Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
+  Maths.(-0.5 $* (const_term $+ error_term + cov_term))
 
 let elbo ~data:y (theta : P.M.t) =
   let sigma_o = Maths.(exp theta.sigma_o_prms) in
@@ -119,28 +150,32 @@ let elbo ~data:y (theta : P.M.t) =
   let post_prec_chol =
     posterior_precision_chol ~c:theta.c ~inv_sigma_o:inv_sigma_o_expanded
   in
-  let u_diff =
-    let e = Maths.(const (Tensor.randn_like (primal u_opt))) in
-    let ell = post_prec_chol in
-    let ell_t = Maths.transpose ~dim0:0 ~dim1:1 ell in
-    let _x = Maths.linsolve_triangular ~left:false ~upper:true ell_t e in
-    Maths.linsolve_triangular ~left:false ~upper:false ell _x
+  let results =
+    List.init n_samples ~f:(fun _ ->
+      let u_diff =
+        let e = Maths.(const (Tensor.randn_like (primal u_opt))) in
+        Maths.linsolve_triangular ~left:false ~upper:false post_prec_chol e
+      in
+      let u_sampled = Maths.(u_opt + u_diff) in
+      (* m x o *)
+      let y_pred = Maths.(u_sampled *@ theta.c) in
+      let lik_term = gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded y in
+      let kl_term =
+        let prior_term = gaussian_llh ~inv_std:ones_u u_sampled in
+        let q_term = gaussian_llh_chol ~precision_chol:post_prec_chol u_diff in
+        Maths.(const (primal (q_term - prior_term)))
+      in
+      let neg_elbo =
+        Maths.(lik_term - kl_term) |> Maths.neg |> fun x -> Maths.(x / f Float.(of_int o))
+      in
+      neg_elbo, y_pred)
   in
-  let u_sampled = Maths.(const (primal (u_opt + u_diff))) in
-  (* m x o *)
-  let y_pred = Maths.(u_sampled *@ theta.c) in
-  let lik_term = gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded y in
-  let kl_term =
-    Maths.f 0.
-    (*
-       let prior_term = gaussian_llh ~inv_std:ones_u u_sampled in
-    let q_term = gaussian_llh_chol ~precision_chol:post_prec_chol u_diff in
-    Maths.(const (primal (q_term - prior_term))) *)
-  in
+  let y_preds = List.map ~f:snd results in
   let neg_elbo =
-    Maths.(lik_term - kl_term) |> Maths.neg |> fun x -> Maths.(x / f Float.(of_int o))
+    List.fold results ~init:(Maths.f 0.) ~f:(fun accu (x, _) -> Maths.(accu + x))
+    |> fun x -> Maths.(x / f Float.(of_int n_samples))
   in
-  neg_elbo, y_pred, sigma_o
+  neg_elbo, y_preds, sigma_o
 
 module M = struct
   module P = P
@@ -153,23 +188,47 @@ module M = struct
     match update with
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
+      let sigma2 = Maths.sqr sigma_o in
+      let sigma2_p = Maths.(const (primal sigma2)) in
       let preconditioner =
-        let sigma2 = Maths.sqr sigma_o in
-        let sigma2_p = Maths.(const (primal sigma2)) in
-        let sigma2_t = Maths.tangent sigma2 |> Option.value_exn |> Maths.const in
-        let mu_t = Maths.tangent y_pred |> Option.value_exn |> Maths.const in
-        let ggn_part1 = Maths.(einsum [ mu_t, "kmo"; mu_t, "lmo" ] "kl" / sigma2_p) in
-        let ggn_part2 =
+        List.fold y_pred ~init:(Tensor.f 0.) ~f:(fun accu y_pred ->
+          (*         let sigma2_t = Maths.tangent sigma2 |> Option.value_exn |> Maths.const in *)
+          let mu_t = Maths.tangent y_pred |> Option.value_exn |> Maths.const in
+          let ggn_part1 = Maths.(einsum [ mu_t, "kmo"; mu_t, "lmo" ] "kl" / sigma2_p) in
+          let ggn_part2 = Maths.f 0. in
+          (*let ggn_part2 =
           Maths.(
             einsum
               [ f Float.(0.5 * of_int o * of_int bs) * sigma2_t / sqr sigma2_p, "ky"
               ; sigma2_t, "ly"
               ]
               "kl")
-        in
-        Maths.(primal ((ggn_part1 + ggn_part2) / f Float.(of_int o)))
+        in*)
+          Maths.(primal ((ggn_part1 + ggn_part2) / f Float.(of_int o)))
+          |> Tensor.( + ) accu)
+        |> fun x -> Tensor.(x / f Float.(of_int n_samples))
       in
+      let _, s, _ = Tensor.svd ~some:true ~compute_uv:true preconditioner in
+      let s =
+        Tensor.to_bigarray ~kind:base.ba_kind s |> fun x -> Owl.Mat.reshape x [| -1; 1 |]
+      in
+      Owl.Mat.save_txt ~out:(in_dir "svals") s;
       u init (Some (neg_elbo, Some preconditioner))
+
+  let update_good_tangents ~data:y ~tangents (theta : P.tagged) =
+    let theta = P.make_dual theta ~t:tangents in
+    let neg_elbo, _, _ = elbo ~data:y theta in
+    let neg_elbo_t = Maths.tangent neg_elbo |> Option.value_exn in
+    let u, _, _ = Tensor.svd ~some:true ~compute_uv:true neg_elbo_t in
+    (*     let u = Tensor.transpose ~dim0:0 ~dim1:1 u in *)
+    let u = Tensor.slice ~dim:1 ~start:(Some 0) ~end_:(Some Int.(_K / 2)) ~step:1 u in
+    P.map tangents ~f:(fun v ->
+      let v = Maths.tangent' v in
+      let s = Tensor.shape v |> List.tl_exn in
+      let v = Tensor.reshape v ~shape:[ _K; -1 ] in
+      let v = Tensor.einsum ~path:None ~equation:"ki,kj->ji" [ v; u ] in
+      let v = Tensor.reshape v ~shape:((_K / 2) :: s) in
+      Maths.Direct v)
 end
 
 (* --------------------------------
@@ -191,12 +250,58 @@ end
 module Make (D : Do_with_T) = struct
   open D
 
+  let init_tangents ~n_tangents theta =
+    O.W.P.map theta ~f:(function
+      | Prms.Const x ->
+        Tensor.zeros
+          ~device:(Tensor.device x)
+          ~kind:(Tensor.kind x)
+          (n_tangents :: Tensor.shape x)
+      | Prms.Free x ->
+        Tensor.randn
+          ~device:(Tensor.device x)
+          ~kind:(Tensor.kind x)
+          (n_tangents :: Tensor.shape x)
+      | Prms.Bounded (x, _, _) ->
+        Tensor.randn
+          ~device:(Tensor.device x)
+          ~kind:(Tensor.kind x)
+          (n_tangents :: Tensor.shape x))
+    |> O.W.P.map ~f:(fun x -> Maths.Direct x)
+
+  (* orthogonalise tangents *)
+  let orthonormalise tangents =
+    let vtv =
+      O.W.P.fold tangents ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
+        let v = Maths.tangent' v in
+        let n_tangents = List.hd_exn Tensor.(shape v) in
+        let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
+        Tensor.(accu + einsum ~equation:"ij,kj->ik" ~path:None [ v; v ]))
+    in
+    let u, s, _ = Tensor.svd ~some:true ~compute_uv:true vtv in
+    let normalizer = Tensor.(u / sqrt s |> transpose ~dim0:0 ~dim1:1) in
+    O.W.P.map tangents ~f:(fun v ->
+      let v = Maths.tangent' v in
+      let n_tangents = List.hd_exn Tensor.(shape v) in
+      let s = Tensor.shape v in
+      let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
+      let v = Tensor.(matmul normalizer v) in
+      Maths.Direct (Tensor.reshape v ~shape:s))
+
+  let complete_tangents good_tangents =
+    O.W.P.map good_tangents ~f:(fun v ->
+      let v = Maths.tangent' v in
+      let v = Tensor.(concat [ v; randn_like v ] ~dim:0) in
+      Maths.Direct v)
+    |> orthonormalise
+
   let optimise max_iter =
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
-    let rec loop ~iter ~state running_avg =
+    let rec loop ~iter ~state ~good_tangents running_avg =
       Stdlib.Gc.major ();
       let _, y = sample_data () in
-      let loss, new_state = O.step ~config:(config ~iter) ~state ~data:y ~args:() in
+      let tangents = complete_tangents good_tangents in
+      let loss, new_state = O.step ~tangents ~config:(config ~iter) ~state ~data:y () in
       let running_avg =
         let loss_avg =
           match running_avg with
@@ -206,16 +311,9 @@ module Make (D : Do_with_T) = struct
         (* save params *)
         if iter % 10 = 0
         then (
-          let theta = O.params new_state |> O.W.P.value |> O.W.P.const in
           let ground_truth_elbo, _, _ = elbo ~data:y true_theta in
           let ground_truth_elbo =
             Maths.primal ground_truth_elbo |> Tensor.mean |> Tensor.to_float0_exn
-          in
-          let sigma2_o =
-            Maths.exp theta.sigma_o_prms
-            |> Maths.sum
-            |> Maths.primal
-            |> Tensor.to_float0_exn
           in
           (* avg error *)
           Convenience.print [%message (iter : int) (loss_avg : float)];
@@ -224,12 +322,23 @@ module Make (D : Do_with_T) = struct
             save_txt
               ~append:true
               ~out:(in_dir name)
-              (of_array [| Float.of_int t; loss_avg; ground_truth_elbo; sigma2_o |] 1 4)));
+              (of_array [| Float.of_int t; loss_avg; ground_truth_elbo |] 1 3));
+          O.params new_state
+          |> P.value
+          |> (fun x -> x.PP.c)
+          |> Tensor.to_bigarray ~kind:base.ba_kind
+          |> (fun x -> Owl.Mat.(reshape (transpose x *@ x) [| -1; 1 |]))
+          (*           |> (fun x -> Owl.(Mat.reshape (Linalg.D.svdvals x) [| -1; 1 |])) *)
+          |> Owl.Mat.save_txt ~out:(in_dir "c"));
         []
       in
-      if iter < max_iter then loop ~iter:(iter + 1) ~state:new_state (loss :: running_avg)
+      if iter < max_iter
+      then (
+        let good_tangents = M.update_good_tangents ~data:y ~tangents (O.params state) in
+        loop ~iter:(iter + 1) ~state:new_state ~good_tangents (loss :: running_avg))
     in
-    loop ~iter:0 ~state:init []
+    let good_tangents = init_tangents ~n_tangents:(_K / 2) theta in
+    loop ~iter:0 ~state:init ~good_tangents []
 end
 
 (* --------------------------------
@@ -241,14 +350,14 @@ module Do_with_SOFO : Do_with_T = struct
 
   let name = "sofo"
 
-  let config ~iter:_ =
+  let config ~iter:k =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.2)
-      ; n_tangents = 256
+      ; learning_rate = Some 0.2
+      ; n_tangents = _K
       ; sqrt = false
-      ; rank_one = true
-      ; damping = Some 0.0001
+      ; rank_one = false
+      ; damping = None
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None
@@ -267,7 +376,7 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (M)
 
   let config ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.006 }
 
   let init = O.init theta
 end
