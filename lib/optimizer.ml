@@ -69,19 +69,12 @@ module SOFO (W : Wrapper.T) = struct
     { theta : W.P.tagged
     ; g_avg : Tensor.t W.P.p option
     ; beta_t : float option
-    ; damping : float option
-    ; prev_losses : float list
     }
 
   let params state = state.theta
 
   let init ~(config : ('a, 'b) config) theta =
-    { theta
-    ; g_avg = None
-    ; beta_t = Option.map config.momentum ~f:(fun _ -> 1.)
-    ; damping = config.damping
-    ; prev_losses = []
-    }
+    { theta; g_avg = None; beta_t = Option.map config.momentum ~f:(fun _ -> 1.) }
 
   (* initialise tangents, where each tangent is normalised. *)
   let init_tangents ~base ~rank_one ~n_tangents theta =
@@ -190,133 +183,16 @@ module SOFO (W : Wrapper.T) = struct
       Option.map config.learning_rate ~f:(fun eta ->
         Option.value_map beta_t ~default:eta ~f:(fun b -> Float.(eta / (1. - b))))
     in
-    let updated_damping =
-      if config.lm
-      then (
-        let natural_g_tmp =
-          natural_g ?damping:state.damping ~sqrt:config.sqrt ~vs ~ggn:final_ggn vtg
-        in
-        (* levenberg-marquardt *)
-        let lm =
-          (* use natural_g_tmp for a forward pass *)
-          let theta_tmp = update_theta ?learning_rate ~theta natural_g_tmp in
-          (* loss after updating *)
-          let vs_tmp =
-            init_tangents
-              ~base:config.base
-              ~rank_one:config.rank_one
-              ~n_tangents:config.n_tangents
-              theta_tmp
-          in
-          let theta_dual_tmp = W.P.make_dual theta_tmp ~t:vs_tmp in
-          (* compute the losses *)
-          let final_losses_tmp, loss_tangents_tmp =
-            W.f ~update ~data ~init ~args theta_dual_tmp
-          in
-          let vtg_tmp =
-            Tensor.(
-              mean_dim
-                loss_tangents_tmp
-                ~dtype:(type_ loss_tangents_tmp)
-                ~dim:(Some [ 1 ])
-                ~keepdim:true)
-          in
-          let num =
-            let loss_tmp =
-              final_losses_tmp |> Maths.primal |> Tensor.mean |> Tensor.to_float0_exn
-            in
-            Float.(loss_tmp - loss)
-          in
-          let denom =
-            let tmp1 =
-              let lr = Option.value_map learning_rate ~default:0. ~f:(fun x -> x) in
-              Float.(lr * (-1. + (lr / 2.)))
-            in
-            let tmp2 =
-              let vanilla_g_tmp =
-                let num_params = Float.(of_int (W.P.T.numel (W.P.value theta_tmp))) in
-                let weights =
-                  Tensor.(
-                    div_scalar
-                      (transpose ~dim0:1 ~dim1:0 vtg_tmp)
-                      Scalar.(f Float.(of_int config.n_tangents / num_params)))
-                in
-                weighted_vs_sum vs_tmp ~weights
-              in
-              W.P.fold2 natural_g_tmp vanilla_g_tmp ~init:None ~f:(fun accu (x, y, _) ->
-                let (z : Tensor.t) = Tensor.(sum (x * y)) in
-                match accu with
-                | None -> Some z
-                | Some a -> Some Tensor.(a + z))
-              |> Option.value_exn
-              |> Tensor.to_float0_exn
-            in
-            Float.(tmp1 * tmp2)
-          in
-          Float.(num / denom)
-        in
-        let lm_damping =
-          if Float.(lm > 1.)
-          then Option.map state.damping ~f:(fun x -> Float.(x * 2. / 3.))
-          else if Float.(lm < 0.)
-          then Option.map state.damping ~f:(fun x -> Float.(x * 1.5))
-          else state.damping
-        in
-        Convenience.print [%message (lm : float) (Option.value_exn lm_damping : float)];
-        lm_damping)
-      else state.damping
-    in
     (* compute natural gradient and update theta *)
     let natural_g =
-      natural_g ?damping:updated_damping ~sqrt:config.sqrt ~vs ~ggn:final_ggn vtg
+      natural_g ?damping:config.damping ~sqrt:config.sqrt ~vs ~ggn:final_ggn vtg
     in
     let natural_g_avg =
       let module M = Momentum (W.P) in
       M.apply ?momentum:config.momentum ~avg:state.g_avg natural_g
     in
     let new_theta = update_theta ?learning_rate ~theta natural_g_avg in
-    let prev_losses =
-      if List.length state.prev_losses < 100
-      then loss :: state.prev_losses
-      else loss :: List.drop_last_exn state.prev_losses
-    in
-    (* perturb with noise if stuck in local minima *)
-    let perturbed =
-      match config.perturb_thresh with
-      | None -> false
-      | Some thresh ->
-        if List.length prev_losses = 100
-        then (
-          let recent =
-            List.fold ~init:0. (List.take prev_losses 50) ~f:(fun acc x -> x +. acc)
-          in
-          let old =
-            List.fold
-              ~init:0.
-              (List.take (List.rev prev_losses) 50)
-              ~f:(fun acc x -> x +. acc)
-          in
-          let diff = Float.(abs ((old - recent) / old)) in
-          Float.(diff < thresh))
-        else false
-    in
-    let new_theta =
-      if perturbed
-      then (
-        let _ = Convenience.print [%message "perturbed"] in
-        let open W.P.Let_syntax in
-        let+ new_theta = new_theta in
-        Tensor.(new_theta + mul_scalar (rand_like new_theta) (Scalar.f 0.01)))
-      else new_theta
-    in
-    let prev_losses = if perturbed then [] else prev_losses in
-    ( loss
-    , { theta = new_theta
-      ; g_avg = Some natural_g_avg
-      ; beta_t
-      ; damping = updated_damping
-      ; prev_losses
-      } )
+    loss, { theta = new_theta; g_avg = Some natural_g_avg; beta_t }
 end
 
 (* forward gradient descent;: g = V V^T g where V^Tg is obtained with forward AD (Kozak 2021) *)
