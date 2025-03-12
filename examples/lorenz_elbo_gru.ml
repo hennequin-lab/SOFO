@@ -239,7 +239,7 @@ module GRU = struct
       let precision = _std_o |> sqr_inv in
       let hess_y = _std_o_vec |> sqr_inv |> Maths.primal in
       let hess_sigma_o =
-        Tensor.(f Float.(of_int m / 2.) * square (square (Maths.primal _std_o)))
+        Tensor.(f Float.(of_int m * of_int o/ 2.) * square (square (Maths.primal _std_o)))
       in
       let _std_o_extended =
         _std_o_vec |> Maths.primal |> Tensor.unsqueeze ~dim:0 |> Tensor.unsqueeze ~dim:0
@@ -264,7 +264,7 @@ module GRU = struct
         Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
       in
       let final =
-        Tensor.((ggn_rollout / f (Float.of_int tmax)) + (f std_o_weight * ggn_sigma))
+        Tensor.((ggn_rollout / f (Float.of_int tmax)) + (ggn_sigma))
       in
       save_svals final;
       final
