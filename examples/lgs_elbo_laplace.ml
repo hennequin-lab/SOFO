@@ -14,11 +14,11 @@ let _ =
    -- Control Problem / Data Generation ---
    ----------------------------------------- *)
 module Dims = struct
-  let a = 24
-  let b = 10
+  let n = 24
+  let m = 10
   let o = 28
   let tmax = 10
-  let m = 256
+  let bs = 256
   let batch_const = true
   let kind = Torch_core.Kind.(T f64)
   let device = Torch.Device.cuda_if_available ()
@@ -26,12 +26,12 @@ end
 
 module Data = Lds_data.Make_LDS_Tensor (Dims)
 
-let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
+let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.bs; Dims.n ]
 
 (* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
 
 let f_list : Tensor.t Lds_data.f_params list =
-  let _Fx = Data.sample_fx () in
+  let _Fx = Data.sample_fx ~target_sa:0.8 in
   let _Fu = Data.sample_fu () in
   let c = Data.sample_c () in
   let b = Data.sample_b () in
@@ -49,8 +49,7 @@ let f_list : Tensor.t Lds_data.f_params list =
 let sample_data () =
   (* generate ground truth params and data *)
   let u_list =
-    let _std_u = Tensor.ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ] in
-    Data.sample_u_list ~std_u:_std_u
+    Data.sample_u_list
   in
   let x_list, o_list = Data.traj_rollout ~x0 ~f_list ~u_list in
   let o_list = List.map o_list ~f:(fun o -> Option.value_exn o) in
@@ -172,7 +171,7 @@ module LGS = struct
           (* [k x m x b x T] *)
           Tensor.concat vtgt_list ~dim:(-1) (* [k x m x T x b] *)
           |> Tensor.transpose ~dim0:2 ~dim1:3
-          |> Tensor.reshape ~shape:[ -1; Dims.m; Dims.tmax * Dims.b ]
+          |> Tensor.reshape ~shape:[ -1; Dims.bs; Dims.tmax * Dims.m ]
         in
         let tmp1 = Tensor.einsum ~equation:"kmc,cd->kmd" [ vtgt; cov2_inv ] ~path:None in
         Tensor.einsum ~equation:"kmd,jmd->kj" [ tmp1; vtgt ] ~path:None |> Tensor.neg
@@ -269,7 +268,7 @@ module LGS = struct
         |> Maths.unsqueeze ~dim:0)
       |> Maths.concat_list ~dim:0
       |> Maths.transpose ~dim0:1 ~dim1:2
-      |> Maths.reshape ~shape:[ Dims.b * Dims.tmax; Dims.b * Dims.tmax ]
+      |> Maths.reshape ~shape:[ Dims.m * Dims.tmax; Dims.m * Dims.tmax ]
     in
     corr
 
@@ -295,19 +294,19 @@ module LGS = struct
       let optimal_u = concat_time optimal_u_list in
       let _Phi_T_chol = Maths.cholesky _Phi_T in
       let xi =
-        Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.tmax * Dims.b ]
+        Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.bs; Dims.tmax * Dims.m ]
         |> Maths.const
       in
       let xi_time = Maths.einsum [ xi, "mt"; _Phi_T_chol, "tb" ] "mb" in
       let xi_time_space = Maths.einsum [ xi_time, "mb"; _Phi_M_chol, "bt" ] "mt" in
       let xi_reshaped =
-        Maths.reshape xi_time_space ~shape:[ Dims.m; Dims.tmax; Dims.b ]
+        Maths.reshape xi_time_space ~shape:[ Dims.bs; Dims.tmax; Dims.m ]
         |> Maths.transpose ~dim0:1 ~dim1:2
       in
       let meaned = Maths.(xi_reshaped + optimal_u) in
       List.init Dims.tmax ~f:(fun i ->
         Maths.slice ~dim:2 ~start:(Some i) ~end_:(Some (i + 1)) ~step:1 meaned
-        |> Maths.reshape ~shape:[ Dims.m; Dims.b ])
+        |> Maths.reshape ~shape:[ Dims.bs; Dims.m ])
     in
     optimal_u_list, u_list, _Phi_T, _Phi_M_chol
 
@@ -358,7 +357,7 @@ module LGS = struct
       let det2 =
         Maths.(Float.(2. * of_int Dims.tmax) $* sum (log (abs theta.gen._cov_u)))
       in
-      let _const = Tensor.of_float0 (Float.of_int Dims.b) |> Maths.const in
+      let _const = Tensor.of_float0 (Float.of_int Dims.m) |> Maths.const in
       let tr =
         let id =
           Tensor.eye ~n:Dims.tmax ~options:(Dims.kind, Dims.device) |> Maths.const
@@ -412,8 +411,8 @@ module LGS = struct
       Convenience.gaussian_tensor_2d_normed
         ~device:Dims.device
         ~kind:Dims.kind
-        ~a:Dims.a
-        ~b:Dims.a
+        ~a:Dims.n
+        ~b:Dims.n
         ~sigma:0.1
       |> Prms.free
     in
@@ -421,8 +420,8 @@ module LGS = struct
       Convenience.gaussian_tensor_2d_normed
         ~device:Dims.device
         ~kind:Dims.kind
-        ~a:Dims.b
-        ~b:Dims.a
+        ~a:Dims.m
+        ~b:Dims.n
         ~sigma:0.1
       |> Prms.free
     in
@@ -430,7 +429,7 @@ module LGS = struct
       Convenience.gaussian_tensor_2d_normed
         ~device:Dims.device
         ~kind:Dims.kind
-        ~a:Dims.a
+        ~a:Dims.n
         ~b:Dims.o
         ~sigma:0.1
       |> Prms.free
@@ -451,14 +450,14 @@ module LGS = struct
     in
     let _cov_u =
       Tensor.(
-        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.b ]) (Scalar.f 1.))
+        mul_scalar (ones ~device:Dims.device ~kind:Dims.kind [ Dims.m ]) (Scalar.f 1.))
       |> Prms.free
     in
     let one = Tensor.of_float0 1. |> Tensor.to_type ~type_:Dims.kind |> Prms.free in
     PP.
       { gen = { _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u }
       ; sm =
-          List.init Dims.b ~f:(fun _ ->
+          List.init Dims.m ~f:(fun _ ->
             SM.
               { _w_1 = one
               ; _nu_1 = one

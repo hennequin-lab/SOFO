@@ -4,9 +4,7 @@
   lqr_eg
   lorenz
   lgs
-  lgs_min
   fa
-  lgs_check
   lgs_from_scratch
   lgs_elbo
   lgs_elbo_laplace

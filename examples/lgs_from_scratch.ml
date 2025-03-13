@@ -313,39 +313,6 @@ let y_recov =
 let _ = save_time_series ~out:(in_dir "urecov") u_recov
 let _ = save_time_series ~out:(in_dir "yrecov") y_recov
 
-let neg_elbo_matheron ~data:(y : Maths.t list) (theta : P.M.t) =
-  (* Matheron sampling, DIFFERENTIATE through the samples *)
-  let a = a_reparam (theta.q, theta.d) in
-  let u_sampled =
-    (* let p = P.map theta ~f:primal_detach in *)
-    let p = theta in
-    let obs_precision = Maths.(precision_of_log_var p.log_obs_var * ones_o) in
-    let utilde, ytilde = sample_data p in
-    let delta_y = List.map2_exn y ytilde ~f:Maths.( - ) in
-    let delta_u = lqr ~a ~b:p.b ~c:p.c ~obs_precision delta_y in
-    List.map2_exn utilde delta_u ~f:(fun u du ->
-      (* Maths.(primal_detach (u + du)) *)
-      Maths.(u + du))
-  in
-  let y_pred = rollout ~a ~b:theta.b ~c:theta.c u_sampled in
-  let lik_term =
-    let inv_sigma_o_expanded =
-      Maths.(sqrt_precision_of_log_var theta.log_obs_var * ones_o)
-    in
-    List.fold2_exn
-      y
-      y_pred
-      ~init:Maths.(f 0.)
-      ~f:(fun accu y y_pred ->
-        Maths.(accu + gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded y))
-  in
-  let kl_term = Maths.f 0. in
-  let neg_elbo =
-    Maths.(lik_term - kl_term)
-    |> Maths.neg
-    |> fun x -> Maths.(x / f Float.(of_int o * of_int tmax))
-  in
-  neg_elbo, y_pred
 
 let sample_and_kl ~a ~b ~c ~obs_precision ~scaling_factor ustars ys =
   let open Maths in
