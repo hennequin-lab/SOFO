@@ -7,8 +7,8 @@
   fa
   lgs_from_scratch
   lgs_elbo
-  lgs_elbo_laplace
   lorenz_elbo_gru
+  lorenz_elbo_bottleneck
   arm_ilqr
   vae
   ae)

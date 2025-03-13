@@ -24,9 +24,12 @@ let n = 20
 
 (* control dim *)
 let m = 5
+
+(* bottleneck size *)
+let p = 40
 let o = 3
 let bs = 64
-let num_epochs_to_run = 200
+let num_epochs_to_run = 70
 let tmax = 33
 let train_data = Arr.load_npy (in_dir "lorenz_train")
 
@@ -50,9 +53,10 @@ let sample_data () =
 
 let x0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ]
 let eye_m = Maths.(const (Tensor.eye ~n:m ~options:(base.kind, base.device)))
-let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
 let ones_tmax = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ tmax ]))
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
+let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
+
 let sample = false
 
 (* -----------------------------------------
@@ -70,6 +74,40 @@ let tmp_einsum a b =
   then Maths.einsum [ a, "ma"; b, "ab" ] "mb"
   else Maths.einsum [ a, "ma"; b, "mab" ] "mb"
 
+let gaussian_llh ?mu ~inv_std x =
+  let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
+  let error_term =
+    let error =
+      match mu with
+      | None -> Maths.(einsum [ x, "ma"; inv_std, "a" ] "ma")
+      | Some mu -> Maths.(einsum [ x - mu, "ma"; inv_std, "a" ] "ma")
+    in
+    Maths.einsum [ error, "ma"; error, "ma" ] "m"
+  in
+  let cov_term = Maths.(neg (sum (log (sqr inv_std))) |> reshape ~shape:[ 1 ]) in
+  let const_term = Float.(log (2. * pi) * of_int d) in
+  Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
+
+let gaussian_llh_chol ?mu ~chol:ell x =
+  let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
+  let error =
+    match mu with
+    | None -> x
+    | Some mu -> Maths.(x - mu)
+  in
+  let error_term = Maths.einsum [ error, "ma"; ell, "ai"; ell, "bi"; error, "mb" ] "m" in
+  let cov_term =
+    Maths.(neg (sum (log (sqr (diagonal ~offset:0 ell)))) |> reshape ~shape:[ 1 ])
+  in
+  let const_term = Float.(log (2. * pi) * of_int d) in
+  Maths.(-0.5 $* (const_term $+ error_term + cov_term))
+
+(* solves for xA = y, A = ell (ell)^T *)
+let solver_chol ell y =
+  let ell_t = Maths.transpose ~dim0:0 ~dim1:1 ell in
+  let _x = Maths.linsolve_triangular ~left:false ~upper:true ell_t y in
+  Maths.linsolve_triangular ~left:false ~upper:false ell _x
+
 let precision_of_log_var log_var = Maths.(exp (neg log_var))
 let std_of_log_var log_var = Maths.(exp (f 0.5 * log_var))
 let sqrt_precision_of_log_var log_var = Maths.(exp (f (-0.5) * log_var))
@@ -85,17 +123,18 @@ let max_iter_ilqr = 200
 module GRU = struct
   module PP = struct
     type 'a p =
-      { _U_f : 'a (* generative model *)
-      ; _U_h : 'a
-      ; _b_f : 'a
-      ; _b_h : 'a
-      ; _W : 'a
+      { _W : 'a (* generative model *)
+      ; _A : 'a
+      ; _D : 'a
+      ; _B : 'a
+      ; _h : 'a
       ; _c : 'a (* likelihood: o = N(x _c + _b, std_o^2) *)
       ; _b : 'a (* all std params live in log space *)
       ; _log_obs_var : 'a (* log of the diagonal covariance of emission noise; *)
       ; _log_space_var : 'a
         (* recognition model; sqrt of the diagonal covariance of space factor *)
       ; _log_time_var : 'a (* sqrt of the diagonal covariance of the time factor *)
+      (* ; _scaling_factor: 'a *)
       }
     [@@deriving prms]
   end
@@ -105,54 +144,9 @@ module GRU = struct
   type args = unit
   type data = Tensor.t list (* observations *)
 
-  let sqr_inv x = Maths.(1. $/ sqr x)
-
   (* list of length T of [m x b] to matrix of [m x b x T]*)
   let concat_time u_list =
     List.map u_list ~f:(fun u -> Maths.unsqueeze ~dim:(-1) u) |> Maths.concat_list ~dim:2
-
-  let gaussian_llh ?mu ~inv_std x =
-    let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
-    let error_term =
-      let error =
-        match mu with
-        | None -> Maths.(einsum [ x, "ma"; inv_std, "a" ] "ma")
-        | Some mu -> Maths.(einsum [ x - mu, "ma"; inv_std, "a" ] "ma")
-      in
-      Maths.einsum [ error, "ma"; error, "ma" ] "m"
-    in
-    let cov_term = Maths.(neg (sum (log (sqr inv_std))) |> reshape ~shape:[ 1 ]) in
-    let const_term = Float.(log (2. * pi) * of_int d) in
-    Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
-
-  let q_of u =
-    let open Maths in
-    let ell = einsum [ u, "ik"; u, "jk" ] "ij" |> cholesky in
-    linsolve_triangular ~left:true ~upper:false ell u
-
-  let _Fx_reparam (q, d) =
-    let q = q_of q in
-    let open Maths in
-    let d = exp d in
-    let left_factor = sqrt d in
-    let right_factor = f 1. / sqrt (f 1. + d) in
-    einsum [ left_factor, "qi"; q, "ij"; right_factor, "qj" ] "ji"
-
-  let pre_sig ~x (theta : P.M.t) = Maths.((x *@ theta._U_f) + theta._b_f)
-  let pre_g ~f_t ~x (theta : P.M.t) = Maths.((f_t * x *@ theta._U_h) + theta._b_h)
-  let x_hat ~pre_g ~u (theta : P.M.t) = Maths.(soft_relu pre_g + (u *@ theta._W))
-
-  (* rollout x list under sampled u *)
-  let rollout_one_step ~x ~u (theta : P.M.t) =
-    let pre_sig = pre_sig ~x theta in
-    let f_t = Maths.sigmoid pre_sig in
-    let pre_g = pre_g ~f_t ~x theta in
-    let x_hat = x_hat ~pre_g ~u theta in
-    let new_x = Maths.(((f 1. - f_t) * x) + (f_t * x_hat)) in
-    new_x
-
-  (* (1 + e^-x)^{-2} (e^-x)*)
-  let d_sigmoid x = Maths.(sigmoid x * (f 1. - sigmoid x))
 
   (* 1/2 [1 + (x^2 + 4)^{-1/2} x]*)
   let d_soft_relu x =
@@ -160,36 +154,30 @@ module GRU = struct
     let tmp2 = Maths.(f 1. / sqrt tmp) in
     Maths.(((tmp2 * x) + f 1.) /$ 2.)
 
-  let _Fu ~x (theta : P.M.t) =
-    match x with
-    | Some x ->
-      let pre_sig = pre_sig ~x theta in
-      let f_t = Maths.sigmoid pre_sig in
-      Maths.einsum [ f_t, "ma"; theta._W, "ba" ] "mba"
-    | None -> Tensor.zeros ~device:base.device ~kind:base.kind [ bs; m; n ] |> Maths.const
+  let pre_soft_relu ~x ~u (theta : P.M.t) =
+    Maths.((x *@ theta._D) + (u *@ theta._B) + theta._h)
+
+  (* rollout x list under sampled u *)
+  let rollout_one_step ~x ~u (theta : P.M.t) =
+    let pre_soft_relu = pre_soft_relu ~x ~u theta in
+    Maths.((x *@ theta._A) + (soft_relu pre_soft_relu *@ theta._W))
+
+  let _Fu ~x ~u (theta : P.M.t) =
+    match x, u with
+    | Some x, Some u ->
+      let d_soft_relu = d_soft_relu (pre_soft_relu ~x ~u theta) in
+      Maths.einsum [ theta._B, "mp"; d_soft_relu, "bp"; theta._W, "pn" ] "bmn"
+    | _ -> Tensor.zeros ~device:base.device ~kind:base.kind [ bs; m; n ] |> Maths.const
 
   let _Fx ~x ~u (theta : P.M.t) =
     match x, u with
     | Some x, Some u ->
-      let pre_sig = pre_sig ~x theta in
-      let f_t = Maths.sigmoid pre_sig in
-      let pre_g = pre_g ~f_t ~x theta in
-      let x_hat = x_hat ~pre_g ~u theta in
-      let tmp_einsum2 a b = Maths.einsum [ a, "ab"; b, "mb" ] "mba" in
-      let term1 = Maths.diag_embed Maths.(f 1. - f_t) ~offset:0 ~dim1:(-2) ~dim2:(-1) in
-      let term2 =
-        let tmp = Maths.(d_sigmoid pre_sig * (x_hat - x)) in
-        tmp_einsum2 theta._U_f tmp
+      let d_soft_relu = d_soft_relu (pre_soft_relu ~x ~u theta) in
+      let tmp1 =
+        Maths.einsum [ theta._D, "mp"; d_soft_relu, "bp"; theta._W, "pn" ] "bmn"
       in
-      let term3 =
-        let tmp1 = Maths.diag_embed f_t ~offset:0 ~dim1:(-2) ~dim2:(-1) in
-        let tmp2 = tmp_einsum2 theta._U_f (d_sigmoid pre_sig) in
-        let tmp3 = tmp_einsum2 theta._U_h (d_soft_relu pre_g) in
-        let tmp4 = Maths.einsum [ tmp3, "mab"; Maths.(tmp2 + tmp1), "mbc" ] "mac" in
-        Maths.(unsqueeze ~dim:2 f_t * tmp4)
-      in
-      let final = Maths.(term1 + term2 + term3) in
-      final
+      let tmp2 = Maths.unsqueeze theta._A ~dim:0 in
+      Maths.(tmp1 + tmp2)
     | _ -> Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n; n; n ] |> Maths.const
 
   let rollout_y ~u_list (theta : P.M.t) =
@@ -303,7 +291,7 @@ module GRU = struct
                 Lds_data.Temp.
                   { _f = None
                   ; _Fx_prod = _Fx ~x:s.x ~u:s.u theta
-                  ; _Fu_prod = _Fu ~x:s.x theta
+                  ; _Fu_prod = _Fu ~x:s.x ~u:s.u theta
                   ; _cx = Some _cx
                   ; _cu = None
                   ; _Cxx = _Cxx_batched
@@ -334,7 +322,9 @@ module GRU = struct
         ~tau_init
         ~max_iter:max_iter_ilqr
     in
-    let optimal_u_list = List.map sol ~f:(fun s -> s.u |> Option.value_exn) in
+    List.map sol ~f:(fun s -> s.u |> Option.value_exn)
+
+  let kronecker_sample ~optimal_u_list (theta : P.M.t) =
     (* sample u from the kronecker formation *)
     let u_list =
       let optimal_u = concat_time optimal_u_list in
@@ -352,11 +342,12 @@ module GRU = struct
         Maths.slice ~dim:2 ~start:(Some i) ~end_:(Some (i + 1)) ~step:1 meaned
         |> Maths.reshape ~shape:[ bs; m ])
     in
-    optimal_u_list, u_list
+    u_list
 
   let elbo ~data ~sample (theta : P.M.t) =
     (* obtain u from lqr *)
-    let optimal_u_list, u_sampled = pred_u ~data theta in
+    let optimal_u_list = pred_u ~data theta in
+    let u_sampled = kronecker_sample ~optimal_u_list theta in
     (* calculate the likelihood term *)
     let y_pred = rollout_y ~u_list:u_sampled theta in
     let lik_term =
@@ -427,6 +418,81 @@ module GRU = struct
     in
     Maths.(neg (lik_term - kl) / f Float.(of_int tmax * of_int o)), y_pred
 
+  (* let sample_and_kl ~(theta : P.M.t) ~optimal_u_list o_list =
+    let open Maths in
+    let o_list = List.map ~f:Maths.const o_list in
+    let scaling_factor = reshape theta._scaling_factor ~shape:[ 1; -1 ] in
+    let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> Maths.const in
+    let _, kl, us =
+      List.fold2_exn
+        optimal_u_list
+        o_list
+        ~init:(z0, f 0., [])
+        ~f:(fun (z, kl, us) ustar o ->
+          Stdlib.Gc.major ();
+          let zpred = rollout_one_step ~x:z ~u:ustar theta in
+          let ypred = Maths.((zpred *@ theta._c) + theta._b) in
+          let delta = o - ypred in
+          (* approximate z_{t+1} = f(z_t, u_opt) + df/du u *)
+          let _b_prime = _Fu ~x:(Some z) ~u:(Some ustar) theta in
+          let btrinv =
+            einsum [ _b_prime, "ij"; theta._c, "jo"; exp theta._log_obs_var, "o" ] "io"
+          in
+          (* posterior precision of filtered covariance of u *)
+          let precision_chol =
+            (eye_m + einsum [ btrinv, "io"; theta._c, "jo"; _b_prime, "kj" ] "ik"
+             |> cholesky)
+            * scaling_factor
+          in
+          (* posterior mean of filtered u *)
+          let mu =
+            let tmp = einsum [ btrinv, "io"; delta, "mo" ] "mi" in
+            solver_chol precision_chol tmp
+          in
+          (* sample from posterior filtered covariance of u. *)
+          let u_diff_elbo =
+            Maths.linsolve_triangular
+              ~left:false
+              ~upper:false
+              precision_chol
+              (const (Tensor.randn ~device:base.device ~kind:base.kind [ bs; m ]))
+          in
+          let u_sample = mu + u_diff_elbo in
+          (* propagate that sample to update z *)
+          let z = zpred + (u_sample *@ _b_prime) in
+          (* update the KL divergence *)
+          let kl =
+            let prior_term =
+              let u_tmp = ustar + u_sample in
+              gaussian_llh ~inv_std:ones_u u_tmp
+            in
+            let q_term = gaussian_llh_chol ~chol:precision_chol u_diff_elbo in
+            kl + q_term - prior_term
+          in
+          z, kl, (ustar + u_sample) :: us)
+    in
+    kl, List.rev us
+
+  let elbo_filter ~data (theta : P.M.t) =
+    (* obtain u from lqr *)
+    let optimal_u_list = pred_u ~data theta in
+    let kl, u_sampled = sample_and_kl ~theta ~optimal_u_list data in
+    let y_pred = rollout_y ~u_list:u_sampled theta in
+    let lik_term =
+      let inv_sigma_o_expanded =
+        Maths.(sqrt_precision_of_log_var theta._log_obs_var * ones_o)
+      in
+      List.fold2_exn
+        data
+        y_pred
+        ~init:Maths.(f 0.)
+        ~f:(fun accu o y_pred ->
+          Stdlib.Gc.major ();
+          Maths.(
+            accu + gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded (Maths.const o)))
+    in
+    Maths.(neg (lik_term - kl) / f Float.(of_int tmax * of_int o)), y_pred *)
+
   let ggn ~y_pred (theta : P.M.t) =
     let obs_precision = precision_of_log_var theta._log_obs_var in
     let obs_precision_p = Maths.(const (primal obs_precision)) in
@@ -463,35 +529,43 @@ module GRU = struct
       u init (Some (neg_elbo, Some ggn))
 
   let init : P.tagged =
-    let _U_f =
-      Convenience.gaussian_tensor_2d_normed
-        ~device:base.device
-        ~kind:base.kind
-        ~a:n
-        ~b:n
-        ~sigma:1.
-      |> Prms.free
-    in
-    let _U_h =
-      Convenience.gaussian_tensor_2d_normed
-        ~device:base.device
-        ~kind:base.kind
-        ~a:n
-        ~b:n
-        ~sigma:1.
-      |> Prms.free
-    in
-    let _b_f = Tensor.zeros ~device:base.device [ 1; n ] |> Prms.free in
-    let _b_h = Tensor.zeros ~device:base.device [ 1; n ] |> Prms.free in
     let _W =
       Convenience.gaussian_tensor_2d_normed
         ~device:base.device
         ~kind:base.kind
-        ~a:m
+        ~a:p
         ~b:n
         ~sigma:1.
       |> Prms.free
     in
+    let _A =
+      Convenience.gaussian_tensor_2d_normed
+        ~device:base.device
+        ~kind:base.kind
+        ~a:n
+        ~b:n
+        ~sigma:1.
+      |> Prms.free
+    in
+    let _D =
+      Convenience.gaussian_tensor_2d_normed
+        ~device:base.device
+        ~kind:base.kind
+        ~a:n
+        ~b:p
+        ~sigma:1.
+      |> Prms.free
+    in
+    let _B =
+      Convenience.gaussian_tensor_2d_normed
+        ~device:base.device
+        ~kind:base.kind
+        ~a:m
+        ~b:p
+        ~sigma:1.
+      |> Prms.free
+    in
+    let _h = Tensor.zeros ~device:base.device [ 1; p ] |> Prms.free in
     let _c =
       Convenience.gaussian_tensor_2d_normed
         ~device:base.device
@@ -515,11 +589,14 @@ module GRU = struct
         log (f Float.(square 1.) * ones ~device:base.device ~kind:base.kind [ tmax ]))
       |> Prms.free
     in
-    { _U_f; _U_h; _b_f; _b_h; _W; _c; _b; _log_obs_var; _log_space_var; _log_time_var }
+    let _scaling_factor =
+      Prms.create ~above:(Tensor.f 0.1) (Tensor.ones [ 1 ] ~device:base.device)
+    in
+    { _W; _A; _D; _B; _h; _c; _b; _log_obs_var; _log_space_var; _log_time_var }
 
   let simulate ~theta ~data =
     (* infer the optimal u *)
-    let optimal_u_list, _ = pred_u ~data theta in
+    let optimal_u_list = pred_u ~data theta in
     let _, o_error =
       List.fold2_exn
         data
@@ -590,7 +667,7 @@ module Make (D : Do_with_T) = struct
           O.W.P.T.save
             (GRU.P.value (O.params new_state))
             ~kind:base.ba_kind
-            ~out:(in_dir name ^ ""));
+            ~out:(in_dir name ^ "_params"));
         []
       in
       if iter < max_iter
@@ -610,7 +687,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.03 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(0.1 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 60
       ; sqrt = false
       ; rank_one = false
@@ -642,7 +719,7 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (GRU)
 
   let config_f ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.0004 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 1e-3 }
 
   let name =
     sprintf
