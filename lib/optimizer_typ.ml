@@ -13,8 +13,7 @@ module type T = sig
 
   (* given current state and data, return loss and updated state *)
   val step
-    :  ?tangents:Forward_torch.Maths_typ.tangent W.P.p
-    -> config:('a, 'b) config
+    :  config:('a, 'b) config
     -> state:state
     -> data:W.data
     -> W.args

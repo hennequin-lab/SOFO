@@ -10,7 +10,7 @@ module O = Opt.S
 let primal_detach (x, _) = Maths.const Tensor.(detach x)
 
 let _ =
-  Random.init 1995;
+  Random.init 1992;
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
@@ -26,7 +26,7 @@ let base =
 let m = 5
 let n = 10
 let o = 20
-let tmax = 32
+let tmax = 10
 let bs = 64
 let _K = 128
 let eye_m = Maths.(const (Tensor.of_bigarray ~device:base.device Mat.(eye m)))
@@ -34,7 +34,20 @@ let ones_1 = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ 1 ]
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
 
-let make_a target_sa =
+let q_of u =
+  let open Maths in
+  let ell = einsum [ u, "ik"; u, "jk" ] "ij" |> cholesky in
+  linsolve_triangular ~left:true ~upper:false ell u
+
+let a_reparam (q, d) =
+  let q = q_of q in
+  let open Maths in
+  let d = exp d in
+  let left_factor = sqrt d in
+  let right_factor = f 1. / sqrt (f 1. + d) in
+  einsum [ left_factor, "qi"; q, "ij"; right_factor, "qj" ] "ji"
+
+let make_a_prms target_sa =
   let a =
     let w =
       let w = Mat.(gaussian n n) in
@@ -43,7 +56,18 @@ let make_a target_sa =
     in
     Linalg.expm Mat.((w - eye n) *$ 0.1)
   in
-  Tensor.of_bigarray ~device:base.device a |> Maths.const
+  let p = Linalg.discrete_lyapunov a Mat.(eye n) in
+  let u, s, _ = Linalg.svd p in
+  let z = Mat.(transpose u *@ a *@ u) in
+  let d12 = Mat.(sqrt (s - ones 1 n)) in
+  let s12 = Mat.(sqrt s) in
+  let q =
+    Mat.(transpose (reci d12) * z * s12)
+    |> Tensor.of_bigarray ~device:base.device
+    |> Maths.const
+  in
+  let d = Mat.(log (sqr d12)) |> Tensor.of_bigarray ~device:base.device |> Maths.const in
+  q, d
 
 let make_b () =
   Tensor.(
@@ -57,7 +81,8 @@ let make_c () =
 
 module Generative_P = struct
   type 'a p =
-    { a : 'a
+    { q : 'a
+    ; d : 'a
     ; b : 'a
     ; c : 'a
     ; log_obs_var : 'a
@@ -68,24 +93,16 @@ end
 module Generative = Generative_P.Make (Prms.P)
 
 let true_theta =
-  let a = make_a 0.8 in
+  let q, d = make_a_prms 0.8 in
   let b = make_b () in
   let c = make_c () in
-  let log_obs_var = Maths.(log (f Float.(square 0.1))) in
-  Generative_P.{ a; b; c; log_obs_var }
-
-module PP = struct
-  type ('a, 'g) p =
-    { generative : 'g
-    ; log_obs_var : 'a
-    }
-  [@@deriving prms]
-end
-
-module P = PP.Make (Prms.P) (Generative)
+  let log_obs_var = Maths.(log (f Float.(square 0.01))) in
+  Generative_P.{ q; d; b; c; log_obs_var }
 
 let theta =
-  let a = Prms.free (Maths.primal (make_a 0.8)) in
+  let q, d = make_a_prms 0.8 in
+  let q = Prms.free (Maths.primal q) in
+  let d = Prms.free (Maths.primal d) in
   let b = Prms.free (Maths.primal (make_b ())) in
   let c = Prms.free (Maths.primal (make_c ())) in
   let log_obs_var =
@@ -93,9 +110,10 @@ let theta =
     |> Maths.primal
     |> Prms.create ~above:(Tensor.f Float.(log (square 0.001)))
   in
-  let generative = Generative_P.{ a; b; c; log_obs_var } in
-  PP.{ generative; log_obs_var = generative.log_obs_var }
+  Generative_P.{ q; d; b; c; log_obs_var }
 
+let n_params = Generative.M.numel true_theta
+let _ = Convenience.print [%message (n_params : int)]
 let std_of_log_var log_var = Maths.(exp (f 0.5 * log_var))
 let precision_of_log_var log_var = Maths.(exp (neg log_var))
 let sqrt_precision_of_log_var log_var = Maths.(exp (f (-0.5) * log_var))
@@ -117,7 +135,7 @@ let lqr ~a ~b ~c ~obs_precision y =
   let _Czz = einsum [ c, "ij"; obs_precision, "j"; c, "kj" ] "ik" in
   let _cz_fun y = neg (einsum [ c, "ij"; obs_precision, "j"; y, "mj" ] "mi") in
   let yT = List.last_exn y in
-  let gains, _, _, _ =
+  let backward_info, _, _, _ =
     List.fold_right
       (List.sub y ~pos:0 ~len:_T)
       ~init:([], _cz_fun yT, _Czz, Int.(_T - 1))
@@ -139,22 +157,22 @@ let lqr ~a ~b ~c ~obs_precision y =
         (* important to symmetrize the value function otherwise
            it can drift and Cholesky will fail *)
         let _V = Maths.(f 0.5 * (_V + transpose ~dim0:0 ~dim1:1 _V)) in
-        (_k, _K) :: accu, _v, _V, Int.(t - 1))
+        (_k, _K, _Quu_chol) :: accu, _v, _V, Int.(t - 1))
   in
-  assert (List.length gains = _T);
-  let _k0, _ = List.hd_exn gains in
+  assert (List.length backward_info = _T);
+  let _k0, _, _ = List.hd_exn backward_info in
   let u0 = _k0 in
   let z1 = einsum [ b, "ij"; u0, "mi" ] "mj" in
   let us, _ =
     List.fold
-      (List.sub gains ~pos:1 ~len:Int.(_T - 1))
+      (List.sub backward_info ~pos:1 ~len:Int.(_T - 1))
       ~init:([ u0 ], z1)
-      ~f:(fun (accu, z) (_k, _K) ->
+      ~f:(fun (accu, z) (_k, _K, _) ->
         let u = _k + einsum [ _K, "ji"; z, "mj" ] "mi" in
         let z = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ b, "ij"; u, "mi" ] "mj" in
         u :: accu, z)
   in
-  List.rev us
+  List.rev us, backward_info
 
 let rollout ~a ~b ~c u =
   let open Maths in
@@ -199,49 +217,38 @@ let gaussian_llh_chol ?mu ~precision_chol:ell x =
   let const_term = Float.(log (2. * pi) * of_int d) in
   Maths.(-0.5 $* (const_term $+ error_term + cov_term))
 
-let sample_and_kl ~a ~b ~c ~obs_precision ustars ys =
+let sample_and_kl ~a ~b backward_info =
   let open Maths in
   let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> Maths.const in
-  let btrinv = einsum [ b, "ij"; c, "jo"; obs_precision, "o" ] "io" in
-  let precision_chol =
-    eye_m + einsum [ btrinv, "io"; c, "jo"; b, "kj" ] "ik" |> cholesky
-  in
-  fun () ->
-    let _, kl, us =
-      List.fold2_exn
-        ustars
-        ys
-        ~init:(z0, f 0., [])
-        ~f:(fun (z, kl, us) ustar y ->
-          Stdlib.Gc.major ();
-          let zpred = (z *@ a) + (ustar *@ b) in
-          let ypred = zpred *@ c in
-          let delta = y - ypred in
-          let mu =
-            solver_chol precision_chol (einsum [ btrinv, "io"; delta, "mo" ] "mi")
-          in
-          let u_diff =
-            (* if precision = L L^T
-               then cov = L^(-T) L^(-1)
-               so we get a sample as epsilon L^(-1), i.e solving epsilon = X L *)
-            Maths.linsolve_triangular
-              ~left:false
-              ~upper:false
-              precision_chol
-              (const (Tensor.randn_like (primal ustar)))
-          in
-          let u_sample = mu + u_diff in
-          (* propagate that sample to update z *)
-          let z = zpred + (u_sample *@ b) in
-          (* update the KL divergence *)
-          let kl =
-            let prior_term = gaussian_llh ~inv_std:ones_u (ustar + u_sample) in
-            let q_term = gaussian_llh_chol ~precision_chol u_diff in
-            kl + q_term - prior_term
-          in
-          z, kl, (ustar + u_sample) :: us)
+  let dummy_u = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; m ] in
+  let sample_and_kl ~z (_k, _K, _Quu_chol) =
+    let du =
+      Maths.linsolve_triangular
+        ~left:false
+        ~upper:false
+        _Quu_chol
+        (const (Tensor.randn_like dummy_u))
     in
-    kl, List.rev us
+    let u = du + _k + einsum [ _K, "ji"; z, "mj" ] "mi" in
+    let kl =
+      let prior_term = gaussian_llh ~inv_std:ones_u u in
+      let q_term = gaussian_llh_chol ~precision_chol:_Quu_chol du in
+      q_term - prior_term
+    in
+    u, kl
+  in
+  let u0, kl0 = sample_and_kl ~z:z0 (List.hd_exn backward_info) in
+  let z1 = einsum [ b, "ij"; u0, "mi" ] "mj" in
+  let us, kl, _ =
+    List.fold
+      (List.tl_exn backward_info)
+      ~init:([ u0 ], kl0, z1)
+      ~f:(fun (accu, kl, z) info ->
+        let u, dkl = sample_and_kl ~z info in
+        let z = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ b, "ij"; u, "mi" ] "mj" in
+        u :: accu, kl + dkl, z)
+  in
+  kl, List.rev us
 
 let sample_data (theta : Generative.M.t) =
   let sigma = std_of_log_var theta.log_obs_var in
@@ -249,8 +256,9 @@ let sample_data (theta : Generative.M.t) =
     List.init tmax ~f:(fun _ ->
       Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const)
   in
+  let a = a_reparam (theta.q, theta.d) in
   let y =
-    rollout ~a:theta.a ~b:theta.b ~c:theta.c u
+    rollout ~a ~b:theta.b ~c:theta.c u
     |> List.map ~f:(fun y ->
       Maths.(y + (sigma * const (Tensor.randn_like (Maths.primal y)))))
   in
@@ -273,13 +281,15 @@ let save_summary ~out (theta : Generative.M.t) =
       | 0 -> eye_m
       | _ -> Maths.(const (Tensor.zeros_like (primal eye_m))))
   in
-  let ys = rollout ~a:theta.a ~b:theta.b ~c:theta.c us in
+  let a = a_reparam (theta.q, theta.d) in
+  let ys = rollout ~a ~b:theta.b ~c:theta.c us in
   save_time_series ~out ys
 
 let _ = save_summary ~out:(in_dir "true_summary") true_theta
 
 let save_summary_youjing ~out (theta : Generative.M.t) =
-  let a = Maths.primal theta.a |> Tensor.to_bigarray ~kind:base.ba_kind in
+  let a = a_reparam (theta.q, theta.d) in
+  let a = Maths.primal a |> Tensor.to_bigarray ~kind:base.ba_kind in
   let b = Maths.primal theta.b |> Tensor.to_bigarray ~kind:base.ba_kind in
   let c = Maths.primal theta.c |> Tensor.to_bigarray ~kind:base.ba_kind in
   let avg_spatial_cov =
@@ -305,7 +315,8 @@ let _ = save_summary_youjing ~out:(in_dir "true_summary_y") true_theta
    --  SOME TESTS
    ----------------------------------------------- *)
 
-let u, y = sample_data true_theta
+(*
+   let u, y = sample_data true_theta
 let _ = save_time_series ~out:(in_dir "u") u
 let _ = save_time_series ~out:(in_dir "y") y
 
@@ -316,6 +327,7 @@ let u_recov =
 let y_recov = rollout ~a:true_theta.a ~b:true_theta.b ~c:true_theta.c u_recov
 let _ = save_time_series ~out:(in_dir "urecov") u_recov
 let _ = save_time_series ~out:(in_dir "yrecov") y_recov
+*)
 
 (*
    let _ =
@@ -352,15 +364,17 @@ let _ = save_time_series ~out:(in_dir "yrecov") y_recov
    let _ = assert false
 *)
 
-let elbo ~data:(y : Maths.t list) (theta : P.M.t) =
-  let g = theta.generative in
-  let inv_sigma_o_expanded = Maths.(sqrt_precision_of_log_var g.log_obs_var * ones_o) in
+let elbo ~data:(y : Maths.t list) (theta : Generative.M.t) =
+  let inv_sigma_o_expanded =
+    Maths.(sqrt_precision_of_log_var theta.log_obs_var * ones_o)
+  in
+  let a = a_reparam (theta.q, theta.d) in
   let kl, u_sampled =
     let obs_precision = Maths.(precision_of_log_var theta.log_obs_var * ones_o) in
-    let ustars = lqr ~a:g.a ~b:g.b ~c:g.c ~obs_precision y in
-    sample_and_kl ~a:g.a ~b:g.b ~c:g.c ~obs_precision ustars y ()
+    let _, backward_info = lqr ~a ~b:theta.b ~c:theta.c ~obs_precision y in
+    sample_and_kl ~a ~b:theta.b backward_info
   in
-  let y_pred = rollout ~a:g.a ~b:g.b ~c:g.c u_sampled in
+  let y_pred = rollout ~a ~b:theta.b ~c:theta.c u_sampled in
   let lik_term =
     List.fold2_exn
       y
@@ -378,7 +392,7 @@ let elbo ~data:(y : Maths.t list) (theta : P.M.t) =
   neg_elbo, y_pred
 
 module M = struct
-  module P = P
+  module P = Generative
 
   type data = Maths.t list
   type args = unit
@@ -388,12 +402,10 @@ module M = struct
     match update with
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
-      let obs_precision = precision_of_log_var theta.generative.log_obs_var in
+      let obs_precision = precision_of_log_var theta.log_obs_var in
       let obs_precision_p = Maths.(const (primal obs_precision)) in
       let sigma2_t =
-        Maths.(tangent (exp theta.generative.log_obs_var))
-        |> Option.value_exn
-        |> Maths.const
+        Maths.(tangent (exp theta.log_obs_var)) |> Option.value_exn |> Maths.const
       in
       let ggn_part2 =
         Maths.(
@@ -425,9 +437,6 @@ end
 (* --------------------------------
    -- Generic type of optimiser
    -------------------------------- *)
-
-(* we're going to learn an amortization of the GGN matrix without the noise *)
-module Auxiliary = O.Adam.Make (O.Prms.P)
 
 module type Do_with_T = sig
   module O :
@@ -464,9 +473,7 @@ module Make (D : Do_with_T) = struct
           let t = iter in
           let theta = O.params new_state |> O.W.P.value |> O.W.P.map ~f:Maths.const in
           let ground_truth_elbo =
-            elbo
-              ~data:y
-              PP.{ generative = true_theta; log_obs_var = true_theta.log_obs_var }
+            elbo ~data:y true_theta
             |> fst
             |> Maths.primal
             |> Tensor.mean
@@ -477,8 +484,8 @@ module Make (D : Do_with_T) = struct
               ~append:true
               ~out:(in_dir name)
               (of_array [| Float.of_int t; loss_avg; ground_truth_elbo |] 1 3));
-          save_summary ~out:(in_dir "summary") theta.generative;
-          save_summary_youjing ~out:(in_dir "summary_y") theta.generative);
+          save_summary ~out:(in_dir "summary") theta;
+          save_summary_youjing ~out:(in_dir "summary_y") theta);
         []
       in
       if iter < max_iter then loop ~iter:(iter + 1) ~state:new_state (loss :: running_avg)
@@ -493,7 +500,7 @@ end
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (M)
 
-  let name = "sofo"
+  let name = "sofo2"
 
   let config ~iter:k =
     Optimizer.Config.SOFO.
@@ -504,11 +511,11 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; sqrt = false
       ; rank_one = false
-      ; damping = Some 1e-4
-      ; momentum = None
+      ; damping = None
+      ; momentum = Some 0.99
       }
 
-  let init = O.init ~config:(config ~iter:0) theta
+  let init = O.init theta
 end
 
 (* --------------------------------

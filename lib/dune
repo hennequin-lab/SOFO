@@ -1,7 +1,7 @@
 (library
  (name sofo)
  (public_name sofo)
- (libraries stdio base forward-torch)
+ (libraries stdio base forward-torch owl)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))
 

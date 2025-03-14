@@ -61,20 +61,14 @@ end
 
 module SOFO (W : Wrapper.T) = struct
   module W = W
+  module Mom = Momentum (W.P)
 
   type ('a, 'b) config = ('a, 'b) Config.SOFO.t
-  type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SOFO.t -> W.P.tagged -> 'c
-
-  type state =
-    { theta : W.P.tagged
-    ; g_avg : Tensor.t W.P.p option
-    ; beta_t : float option
-    }
+  type ('c, _, _) init_opts = W.P.tagged -> 'c
+  type state = { theta : W.P.tagged }
 
   let params state = state.theta
-
-  let init ~(config : ('a, 'b) config) theta =
-    { theta; g_avg = None; beta_t = Option.map config.momentum ~f:(fun _ -> 1.) }
+  let init theta = { theta }
 
   (* initialise tangents, where each tangent is normalised. *)
   let init_tangents ~base ~rank_one ~n_tangents theta =
@@ -90,6 +84,7 @@ module SOFO (W : Wrapper.T) = struct
         | Prms.Bounded (x, _, _) ->
           sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
     in
+    (* orthogonalise them all *)
     let vtv =
       W.P.fold vs ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
         let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
@@ -102,6 +97,15 @@ module SOFO (W : Wrapper.T) = struct
       let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
       let v = Tensor.(matmul normalizer v) in
       Maths.Direct (Tensor.reshape v ~shape:s))
+
+  let proj_onto_vs vs g =
+    W.P.fold2 g vs ~init:(Tensor.f 0.) ~f:(fun accu (g, v, _) ->
+      let v = Maths.tangent' v in
+      let n_tangents = Convenience.first_dim v in
+      let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
+      let n = List.nth_exn (Tensor.shape v) 1 in
+      let g = Tensor.reshape g ~shape:[ n ] in
+      Tensor.(accu + einsum ~equation:"ij,j->i" ~path:None [ v; g ]))
 
   (* fold vs over sets of v_i s, multiply with associated weights. *)
   let weighted_vs_sum vs ~weights =
@@ -141,22 +145,16 @@ module SOFO (W : Wrapper.T) = struct
       Tensor.(theta - mul_scalar g (Scalar.f eta))
     | None -> theta
 
-  let step ?tangents ~(config : ('a, 'b) config) ~state ~data args =
+  let step ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
-    let beta_t =
-      Option.map2 state.beta_t config.momentum ~f:(fun b beta -> Float.(b * beta))
-    in
     (* initialise tangents *)
     let theta = params state in
     let vs =
-      match tangents with
-      | Some vs -> vs
-      | None ->
-        init_tangents
-          ~base:config.base
-          ~rank_one:config.rank_one
-          ~n_tangents:config.n_tangents
-          theta
+      init_tangents
+        ~base:config.base
+        ~rank_one:config.rank_one
+        ~n_tangents:config.n_tangents
+        theta
     in
     let theta_dual = W.P.make_dual theta ~t:vs in
     (* define update function *)
@@ -179,20 +177,12 @@ module SOFO (W : Wrapper.T) = struct
           ~dim:(Some [ 1 ])
           ~keepdim:true)
     in
-    let learning_rate =
-      Option.map config.learning_rate ~f:(fun eta ->
-        Option.value_map beta_t ~default:eta ~f:(fun b -> Float.(eta / (1. - b))))
-    in
     (* compute natural gradient and update theta *)
     let natural_g =
       natural_g ?damping:config.damping ~sqrt:config.sqrt ~vs ~ggn:final_ggn vtg
     in
-    let natural_g_avg =
-      let module M = Momentum (W.P) in
-      M.apply ?momentum:config.momentum ~avg:state.g_avg natural_g
-    in
-    let new_theta = update_theta ?learning_rate ~theta natural_g_avg in
-    loss, { theta = new_theta; g_avg = Some natural_g_avg; beta_t }
+    let new_theta = update_theta ?learning_rate:config.learning_rate ~theta natural_g in
+    loss, { theta = new_theta }
 end
 
 (* forward gradient descent;: g = V V^T g where V^Tg is obtained with forward AD (Kozak 2021) *)
@@ -269,7 +259,7 @@ module FGD (W : Wrapper.T) = struct
       Tensor.(theta - mul_scalar g (Scalar.f eta))
     | None -> theta
 
-  let step ?tangents:_ ~(config : ('a, 'b) config) ~state ~data args =
+  let step ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     let beta_t =
       Option.map2 state.beta_t config.momentum ~f:(fun b beta -> Float.(b * beta))
@@ -351,7 +341,7 @@ module SGD (W : Wrapper.T) = struct
       Tensor.(theta - mul_scalar g (Scalar.f eta))
     | None -> theta
 
-  let step ?tangents:_ ~(config : ('a, 'b) config) ~state ~data args =
+  let step ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     let beta_t =
       Option.map2 state.beta_t config.momentum ~f:(fun b beta -> Float.(b * beta))
@@ -443,7 +433,7 @@ module Adam (W : Wrapper.T) = struct
     in
     { theta; m = Some m; v = Some v; beta1_t; beta2_t }
 
-  let step ?tangents:_ ~(config : ('a, 'b) config) ~state ~data args =
+  let step ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     (* initialise tangents *)
     let theta = params state in

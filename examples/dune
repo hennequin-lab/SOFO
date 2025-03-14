@@ -9,6 +9,7 @@
   fa_marginal
   lgs_elbo
   lgs_from_scratch
+  lgs_from_scratch_matheron
   lgs_elbo_simplified
   lgs_elbo_laplace
   lorenz_elbo_gru

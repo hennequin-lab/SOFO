@@ -4,7 +4,7 @@ module SOFO (W : Wrapper.T) :
   T
   with module W = W
    and type ('a, 'b) config = ('a, 'b) Config.SOFO.t
-   and type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SOFO.t -> W.P.tagged -> 'c
+   and type ('c, _, _) init_opts = W.P.tagged -> 'c
 
 module FGD (W : Wrapper.T) :
   T
