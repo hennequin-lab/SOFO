@@ -22,7 +22,8 @@ let base =
    ----------------------------------------- *)
 let primal_detach (x, _) = Maths.const Tensor.(detach x)
 
-(* solves for xA = y, A = ell (ell)^T *)
+(* solves for xA = y, A = ell (ell)^T. NOTE: since linsolve_triangular only deals with rectangular matrix B 
+but not vector, this function does not apply to ell with a batch dimension in front! *)
 let solver_chol ell y =
   let ell_t = Maths.transpose ~dim0:0 ~dim1:1 ell in
   let _x = Maths.linsolve_triangular ~left:false ~upper:true ell_t y in
