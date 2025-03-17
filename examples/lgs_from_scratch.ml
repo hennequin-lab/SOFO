@@ -25,7 +25,7 @@ let base =
 
 let m = 5
 let n = 10
-let o = 20
+let o = 40
 let tmax = 10
 let bs = 64
 let _K = 128
@@ -103,7 +103,7 @@ let theta =
   let q, d = make_a_prms 0.8 in
   let q = Prms.free (Maths.primal q) in
   let d = Prms.free (Maths.primal d) in
-  let b = Prms.free (Maths.primal (make_b ())) in
+  let b = Prms.const (Maths.primal true_theta.b) in
   let c = Prms.free (Maths.primal (make_c ())) in
   let log_obs_var =
     Maths.(log (f Float.(square 1.) * ones_1))
@@ -221,32 +221,67 @@ let sample_and_kl ~a ~b backward_info =
   let open Maths in
   let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> Maths.const in
   let dummy_u = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; m ] in
-  let sample_and_kl ~z (_k, _K, _Quu_chol) =
-    let du =
-      Maths.linsolve_triangular
-        ~left:false
-        ~upper:false
-        _Quu_chol
-        (const (Tensor.randn_like dummy_u))
-    in
-    let u = du + _k + einsum [ _K, "ji"; z, "mj" ] "mi" in
-    let kl =
-      let prior_term = gaussian_llh ~inv_std:ones_u u in
-      let q_term = gaussian_llh_chol ~precision_chol:_Quu_chol du in
-      q_term - prior_term
-    in
-    u, kl
-  in
-  let u0, kl0 = sample_and_kl ~z:z0 (List.hd_exn backward_info) in
-  let z1 = einsum [ b, "ij"; u0, "mi" ] "mj" in
   let us, kl, _ =
     List.fold
-      (List.tl_exn backward_info)
-      ~init:([ u0 ], kl0, z1)
-      ~f:(fun (accu, kl, z) info ->
-        let u, dkl = sample_and_kl ~z info in
+      backward_info
+      ~init:([], f 0., z0)
+      ~f:(fun (accu, kl, z) (_k, _K, _Quu_chol) ->
+        let du =
+          Maths.linsolve_triangular
+            ~left:false
+            ~upper:false
+            _Quu_chol
+            (const (Tensor.randn_like dummy_u))
+        in
+        let u = du + _k + einsum [ _K, "ji"; z, "mj" ] "mi" in
+        let dkl =
+          let prior_term = gaussian_llh ~inv_std:ones_u u in
+          let q_term = gaussian_llh_chol ~precision_chol:_Quu_chol du in
+          q_term - prior_term
+        in
         let z = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ b, "ij"; u, "mi" ] "mj" in
         u :: accu, kl + dkl, z)
+  in
+  kl, List.rev us
+
+let sample_and_kl_filtering ~a ~b ~c ~obs_precision ustars ys =
+  let open Maths in
+  let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> Maths.const in
+  let btrinv = einsum [ b, "ij"; c, "jo"; obs_precision, "o" ] "io" in
+  let precision_chol =
+    eye_m + einsum [ btrinv, "io"; c, "jo"; b, "kj" ] "ik" |> cholesky
+  in
+  let _, kl, us =
+    List.fold2_exn
+      ustars
+      ys
+      ~init:(z0, f 0., [])
+      ~f:(fun (z, kl, us) ustar y ->
+        Stdlib.Gc.major ();
+        let zpred = (z *@ a) + (ustar *@ b) in
+        let ypred = zpred *@ c in
+        let delta = y - ypred in
+        let mu = solver_chol precision_chol (einsum [ btrinv, "io"; delta, "mo" ] "mi") in
+        let u_diff =
+          (* if precision = L L^T
+             then cov = L^(-T) L^(-1)
+             so we get a sample as epsilon L^(-1), i.e solving epsilon = X L *)
+          Maths.linsolve_triangular
+            ~left:false
+            ~upper:false
+            precision_chol
+            (const (Tensor.randn_like (primal ustar)))
+        in
+        let u_sample = mu + u_diff in
+        (* propagate that sample to update z *)
+        let z = zpred + (u_sample *@ b) in
+        (* update the KL divergence *)
+        let kl =
+          let prior_term = gaussian_llh ~inv_std:ones_u (ustar + u_sample) in
+          let q_term = gaussian_llh_chol ~precision_chol u_diff in
+          kl + q_term - prior_term
+        in
+        z, kl, (ustar + u_sample) :: us)
   in
   kl, List.rev us
 
@@ -374,6 +409,12 @@ let elbo ~data:(y : Maths.t list) (theta : Generative.M.t) =
     let _, backward_info = lqr ~a ~b:theta.b ~c:theta.c ~obs_precision y in
     sample_and_kl ~a ~b:theta.b backward_info
   in
+  (*
+     let kl, u_sampled =
+    let obs_precision = Maths.(precision_of_log_var theta.log_obs_var * ones_o) in
+    let ustars, _ = lqr ~a ~b:theta.b ~c:theta.c ~obs_precision y in
+    sample_and_kl_filtering ~a ~b:theta.b ~c:theta.c ~obs_precision ustars y
+  in*)
   let y_pred = rollout ~a ~b:theta.b ~c:theta.c u_sampled in
   let lik_term =
     List.fold2_exn
@@ -500,19 +541,19 @@ end
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (M)
 
-  let name = "sofo2"
+  let name = "sofo"
 
   let config ~iter:k =
     Optimizer.Config.SOFO.
       { base
       ; learning_rate =
           (let lr = Cmdargs.(get_float "-lr" |> default 0.1) in
-           Some Float.(lr / sqrt (1. + (0. * (of_int k / 100.)))))
+           Some Float.(lr / sqrt (1. + (0. * (of_int k / 10.)))))
       ; n_tangents = _K
       ; sqrt = false
       ; rank_one = false
       ; damping = None
-      ; momentum = Some 0.99
+      ; momentum = None
       }
 
   let init = O.init theta
