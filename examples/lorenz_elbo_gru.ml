@@ -323,7 +323,7 @@ module GRU = struct
     (* TODO: is there a more elegant way? Currently I need to set batch_const to false since _Fx and _Fu has batch dim. *)
     (* use lqr to obtain the optimal u *)
     let f_theta = rollout_one_step theta in
-    let sol, _ =
+    let sol, _, _ =
       Ilqr._isolve
         ~laplace
         ~f_theta

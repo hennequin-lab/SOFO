@@ -72,6 +72,7 @@ type backward_common_info =
 type backward_info =
   { _K : t option
   ; _k : t option
+  ;_Quu_chol : t option
   }
 
 type backward_info_f =

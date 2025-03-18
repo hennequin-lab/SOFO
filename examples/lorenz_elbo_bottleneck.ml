@@ -87,7 +87,7 @@ let gaussian_llh ?mu ~inv_std x =
   let const_term = Float.(log (2. * pi) * of_int d) in
   Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
 
-let gaussian_llh_chol ?(batched_chol = false) ?mu ~chol:ell x =
+let gaussian_llh_chol ?(batched_chol = false) ?mu ~precision_chol:ell x =
   let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
   let error =
     match mu with
@@ -312,7 +312,7 @@ module GRU = struct
     (* TODO: is there a more elegant way? Currently I need to set batch_const to false since _Fx and _Fu has batch dim. *)
     (* use lqr to obtain the optimal u *)
     let f_theta = rollout_one_step theta in
-    let sol, _ =
+    let sol, backward_info, _ =
       Ilqr._isolve
         ~laplace
         ~f_theta
@@ -323,7 +323,7 @@ module GRU = struct
         ~tau_init
         ~max_iter:max_iter_ilqr
     in
-    List.map sol ~f:(fun s -> s.u |> Option.value_exn)
+    List.map sol ~f:(fun s -> s.u |> Option.value_exn), backward_info
 
   (* let kronecker_sample ~optimal_u_list (theta : P.M.t) =
     (* sample u from the kronecker formation *)
@@ -419,7 +419,7 @@ module GRU = struct
     in
     Maths.(neg (lik_term - kl) / f Float.(of_int tmax * of_int o)), y_pred *)
 
-  let sample_and_kl ~(theta : P.M.t) ~optimal_u_list o_list =
+  (* let sample_and_kl ~(theta : P.M.t) ~optimal_u_list o_list =
     let open Maths in
     let o_list = List.map ~f:Maths.const o_list in
     let scaling_factor = reshape theta._scaling_factor ~shape:[ 1; 1; -1 ] in
@@ -481,18 +481,60 @@ module GRU = struct
               gaussian_llh ~inv_std:ones_u u_tmp
             in
             let q_term =
-              gaussian_llh_chol ~batched_chol:true ~chol:precision_chol u_diff_elbo
+              gaussian_llh_chol ~batched_chol:true ~precision_chol:precision_chol u_diff_elbo
             in
             kl + q_term - prior_term
           in
           z, kl, (ustar + u_sample) :: us)
     in
+    kl, List.rev us *)
+
+  (* approximate kalman smoothed distribution of u *)
+  let sample_and_kl ~theta ~(backward_info : Lqr.backward_info list) =
+    let open Maths in
+    let dummy_u = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; m ] in
+    let us, kl, _ =
+      List.fold
+        backward_info
+        ~init:([], f 0., Maths.const x0)
+        ~f:(fun (accu, kl, z) backward_info ->
+          let _Quu_chol = Option.value_exn backward_info._Quu_chol in
+          let du =
+            let _Quu_chol_inv =
+              linsolve_triangular
+                ~left:true
+                ~upper:false
+                _Quu_chol
+                (const (Tensor.eye ~n:m ~options:(base.kind, base.device)))
+            in
+            let _Quu_inv_chol =
+              einsum [ _Quu_chol_inv, "ab"; _Quu_chol_inv, "ac" ] "bc" |> cholesky
+            in
+            einsum [ const (Tensor.randn_like dummy_u), "ba"; _Quu_inv_chol, "bca" ] "bc"
+          in
+          let u =
+            du
+            + Option.value_exn backward_info._k
+            + einsum [ z, "mj"; Option.value_exn backward_info._K, "mij" ] "mi"
+          in
+          let dkl =
+            let prior_term = gaussian_llh ~inv_std:ones_u u in
+            let q_term =
+              gaussian_llh_chol ~batched_chol:true ~precision_chol:_Quu_chol du
+            in
+            q_term - prior_term
+          in
+          let z = rollout_one_step ~x:z ~u theta in
+          u :: accu, kl + dkl, z)
+    in
     kl, List.rev us
 
   let elbo_filter ~data (theta : P.M.t) =
     (* obtain u from lqr *)
-    let optimal_u_list = pred_u ~data theta in
-    let kl, u_sampled = sample_and_kl ~theta ~optimal_u_list data in
+    let optimal_u_list, backward_info = pred_u ~data theta in
+    let kl, u_sampled =
+      sample_and_kl ~theta ~backward_info:(Option.value_exn backward_info)
+    in
     let y_pred = rollout_y ~u_list:u_sampled theta in
     let lik_term =
       let inv_sigma_o_expanded =
@@ -612,7 +654,7 @@ module GRU = struct
 
   let simulate ~theta ~data =
     (* infer the optimal u *)
-    let optimal_u_list = pred_u ~data theta in
+    let optimal_u_list, _ = pred_u ~data theta in
     let _, o_error =
       List.fold2_exn
         data

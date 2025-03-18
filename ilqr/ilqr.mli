@@ -19,4 +19,4 @@ val _isolve
        (* -> p_init:(Maths.t option, (Maths.t, Maths.t -> Maths.t) momentary_params list) Params.p *)
   -> tau_init:Maths.t option Solution.p list
   -> max_iter:int
-  -> Maths.t option Solution.p list * Maths.t list option
+  -> Maths.t option Solution.p list * (backward_info list option) * Maths.t list option

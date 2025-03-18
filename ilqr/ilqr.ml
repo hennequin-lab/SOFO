@@ -57,7 +57,7 @@ let forward
       ~conv_threshold
       ~max_iter
   =
-  let rec fwd_loop ~stop  ~i ~alpha ~tau_prev ~cost_prev =
+  let rec fwd_loop ~stop ~i ~alpha ~tau_prev ~cost_prev =
     if stop
     then tau_prev
     else (
@@ -93,8 +93,8 @@ let forward
       then failwith "current cost value is nan"
       else (
         cleanup ();
-        let stop = Float.(pct_change < conv_threshold) || (i = max_iter)  in
-        fwd_loop ~stop ~i:Int.(i+1) ~alpha ~tau_prev:tau_curr ~cost_prev:cost_curr))
+        let stop = Float.(pct_change < conv_threshold) || i = max_iter in
+        fwd_loop ~stop ~i:Int.(i + 1) ~alpha ~tau_prev:tau_curr ~cost_prev:cost_curr))
   in
   let alpha = 1. in
   let cost_init = cost_func ~batch_const tau_opt p in
@@ -104,7 +104,7 @@ let rec ilqr_loop
           ~batch_const
           ~laplace
           ~conv_threshold
-          ~stop 
+          ~stop
           ~max_iter
           ~i
           ~cost_prev
@@ -113,9 +113,10 @@ let rec ilqr_loop
           ~f_theta
           ~(tau_prev : t option Solution.p list)
           ~common_info_prev
+          ~info_prev
   =
   if stop
-  then tau_prev, common_info_prev
+  then tau_prev, common_info_prev, info_prev
   else (
     let p_curr : (t option, (t, t -> t) momentary_params list) Params.p =
       params_func tau_prev
@@ -142,7 +143,7 @@ let rec ilqr_loop
     in
     let cost_curr = cost_func ~batch_const tau_curr p_curr in
     let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
-    let stop = Float.(pct_change < conv_threshold)|| (i = max_iter) in
+    let stop = Float.(pct_change < conv_threshold) || i = max_iter in
     cleanup ();
     ilqr_loop
       ~batch_const
@@ -150,13 +151,14 @@ let rec ilqr_loop
       ~conv_threshold
       ~stop
       ~max_iter
-      ~i:Int.(i+1)
+      ~i:Int.(i + 1)
       ~params_func
       ~cost_func
       ~f_theta
       ~tau_prev:tau_curr
       ~cost_prev:cost_curr
-      ~common_info_prev:(Some common_info))
+      ~common_info_prev:(Some common_info)
+      ~info_prev:(Some bck))
 
 let rollout
       ~u_init
@@ -182,19 +184,19 @@ let _isolve
       ~params_func
       ~conv_threshold
       ~tau_init
-      ~max_iter 
+      ~max_iter
   =
   (* step 1: init params and cost *)
   let p_init = params_func tau_init in
   let cost_init = cost_func ~batch_const tau_init p_init in
   (*step 2: loop to find the best controls and states *)
-  let tau_final, common_info_final =
+  let tau_final, common_info_final, info_final =
     ilqr_loop
       ~batch_const
       ~laplace
       ~conv_threshold
       ~stop:false
-      ~max_iter 
+      ~max_iter
       ~i:0
       ~params_func
       ~cost_func
@@ -202,6 +204,7 @@ let _isolve
       ~tau_prev:tau_init
       ~cost_prev:cost_init
       ~common_info_prev:None
+      ~info_prev:None
   in
   cleanup ();
   (* step 3: calculate covariances if required *)
@@ -213,5 +216,5 @@ let _isolve
         ~common_info:(Option.value_exn common_info_final)
         (params_func tau_final)
     in
-    tau_final, Some (List.map covariances ~f:(fun x -> Option.value_exn x)))
-  else tau_final, None
+    tau_final, info_final, Some (List.map covariances ~f:(fun x -> Option.value_exn x)))
+  else tau_final, info_final, None

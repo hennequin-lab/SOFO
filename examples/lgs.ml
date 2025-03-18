@@ -43,7 +43,7 @@ let gaussian_llh ?mu ~inv_std x =
   let const_term = Float.(log (2. * pi) * of_int d) in
   Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
 
-let gaussian_llh_chol ?mu ~chol:ell x =
+let gaussian_llh_chol ?mu ~precision_chol:ell x =
   let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
   let error =
     match mu with
@@ -80,7 +80,7 @@ module Dims = struct
   let n = 10
   let m = 5
   let o = 40
-  let tmax = 10
+  let tmax = 50
   let bs = 32
   let batch_const = true
   let kind = base.kind
@@ -174,8 +174,9 @@ module PP = struct
     { _q : 'a
     ; _d : 'a
     ; _c : 'a
-    ; _log_obs_var : 'a (* log of covariance of emission noise *)
-    ; _scaling_factor : 'a
+    ; _log_obs_var : 'a
+      (* log of covariance of emission noise *)
+      (* ; _scaling_factor : 'a *)
     }
   [@@deriving prms]
 end
@@ -185,8 +186,7 @@ let true_theta =
     { _q = _q_true
     ; _d = _d_true
     ; _c = _c_true
-    ; _log_obs_var = Maths.log _obs_var_true
-    ; _scaling_factor = Maths.f 1.
+    ; _log_obs_var = Maths.log _obs_var_true (* ; _scaling_factor = Maths.f 1. *)
     }
 
 module LGS = struct
@@ -273,7 +273,8 @@ module LGS = struct
     in
     List.rev y_list_rev
 
-  let sample_and_kl ~_Fx ~_Fu ~_c ~obs_precision ~scaling_factor ustars o_list =
+  (* approximate kalman filtered distribution of u *)
+  (* let sample_and_kl ~_Fx ~_Fu ~_c ~obs_precision ~scaling_factor ustars o_list =
     let open Maths in
     let o_list = List.map ~f:Maths.const o_list in
     let scaling_factor = reshape scaling_factor ~shape:[ 1; -1 ] in
@@ -319,10 +320,52 @@ module LGS = struct
               let u_tmp = ustar + u_sample in
               gaussian_llh ~inv_std:ones_u u_tmp
             in
-            let q_term = gaussian_llh_chol ~chol:precision_chol u_diff_elbo in
+            let q_term = gaussian_llh_chol ~precision_chol:precision_chol u_diff_elbo in
             kl + q_term - prior_term
           in
           z, kl, (ustar + u_sample) :: us)
+    in
+    kl, List.rev us  *)
+
+  (* approximate kalman smoothed distribution of u *)
+  let sample_and_kl ~_Fx ~_Fu (backward_info : Lqr.backward_info list) =
+    let open Maths in
+    let dummy_u = Tensor.zeros ~device:base.device ~kind:base.kind [ Dims.bs; Dims.m ] in
+    let us, kl, _ =
+      List.fold
+        backward_info
+        ~init:([], f 0., Maths.const x0)
+        ~f:(fun (accu, kl, z) backward_info ->
+          (* LL^T = Quu *)
+          let _Quu_chol = Option.value_exn backward_info._Quu_chol in
+          let du =
+            (* L^-1 *)
+            let _Quu_chol_inv =
+              linsolve_triangular
+                ~left:true
+                ~upper:false
+                _Quu_chol
+                (const (Tensor.eye ~n:Dims.m ~options:(base.kind, base.device)))
+            in
+            let _Quu_inv_chol =
+              einsum [ _Quu_chol_inv, "ab"; _Quu_chol_inv, "ac" ] "bc" |> cholesky
+            in
+            einsum [ const (Tensor.randn_like dummy_u), "ma"; _Quu_inv_chol, "ca" ] "mc"
+          in
+          let u =
+            du
+            + Option.value_exn backward_info._k
+            + einsum [ z, "mj"; Option.value_exn backward_info._K, "ij" ] "mi"
+          in
+          let dkl =
+            let prior_term = gaussian_llh ~inv_std:ones_u u in
+            let q_term = gaussian_llh_chol ~precision_chol:_Quu_chol du in
+            q_term - prior_term
+          in
+          let z =
+            einsum [ _Fx, "ij"; z, "mi" ] "mj" + einsum [ _Fu, "ij"; u, "mi" ] "mj"
+          in
+          u :: accu, kl + dkl, z)
     in
     kl, List.rev us
 
@@ -330,24 +373,26 @@ module LGS = struct
     let _Fx = _Fx_reparam (theta._q, theta._d) in
     let obs_precision = Maths.(precision_of_log_var theta._log_obs_var * ones_o) in
     (* use lqr to obtain the optimal u *)
-    let ustars =
-      let p =
-        params_from_f ~x0:(Maths.const x0) ~theta ~o_list
-        |> Lds_data.map_naive ~batch_const:Dims.batch_const
-      in
-      let sol, _ = Lqr._solve ~laplace:false ~batch_const:Dims.batch_const p in
-      List.map sol ~f:(fun s -> s.u)
+    let p =
+      params_from_f ~x0:(Maths.const x0) ~theta ~o_list
+      |> Lds_data.map_naive ~batch_const:Dims.batch_const
     in
+    let sol, backward_info, _ =
+      Lqr._solve ~laplace:false ~batch_const:Dims.batch_const p
+    in
+    let ustars = List.map sol ~f:(fun s -> s.u) in
     let kl, u_sampled =
-      let scaling_factor = Maths.(theta._scaling_factor * ones_u) in
-      sample_and_kl
+      (* let scaling_factor = Maths.(theta._scaling_factor * ones_u) in *)
+
+      (* sample_and_kl 
         ~_Fx
         ~_Fu:_Fu_true
         ~_c:theta._c
         ~obs_precision
         ~scaling_factor
         ustars
-        o_list
+        o_list *)
+      sample_and_kl ~_Fx ~_Fu:_Fu_true backward_info
     in
     let y_pred = rollout ~u_list:u_sampled theta in
     let lik_term =
@@ -420,7 +465,7 @@ module LGS = struct
     let _scaling_factor =
       Prms.create ~above:(Tensor.f 0.1) (Tensor.ones [ 1 ] ~device:base.device)
     in
-    { _q; _d; _c; _log_obs_var; _scaling_factor }
+    { _q; _d; _c; _log_obs_var }
 end
 
 let _ = LGS.save_summary ~out:(in_dir "true_summary") true_theta
@@ -503,7 +548,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config ~iter:_ =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.01
+      ; learning_rate = Some 0.5
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
@@ -526,7 +571,7 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (LGS)
 
   let config ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.001 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
 
   let init = O.init LGS.init
 end

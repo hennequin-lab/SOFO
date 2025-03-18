@@ -140,18 +140,11 @@ let backward_common
         _Qxx +? tmp2
       in
       (* only save Quu_inv if laplace *)
-      ( _V_new
-      , { _Quu_chol
-        ; _Quu_chol_T
-        ; _V
-        ; _K
-        ; _Quu_inv = (if laplace then _Quu_inv else None)
-        }
-        :: info_list ))
+      _V_new, { _Quu_chol; _Quu_chol_T; _V; _K; _Quu_inv } :: info_list)
   in
   info
 
-let _k ~tangent ~batch_const ~z ~_f _qu =
+let _k ~tangent ~batch_const ~(z : backward_common_info) ~_f _qu =
   match tangent, batch_const with
   | true, true ->
     (match _f with
@@ -266,7 +259,7 @@ let backward
         let _k = _k ~tangent ~batch_const ~z ~_f:p._f _qu in
         (* update the value function *)
         let _v = v ~tangent ~batch_const ~_K:z._K ~_qx ~_qu in
-        _v, { _k; _K = z._K } :: info_list)
+        _v, { _k; _K = z._K; _Quu_chol = z._Quu_chol } :: info_list)
   in
   info
 
@@ -391,8 +384,8 @@ let _solve ?(batch_const = false) ?(laplace = false) p =
   if laplace
   then (
     let covariances = covariances ~batch_const ~common_info p in
-    sol, Some (List.map covariances ~f:(fun x -> Option.value_exn x)))
-  else sol, None
+    sol, bck, Some (List.map covariances ~f:(fun x -> Option.value_exn x)))
+  else sol, bck, None
 
 (* backward pass and forward pass with surrogate rhs for the tangent problem;
    s is the solution obtained from lqr through the primals
@@ -614,6 +607,7 @@ let solve ?(batch_const = false) ?(laplace = false) p =
       in
       Solution.{ u = zip s.u st.u; x = zip s.x st.x })
   in
+  (* TODO: return backward info list for smoothed posterior covariance over u *)
   if laplace
   then (
     (* TODO: if we need covariances to carry tangents we need to compute everything with tangents, hence cannot be used in this separable method. For now we assume we do not need the covariances to carry tangents i.e. do not differentiate through the samples *)

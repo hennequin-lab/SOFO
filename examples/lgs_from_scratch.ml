@@ -23,8 +23,8 @@ let base =
 
 let m = 5
 let n = 10
-let o = 40
-let tmax = 10
+let o = 20
+let tmax = 56
 let bs = 32
 let eye_m = Maths.(const (Tensor.of_bigarray ~device:base.device Mat.(eye m)))
 let eye_o = Maths.(const (Tensor.of_bigarray ~device:base.device Mat.(eye o)))
@@ -84,8 +84,7 @@ module PP = struct
     ; d : 'a
     ; b : 'a
     ; c : 'a
-    ; log_obs_var : 'a
-    ; scaling_factor : 'a
+    ; log_obs_var : 'a (* ; scaling_factor : 'a *)
     }
   [@@deriving prms]
 end
@@ -100,7 +99,7 @@ let true_theta =
     Tensor.(of_float0 ~device:base.device Float.(square 0.01)) |> Maths.const |> Maths.log
   in
   let scaling_factor = Maths.const (Tensor.of_float0 ~device:base.device 1.) in
-  PP.{ q; d; b; c; log_obs_var; scaling_factor }
+  PP.{ q; d; b; c; log_obs_var }
 
 let theta =
   let q, d =
@@ -118,7 +117,7 @@ let theta =
   let scaling_factor =
     Prms.create ~above:(Tensor.f 0.1) (Tensor.ones [ 1 ] ~device:base.device)
   in
-  PP.{ q; d; b; c; log_obs_var; scaling_factor }
+  PP.{ q; d; b; c; log_obs_var }
 
 let std_of_log_var log_var = Maths.(exp (f 0.5 * log_var))
 let precision_of_log_var log_var = Maths.(exp (neg log_var))
@@ -181,43 +180,44 @@ let lqr ~a ~b ~c ~obs_precision y =
   let _Czz = einsum [ c, "ij"; obs_precision, "j"; c, "kj" ] "ik" in
   let _cz_fun y = neg (einsum [ c, "ij"; obs_precision, "j"; y, "mj" ] "mi") in
   let yT = List.last_exn y in
-  let gains, _, _, _ =
+  let backward_info, _, _, _ =
     List.fold_right
       (List.sub y ~pos:0 ~len:_T)
       ~init:([], _cz_fun yT, _Czz, Int.(_T - 1))
       ~f:(fun y (accu, _v, _V, t) ->
+        Stdlib.Gc.major ();
         (* we only have state costs for t>=1 *)
         let _cz = if t > 0 then _cz_fun y else f 0. in
         let _Czz = if t > 0 then _Czz else f 0. in
         let _Qzz = _Czz + einsum [ a, "ij"; _V, "jl"; a, "kl" ] "ik" in
         let _Quz = einsum [ b, "ij"; _V, "jl"; a, "kl" ] "ki" in
-        (* or maybe ik *)
-        let _Quu = einsum [ b, "ij"; _V, "jl"; b, "kl" ] "ik" + eye_m in
+        let _Quu = eye_m + einsum [ b, "ij"; _V, "jl"; b, "kl" ] "ik" in
         let _qz = _cz + einsum [ a, "ij"; _v, "mj" ] "mi" in
         let _qu = einsum [ b, "ij"; _v, "mj" ] "mi" in
-        let _K = neg (solver _Quu _Quz) in
-        let _k = neg (solver _Quu _qu) in
+        let _Quu_chol = cholesky _Quu in
+        let _K = neg (solver_chol _Quu_chol _Quz) in
+        let _k = neg (solver_chol _Quu_chol _qu) in
         let _V = _Qzz + einsum [ _Quz, "ki"; _K, "ji" ] "kj" in
         let _v = _qz + einsum [ _qu, "mi"; _K, "ji" ] "mj" in
         (* important to symmetrize the value function otherwise
-           it can drift and Cholesky will fail *)
+             it can drift and Cholesky will fail *)
         let _V = Maths.(f 0.5 * (_V + transpose ~dim0:0 ~dim1:1 _V)) in
-        (_k, _K) :: accu, _v, _V, Int.(t - 1))
+        (_k, _K, _Quu_chol) :: accu, _v, _V, Int.(t - 1))
   in
-  assert (List.length gains = _T);
-  let _k0, _ = List.hd_exn gains in
+  assert (List.length backward_info = _T);
+  let _k0, _, _ = List.hd_exn backward_info in
   let u0 = _k0 in
   let z1 = einsum [ b, "ij"; u0, "mi" ] "mj" in
   let us, _ =
     List.fold
-      (List.sub gains ~pos:1 ~len:Int.(_T - 1))
+      (List.sub backward_info ~pos:1 ~len:Int.(_T - 1))
       ~init:([ u0 ], z1)
-      ~f:(fun (accu, z) (_k, _K) ->
+      ~f:(fun (accu, z) (_k, _K, _) ->
         let u = _k + einsum [ _K, "ji"; z, "mj" ] "mi" in
         let z = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ b, "ij"; u, "mi" ] "mj" in
         u :: accu, z)
   in
-  List.rev us
+  List.rev us, backward_info
 
 let rollout ~a ~b ~c u =
   let open Maths in
@@ -262,7 +262,8 @@ let gaussian_llh ?mu ~inv_std x =
   let const_term = Float.(log (2. * pi) * of_int d) in
   Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
 
-let gaussian_llh_chol ?mu ~chol:ell x =
+(* ell ell^T = precision *)
+let gaussian_llh_chol ?mu ~precision_chol:ell x =
   let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
   let error =
     match mu with
@@ -301,7 +302,7 @@ let u, y = sample_data true_theta
 let _ = save_time_series ~out:(in_dir "u") u
 let _ = save_time_series ~out:(in_dir "y") y
 
-let u_recov =
+let u_recov, _ =
   let a = a_reparam (true_theta.q, true_theta.d) in
   let obs_precision = Maths.(precision_of_log_var true_theta.log_obs_var * ones_o) in
   lqr ~a ~b:true_theta.b ~c:true_theta.c ~obs_precision y
@@ -313,8 +314,7 @@ let y_recov =
 let _ = save_time_series ~out:(in_dir "urecov") u_recov
 let _ = save_time_series ~out:(in_dir "yrecov") y_recov
 
-
-let sample_and_kl ~a ~b ~c ~obs_precision ~scaling_factor ustars ys =
+(* let sample_and_kl ~a ~b ~c ~obs_precision ~scaling_factor ustars ys =
   let open Maths in
   let scaling_factor = reshape scaling_factor ~shape:[ 1; -1 ] in
   let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> Maths.const in
@@ -351,27 +351,56 @@ let sample_and_kl ~a ~b ~c ~obs_precision ~scaling_factor ustars ys =
         in
         let u_sample = mu + u_diff_elbo in
         (* propagate that sample to update z *)
-        let z = zpred +u_sample *@ b in
+        let z = zpred + (u_sample *@ b) in
         (* update the KL divergence *)
         let kl =
           let prior_term =
             let u_tmp = ustar + u_sample in
             gaussian_llh ~inv_std:ones_u u_tmp
           in
-          let q_term = gaussian_llh_chol ~chol:precision_chol u_diff_elbo in
+          let q_term = gaussian_llh_chol ~precision_chol:precision_chol u_diff_elbo in
           kl + q_term - prior_term
         in
         z, kl, (ustar + u_sample) :: us)
+  in
+  kl, List.rev us   *)
+
+(* approximate kalman smoothed distribution of u *)
+let sample_and_kl ~a ~b backward_info =
+  let open Maths in
+  let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> const in
+  let dummy_u = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; m ] in
+  let us, kl, _ =
+    List.fold
+      backward_info
+      ~init:([], f 0., z0)
+      ~f:(fun (accu, kl, z) (_k, _K, _Quu_chol) ->
+        let du =
+          linsolve_triangular
+            ~left:false
+            ~upper:false
+            _Quu_chol
+            (const (Tensor.randn_like dummy_u))
+        in
+        let u = du + _k + einsum [ _K, "ji"; z, "mj" ] "mi" in
+        let dkl =
+          let prior_term = gaussian_llh ~inv_std:ones_u u in
+          let q_term = gaussian_llh_chol ~precision_chol:_Quu_chol du in
+          q_term - prior_term
+        in
+        let z = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ b, "ij"; u, "mi" ] "mj" in
+        u :: accu, kl + dkl, z)
   in
   kl, List.rev us
 
 let elbo ~data:(y : Maths.t list) (theta : P.M.t) =
   let a = a_reparam (theta.q, theta.d) in
   let obs_precision = Maths.(precision_of_log_var theta.log_obs_var * ones_o) in
-  let ustars = lqr ~a ~b:theta.b ~c:theta.c ~obs_precision y in
+  let ustars, backward_info = lqr ~a ~b:theta.b ~c:theta.c ~obs_precision y in
   let kl, u_sampled =
-    let scaling_factor = Maths.(theta.scaling_factor * ones_u) in
-    sample_and_kl ~a ~b:theta.b ~c:theta.c ~obs_precision ~scaling_factor ustars y
+    (* let scaling_factor = Maths.(theta.scaling_factor * ones_u) in
+    sample_and_kl ~a ~b:theta.b ~c:theta.c ~obs_precision ~scaling_factor ustars y   *)
+    sample_and_kl ~a ~b:theta.b backward_info
   in
   let y_pred = rollout ~a ~b:theta.b ~c:theta.c u_sampled in
   let lik_term =
@@ -386,8 +415,7 @@ let elbo ~data:(y : Maths.t list) (theta : P.M.t) =
         Stdlib.Gc.major ();
         Maths.(accu + gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded y))
   in
-  ( Maths.(neg (lik_term - kl) / f Float.(of_int tmax * of_int o))
-  , y_pred )
+  Maths.(neg (lik_term - kl) / f Float.(of_int tmax * of_int o)), y_pred
 
 module M = struct
   module P = P
@@ -489,8 +517,9 @@ module Make (D : Do_with_T) = struct
                 ; d = extract theta_curr.q
                 ; b = extract theta_curr.b
                 ; c = extract theta_curr.c
-                ; log_obs_var = true_theta.log_obs_var
-                ; scaling_factor = true_theta.scaling_factor
+                ; log_obs_var =
+                    true_theta.log_obs_var
+                    (* ; scaling_factor = true_theta.scaling_factor *)
                 }
             in
             let ground_truth_std_o_elbo, _ = elbo ~data:y theta_std_o in
@@ -535,7 +564,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
-      ; damping = None
+      ; damping = Some 1e-6
       ; momentum = None
       ; lm = false
       ; perturb_thresh = None
@@ -554,7 +583,7 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (M)
 
   let config ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.001 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
 
   let init = O.init theta
 end

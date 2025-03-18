@@ -625,7 +625,7 @@ let ilqr ~targets_batched =
       Maths.const rand)
   in
   let tau_init = rollout_sol ~u_list:u_init ~x0:x0_batched in
-  let sol, _ =
+  let sol, _, _ =
     Ilqr._isolve
       ~laplace:false
       ~f_theta
