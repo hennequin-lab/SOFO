@@ -51,6 +51,7 @@ module Params = struct
   [@@deriving prms]
 end
 
+(* u_0 has the same size as x_0 as we force _Fu_0 to be the identity. *)
 module Solution = struct
   type 'a p =
     { u : 'a
@@ -72,7 +73,7 @@ type backward_common_info =
 type backward_info =
   { _K : t option
   ; _k : t option
-  ;_Quu_chol : t option
+  ; _Quu_chol : t option
   }
 
 type backward_info_f =

@@ -508,9 +508,9 @@ module GRU = struct
                 (const (Tensor.eye ~n:m ~options:(base.kind, base.device)))
             in
             let _Quu_inv_chol =
-              einsum [ _Quu_chol_inv, "ab"; _Quu_chol_inv, "ac" ] "bc" |> cholesky
+              einsum [ _Quu_chol_inv, "mab"; _Quu_chol_inv, "mac" ] "mbc" |> cholesky
             in
-            einsum [ const (Tensor.randn_like dummy_u), "ba"; _Quu_inv_chol, "bca" ] "bc"
+            einsum [ const (Tensor.randn_like dummy_u), "ma"; _Quu_inv_chol, "mca" ] "mc"
           in
           let u =
             du
@@ -745,7 +745,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.1 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(0.01 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 60
       ; sqrt = false
       ; rank_one = false
