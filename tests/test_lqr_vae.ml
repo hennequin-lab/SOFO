@@ -27,23 +27,43 @@ end
 module Data = Lds_data.Make_LDS_Tensor (Dims)
 
 let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.m; Dims.a ]
+let _eye_n = Tensor.eye ~n:Dims.a ~options:(Dims.kind, Dims.device)
+
+(* _Fu_0 is identity *)
+let _Fu_0 =
+  if Dims.batch_const
+  then _eye_n
+  else
+    List.init Dims.m ~f:(fun _ -> Tensor.unsqueeze _eye_n ~dim:0) |> Tensor.concat ~dim:0
+
+let _Fu = Data.sample_fu ()
 
 (* in the linear gaussian case, _Fx, _Fu, c, b and cov invariant across time *)
 let f_list : Tensor.t Lds_data.f_params list =
   let _Fx = Data.sample_fx () in
-  let _Fu = Data.sample_fu () in
   let c = Data.sample_c () in
   let b = Data.sample_b () in
   let cov = Data.sample_output_cov () in
-  List.init (Dims.tmax + 1) ~f:(fun _ ->
-    Lds_data.
-      { _Fx_prod = _Fx
-      ; _Fu_prod = _Fu
-      ; _f = None
-      ; _c = Some c
-      ; _b = Some b
-      ; _cov = Some cov
-      })
+  List.init (Dims.tmax + 1) ~f:(fun i ->
+    if i = 0
+    then
+      Lds_data.
+        { _Fx_prod = _Fx
+        ; _Fu_prod = _Fu_0
+        ; _f = None
+        ; _c = Some c
+        ; _b = Some b
+        ; _cov = Some cov
+        }
+    else
+      Lds_data.
+        { _Fx_prod = _Fx
+        ; _Fu_prod = _Fu
+        ; _f = None
+        ; _c = Some c
+        ; _b = Some b
+        ; _cov = Some cov
+        })
 
 (* -----------------------------------------
    ----- Utilitiy Functions ------
@@ -82,11 +102,11 @@ let inv_cov x =
 module PP = struct
   type 'a p =
     { _Fx_prod : 'a (* generative model *)
-    ; _Fu_prod : 'a
     ; _c : 'a
     ; _b : 'a
     ; _cov_o : 'a (* sqrt of the diagonal of covariance of emission noise *)
     ; _cov_u : 'a (* sqrt of the diagonal of covariance of prior over u *)
+    ; _cov_u_0 : 'a (* sqrt of the diagonal of covariance of prior over u_0 *)
     }
   [@@deriving prms]
 end
@@ -101,6 +121,10 @@ let params_from_f_diff ~(theta : P.M.t) ~x0 ~o_list
   (* set o at time 0 as 0 *)
   let o_list_tmp =
     Maths.const (Tensor.zeros_like (Maths.primal (List.hd_exn o_list))) :: o_list
+  in
+  (* first u *)
+  let _cov_u_0_inv =
+    theta._cov_u_0 |> inv_cov |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
   in
   let _cov_u_inv =
     theta._cov_u |> inv_cov |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
@@ -118,17 +142,17 @@ let params_from_f_diff ~(theta : P.M.t) ~x0 ~o_list
   Lqr.Params.
     { x0 = Some x0
     ; params =
-        List.map o_list_tmp ~f:(fun o ->
+        List.mapi o_list_tmp ~f:(fun i o ->
           let _cx = Maths.(_cx_common - (o *@ c_trans)) in
           Lds_data.Temp.
             { _f = None
             ; _Fx_prod = theta._Fx_prod
-            ; _Fu_prod = theta._Fu_prod
+            ; _Fu_prod = (if i = 0 then Maths.const _Fu_0 else Maths.const _Fu)
             ; _cx = Some _cx
             ; _cu = None
             ; _Cxx
             ; _Cxu = None
-            ; _Cuu = _cov_u_inv
+            ; _Cuu = (if i = 0 then _cov_u_0_inv else _cov_u_inv)
             })
     }
 
@@ -136,8 +160,9 @@ let params_from_f_diff ~(theta : P.M.t) ~x0 ~o_list
 let rollout_x ~u_list ~x0 (theta : P.M.t) =
   let x0_tan = Maths.const x0 in
   let _, x_list =
-    List.fold u_list ~init:(x0_tan, [ x0_tan ]) ~f:(fun (x, x_list) u ->
-      let new_x = Maths.(tmp_einsum x theta._Fx_prod + tmp_einsum u theta._Fu_prod) in
+    List.foldi u_list ~init:(x0_tan, [ x0_tan ]) ~f:(fun i (x, x_list) u ->
+      let _Fu_t = if i = 0 then _Fu_0 else _Fu in
+      let new_x = Maths.(tmp_einsum x theta._Fx_prod + tmp_einsum u (const _Fu_t)) in
       new_x, new_x :: x_list)
   in
   List.rev x_list
@@ -168,12 +193,17 @@ let pred_u ~data (theta : P.M.t) =
     let cov_u =
       theta._cov_u |> Maths.abs |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
     in
-    List.init Dims.tmax ~f:(fun _ ->
+    let cov_u_0 =
+      theta._cov_u_0 |> Maths.abs |> Maths.diag_embed ~offset:0 ~dim1:(-2) ~dim2:(-1)
+    in
+    List.init Dims.tmax ~f:(fun i ->
       with_given_seed_torch
         1972
-        (sample_gauss ~_mean:(Maths.const (Tensor.f 0.)) ~_cov:cov_u ~dim:Dims.b))
+        (if i = 0
+         then sample_gauss ~_mean:(Maths.const (Tensor.f 0.)) ~_cov:cov_u_0 ~dim:Dims.a
+         else sample_gauss ~_mean:(Maths.const (Tensor.f 0.)) ~_cov:cov_u ~dim:Dims.b))
   in
-  (* sample o with obsrevation noise *)
+  (* sample o with observation noise *)
   let o_sampled =
     (* propagate prior sampled u through dynamics *)
     let x_rolled_out = rollout_x ~u_list:sampled_u ~x0 theta |> List.tl_exn in
@@ -294,8 +324,9 @@ let theta_init =
   in
   let _cov_o = Tensor.(abs (randn ~device:Dims.device ~kind:Dims.kind [ Dims.o ])) in
   let _cov_u = Tensor.(abs (randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ])) in
+  let _cov_u_0 = Tensor.(abs (randn ~device:Dims.device ~kind:Dims.kind [ Dims.a ])) in
   let _cov_pos = Tensor.(abs (randn ~device:Dims.device ~kind:Dims.kind [ Dims.b ])) in
-  PP.{ _Fx_prod; _Fu_prod; _c; _b; _cov_o; _cov_u }
+  PP.{ _Fx_prod; _c; _b; _cov_o; _cov_u; _cov_u_0 }
 
 let check_grad ~f x =
   let module Input = PP.Make (Prms.P) in

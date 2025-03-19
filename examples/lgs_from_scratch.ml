@@ -32,6 +32,8 @@ let eye_n = Maths.(const (Tensor.of_bigarray ~device:base.device Mat.(eye n)))
 let ones_1 = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ 1 ]))
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
+let ones_x = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ n ]))
+
 
 let q_of u =
   let open Maths in
@@ -83,6 +85,7 @@ module PP = struct
     { q : 'a
     ; d : 'a
     ; b : 'a
+    ; b_0 : 'a (* b at time step 0 has same dimension as state *)
     ; c : 'a
     ; log_obs_var : 'a (* ; scaling_factor : 'a *)
     }
@@ -99,7 +102,7 @@ let true_theta =
     Tensor.(of_float0 ~device:base.device Float.(square 0.01)) |> Maths.const |> Maths.log
   in
   let scaling_factor = Maths.const (Tensor.of_float0 ~device:base.device 1.) in
-  PP.{ q; d; b; c; log_obs_var }
+  PP.{ q; d; b; b_0 = eye_n; c; log_obs_var }
 
 let theta =
   let q, d =
@@ -107,6 +110,7 @@ let theta =
     Prms.free (Maths.primal tmp_q), Prms.free (Maths.primal tmp_d)
   in
   let b = Prms.const (Maths.primal (primal_detach true_theta.b)) in
+  let b_0 = Prms.const (Maths.primal (primal_detach true_theta.b_0)) in
   let c = Prms.free (Maths.primal (make_c ())) in
   let log_obs_var =
     Maths.(log (f Float.(square 1.) * ones_1))
@@ -117,7 +121,7 @@ let theta =
   let scaling_factor =
     Prms.create ~above:(Tensor.f 0.1) (Tensor.ones [ 1 ] ~device:base.device)
   in
-  PP.{ q; d; b; c; log_obs_var }
+  PP.{ q; d; b; b_0; c; log_obs_var }
 
 let std_of_log_var log_var = Maths.(exp (f 0.5 * log_var))
 let precision_of_log_var log_var = Maths.(exp (neg log_var))
@@ -172,7 +176,7 @@ let solver_chol ell y =
 
 (* This has been TESTED and it works.
    Gradients also successfully tested against reverse-mode *)
-let lqr ~a ~b ~c ~obs_precision y =
+let lqr ~a ~b_0 ~b ~c ~obs_precision y =
   let open Maths in
   (* augment observations with dummy y0 *)
   let _T = List.length y in
@@ -181,17 +185,19 @@ let lqr ~a ~b ~c ~obs_precision y =
   let _cz_fun y = neg (einsum [ c, "ij"; obs_precision, "j"; y, "mj" ] "mi") in
   let yT = List.last_exn y in
   let backward_info, _, _, _ =
-    List.fold_right
+    List.fold_right2_exn
+    (List.range 0 _T)
       (List.sub y ~pos:0 ~len:_T)
       ~init:([], _cz_fun yT, _Czz, Int.(_T - 1))
-      ~f:(fun y (accu, _v, _V, t) ->
+      ~f:(fun i y (accu, _v, _V, t) ->
         Stdlib.Gc.major ();
+        let b = if i = 0 then b_0 else b in
         (* we only have state costs for t>=1 *)
         let _cz = if t > 0 then _cz_fun y else f 0. in
         let _Czz = if t > 0 then _Czz else f 0. in
         let _Qzz = _Czz + einsum [ a, "ij"; _V, "jl"; a, "kl" ] "ik" in
         let _Quz = einsum [ b, "ij"; _V, "jl"; a, "kl" ] "ki" in
-        let _Quu = eye_m + einsum [ b, "ij"; _V, "jl"; b, "kl" ] "ik" in
+        let _Quu = (if i = 0 then eye_n else eye_m) + einsum [ b, "ij"; _V, "jl"; b, "kl" ] "ik" in
         let _qz = _cz + einsum [ a, "ij"; _v, "mj" ] "mi" in
         let _qu = einsum [ b, "ij"; _v, "mj" ] "mi" in
         let _Quu_chol = cholesky _Quu in
@@ -207,7 +213,7 @@ let lqr ~a ~b ~c ~obs_precision y =
   assert (List.length backward_info = _T);
   let _k0, _, _ = List.hd_exn backward_info in
   let u0 = _k0 in
-  let z1 = einsum [ b, "ij"; u0, "mi" ] "mj" in
+  let z1 = einsum [ b_0, "ij"; u0, "mi" ] "mj" in
   let us, _ =
     List.fold
       (List.sub backward_info ~pos:1 ~len:Int.(_T - 1))
@@ -219,11 +225,11 @@ let lqr ~a ~b ~c ~obs_precision y =
   in
   List.rev us, backward_info
 
-let rollout ~a ~b ~c u =
+let rollout ~a ~b ~b_0 ~c u =
   let open Maths in
   let u0 = List.hd_exn u in
   let y_of z = einsum [ c, "ij"; z, "mi" ] "mj" in
-  let z1 = einsum [ b, "ij"; u0, "mi" ] "mj" in
+  let z1 = einsum [ b_0, "ij"; u0, "mi" ] "mj" in
   let y, _ =
     List.fold
       (List.tl_exn u)
@@ -234,19 +240,33 @@ let rollout ~a ~b ~c u =
   in
   List.rev y
 
+(* u goes from 1 to T-1, o goes from 1 to T *)
 let sample_data (theta : P.M.t) =
+  let x1 = Tensor.randn ~device:base.device ~kind:base.kind [ bs; n ] in
   let sigma = std_of_log_var theta.log_obs_var in
   let u =
-    List.init tmax ~f:(fun _ ->
+    List.init (tmax - 1) ~f:(fun _ ->
       Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const)
   in
   let a = a_reparam (theta.q, theta.d) in
-  let y =
-    rollout ~a ~b:theta.b ~c:theta.c u
-    |> List.map ~f:(fun y ->
+  let tmp_einsum a b = Maths.einsum [ a, "ma"; b, "ab" ] "mb" in
+  let y_list =
+    let _, y_list_rev =
+      List.fold
+        u
+        ~init:(Maths.const x1, [ tmp_einsum (Maths.const x1) theta.c ])
+        ~f:(fun (x, y_list) u ->
+          let new_x = Maths.(tmp_einsum x a + tmp_einsum u theta.b) in
+          let new_y = tmp_einsum new_x theta.c in
+          new_x, new_y :: y_list)
+    in
+    List.rev y_list_rev
+  in
+  let o =
+    List.map y_list ~f:(fun y ->
       Maths.(y + (sigma * const (Tensor.randn_like (Maths.primal y)))))
   in
-  u, y
+  u, o
 
 let gaussian_llh ?mu ~inv_std x =
   let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
@@ -299,19 +319,19 @@ let save_evals ~out a =
      ----------------------------------------------- *)
 
 let u, y = sample_data true_theta
-let _ = save_time_series ~out:(in_dir "u") u
+(* let _ = save_time_series ~out:(in_dir "u") u *)
 let _ = save_time_series ~out:(in_dir "y") y
 
 let u_recov, _ =
   let a = a_reparam (true_theta.q, true_theta.d) in
   let obs_precision = Maths.(precision_of_log_var true_theta.log_obs_var * ones_o) in
-  lqr ~a ~b:true_theta.b ~c:true_theta.c ~obs_precision y
+  lqr ~a ~b:true_theta.b ~b_0:true_theta.b_0 ~c:true_theta.c ~obs_precision y
 
 let y_recov =
   let a = a_reparam (true_theta.q, true_theta.d) in
-  rollout ~a ~b:true_theta.b ~c:true_theta.c u_recov
+  rollout ~a ~b:true_theta.b ~b_0:true_theta.b_0 ~c:true_theta.c u_recov
 
-let _ = save_time_series ~out:(in_dir "urecov") u_recov
+(* let _ = save_time_series ~out:(in_dir "urecov") u_recov *)
 let _ = save_time_series ~out:(in_dir "yrecov") y_recov
 
 (* let sample_and_kl ~a ~b ~c ~obs_precision ~scaling_factor ustars ys =
@@ -366,29 +386,31 @@ let _ = save_time_series ~out:(in_dir "yrecov") y_recov
   kl, List.rev us   *)
 
 (* approximate kalman smoothed distribution of u *)
-let sample_and_kl ~a ~b backward_info =
+let sample_and_kl ~a ~b ~b_0 backward_info =
   let open Maths in
   let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> const in
   let dummy_u = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; m ] in
+  let dummy_u_0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] in
+
   let us, kl, _ =
-    List.fold
+    List.foldi
       backward_info
       ~init:([], f 0., z0)
-      ~f:(fun (accu, kl, z) (_k, _K, _Quu_chol) ->
+      ~f:(fun i (accu, kl, z) (_k, _K, _Quu_chol) ->
         let du =
           linsolve_triangular
             ~left:false
             ~upper:false
             _Quu_chol
-            (const (Tensor.randn_like dummy_u))
+            (const ( Tensor.randn_like (if i = 0 then dummy_u_0 else dummy_u)))
         in
         let u = du + _k + einsum [ _K, "ji"; z, "mj" ] "mi" in
         let dkl =
-          let prior_term = gaussian_llh ~inv_std:ones_u u in
+          let prior_term = gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u in
           let q_term = gaussian_llh_chol ~precision_chol:_Quu_chol du in
           q_term - prior_term
         in
-        let z = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ b, "ij"; u, "mi" ] "mj" in
+        let z = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ (if i = 0 then b_0 else b), "ij"; u, "mi" ] "mj" in
         u :: accu, kl + dkl, z)
   in
   kl, List.rev us
@@ -396,13 +418,13 @@ let sample_and_kl ~a ~b backward_info =
 let elbo ~data:(y : Maths.t list) (theta : P.M.t) =
   let a = a_reparam (theta.q, theta.d) in
   let obs_precision = Maths.(precision_of_log_var theta.log_obs_var * ones_o) in
-  let ustars, backward_info = lqr ~a ~b:theta.b ~c:theta.c ~obs_precision y in
+  let ustars, backward_info = lqr ~a ~b:theta.b ~b_0:theta.b_0 ~c:theta.c ~obs_precision y in
   let kl, u_sampled =
     (* let scaling_factor = Maths.(theta.scaling_factor * ones_u) in
     sample_and_kl ~a ~b:theta.b ~c:theta.c ~obs_precision ~scaling_factor ustars y   *)
-    sample_and_kl ~a ~b:theta.b backward_info
+    sample_and_kl ~a ~b:theta.b ~b_0:theta.b_0 backward_info
   in
-  let y_pred = rollout ~a ~b:theta.b ~c:theta.c u_sampled in
+  let y_pred = rollout ~a ~b:theta.b ~b_0:theta.b_0 ~c:theta.c u_sampled in
   let lik_term =
     let inv_sigma_o_expanded =
       Maths.(sqrt_precision_of_log_var theta.log_obs_var * ones_o)
@@ -516,6 +538,7 @@ module Make (D : Do_with_T) = struct
                 { q = extract theta_curr.q
                 ; d = extract theta_curr.q
                 ; b = extract theta_curr.b
+                ; b_0 = extract theta_curr.b_0
                 ; c = extract theta_curr.c
                 ; log_obs_var =
                     true_theta.log_obs_var

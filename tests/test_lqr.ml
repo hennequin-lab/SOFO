@@ -1,3 +1,4 @@
+(* test the gradients given by lqr *)
 open Base
 open Torch
 module Arr = Owl.Arr
@@ -46,7 +47,7 @@ let () =
             "Naive batch const true"
             `Quick
             (test_LQR (f_naive ~batch_const:true) ~batch_const:true)) )
-    ; ( "niave_false"
+    ; ( "naive_false"
       , List.init n_tests ~f:(fun _ ->
           Alcotest.test_case
             "Naive batch const false"

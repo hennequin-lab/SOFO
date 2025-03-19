@@ -666,7 +666,7 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
     let n = List.hd_exn _shape in
     Tensor.(f Float.(1. /. sqrt (of_int n)) * randn ~device:X.device ~kind:X.kind _shape)
 
-  let sample_x0 () = sample_tensor [ X.bs; X.n ]
+  let sample_x1 () = sample_tensor [ X.bs; X.n ]
 
   let sample_fx ~target_sa =
     sample_fx_pri ~target_sa ~batch_const:X.batch_const ~m:X.bs ~a:X.n |> to_device
@@ -694,8 +694,8 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
     then Tensor.(abs (Tensor.randn ~device:X.device ~kind:X.kind [ X.o ]))
     else Tensor.(abs (Tensor.randn ~device:X.device ~kind:X.kind [ X.bs; X.o ]))
 
-  (* given parameters such as f_x, f_u and f, returns u list and x list; u list goes from 0 to T-1 and x_list goes from 0 to T and o list goes from 1 to T. *)
-  let traj_rollout ~x0 ~(f_list : Tensor.t f_params list) ~u_list =
+  (* given parameters such as f_x, f_u and f, returns u list and x list; u list goes from 1 to T-1 and x_list goes from 1 to T and o list goes from 1 to T. *)
+  let traj_rollout ~x1 ~(f_list : Tensor.t f_params list) ~u_list =
     let tmp_einsum a b =
       let eqn = if X.batch_const then "ma,ab->mb" else "ma,mab->mb" in
       Tensor.einsum ~equation:eqn [ a; b ] ~path:None
@@ -704,15 +704,9 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
       List.fold2_exn
         f_list
         u_list
-        ~init:(x0, [ x0 ], [])
+        ~init:(x1, [ x1 ], [])
         ~f:(fun (x, x_list, o_list) f_p u ->
-          let new_x =
-            let common = Tensor.(tmp_einsum x f_p._Fx_prod + tmp_einsum u f_p._Fu_prod) in
-            match f_p._f with
-            | None -> common
-            | Some _f -> Tensor.(_f + common)
-          in
-          let new_o =
+          let o =
             match f_p._cov with
             | None -> None
             | Some _cov ->
@@ -724,8 +718,8 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
               in
               let with_emission =
                 match f_p._c with
-                | Some c -> Tensor.(noise + tmp_einsum new_x c)
-                | None -> Tensor.(noise + new_x)
+                | Some c -> Tensor.(noise + tmp_einsum x c)
+                | None -> Tensor.(noise + x)
               in
               let with_b =
                 match f_p._b with
@@ -738,7 +732,13 @@ module Make_LDS_Tensor (X : module type of Default_Tensor) = struct
               in
               Some with_b
           in
-          new_x, new_x :: x_list, new_o :: o_list)
+          let new_x =
+            let common = Tensor.(tmp_einsum x f_p._Fx_prod + tmp_einsum u f_p._Fu_prod) in
+            match f_p._f with
+            | None -> common
+            | Some _f -> Tensor.(_f + common)
+          in
+          new_x, new_x :: x_list, o :: o_list)
     in
     List.rev x_list, List.rev o_list
 end

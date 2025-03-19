@@ -87,9 +87,12 @@ module Dims = struct
   let device = base.device
 end
 
+
 let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.bs; Dims.n ]
 let eye_m = Maths.(const (Tensor.eye ~n:Dims.m ~options:(Dims.kind, Dims.device)))
+let eye_n = Tensor.eye ~n:Dims.n ~options:(Dims.kind, Dims.device) |> Maths.const
 let ones_u = Maths.(const (Tensor.ones ~device:Dims.device ~kind:Dims.kind [ Dims.m ]))
+let ones_u_0 = Maths.(const (Tensor.ones ~device:Dims.device ~kind:Dims.kind [ Dims.n ]))
 let ones_o = Maths.(const (Tensor.ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]))
 
 let make_a_prms ~n target_sa =
@@ -128,14 +131,20 @@ let make_c () =
 
 let _q_true, _d_true = make_a_prms ~n:Dims.n 0.8
 let _Fx_true = _Fx_reparam (_q_true, _d_true)
+let eye_n = Tensor.eye ~n:Dims.n ~options:(Dims.kind, Dims.device) |> Maths.const
 let _Fu_true = make_fu ()
+
+(* _Fu_0 is identity *)
+let _Fu_0_true = eye_n
 let _c_true = make_c ()
 let _obs_var_true = Maths.const Tensor.(square (f 0.1))
 
+(* u goes from 1 to T-1, o goes from 1 to T *)
 let sample_data () =
+  let x1 = Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.bs; Dims.n ] in
   let sigma = Maths.sqrt _obs_var_true in
   let u =
-    List.init Dims.tmax ~f:(fun _ ->
+    List.init (Dims.tmax - 1) ~f:(fun _ ->
       Tensor.(randn ~device:base.device ~kind:base.kind [ Dims.bs; Dims.m ])
       |> Maths.const)
   in
@@ -148,7 +157,7 @@ let sample_data () =
     let _, y_list_rev =
       List.fold
         u_list
-        ~init:(Maths.const x0, [])
+        ~init:(Maths.const x1, [ tmp_einsum (Maths.const x1) _c_true ])
         ~f:(fun (x, y_list) u ->
           let new_x = Maths.(tmp_einsum x _Fx_true + tmp_einsum u _Fu_true) in
           let new_y = tmp_einsum new_x _c_true in
@@ -237,7 +246,7 @@ module LGS = struct
     Lqr.Params.
       { x0 = Some x0
       ; params =
-          List.map o_list_tmp ~f:(fun o ->
+          List.mapi o_list_tmp ~f:(fun i o ->
             let _cx =
               Maths.(
                 neg (einsum [ const o, "ab"; _obs_var_inv, "b"; theta._c, "cb" ] "ac"))
@@ -245,16 +254,16 @@ module LGS = struct
             Lds_data.Temp.
               { _f = None
               ; _Fx_prod
-              ; _Fu_prod = _Fu_true
+              ; _Fu_prod = (if i = 0 then _Fu_0_true else _Fu_true)
               ; _cx = Some _cx
               ; _cu = None
               ; _Cxx
               ; _Cxu = None
-              ; _Cuu = eye_m
+              ; _Cuu = (if i = 0 then eye_n else eye_m)
               })
       }
 
-  (* rollout y list under sampled u *)
+  (* rollout y list under sampled u (u_0, ..., u_{T-1})*)
   let rollout ~u_list (theta : P.M.t) =
     let tmp_einsum a b =
       if Dims.batch_const
@@ -263,11 +272,15 @@ module LGS = struct
     in
     let _Fx_prod = _Fx_reparam (theta._q, theta._d) in
     let _, y_list_rev =
-      List.fold
+      List.foldi
         u_list
         ~init:(Maths.const x0, [])
-        ~f:(fun (x, y_list) u ->
-          let new_x = Maths.(tmp_einsum x _Fx_prod + tmp_einsum u _Fu_true) in
+        ~f:(fun i (x, y_list) u ->
+          let new_x =
+            Maths.(
+              tmp_einsum x _Fx_prod
+              + tmp_einsum u (if i = 0 then _Fu_0_true else _Fu_true))
+          in
           let new_y = tmp_einsum new_x theta._c in
           new_x, new_y :: y_list)
     in
@@ -328,14 +341,17 @@ module LGS = struct
     kl, List.rev us  *)
 
   (* approximate kalman smoothed distribution of u *)
-  let sample_and_kl ~_Fx ~_Fu (backward_info : Lqr.backward_info list) =
+  let sample_and_kl ~_Fx ~_Fu ~_Fu_0 (backward_info : Lqr.backward_info list) =
     let open Maths in
+    let dummy_u_0 =
+      Tensor.zeros ~device:base.device ~kind:base.kind [ Dims.bs; Dims.n ]
+    in
     let dummy_u = Tensor.zeros ~device:base.device ~kind:base.kind [ Dims.bs; Dims.m ] in
     let us, kl, _ =
-      List.fold
+      List.foldi
         backward_info
         ~init:([], f 0., Maths.const x0)
-        ~f:(fun (accu, kl, z) backward_info ->
+        ~f:(fun i (accu, kl, z) backward_info ->
           (* LL^T = Quu *)
           let _Quu_chol = Option.value_exn backward_info._Quu_chol in
           let du =
@@ -345,12 +361,16 @@ module LGS = struct
                 ~left:true
                 ~upper:false
                 _Quu_chol
-                (const (Tensor.eye ~n:Dims.m ~options:(base.kind, base.device)))
+                (if i = 0 then eye_n else eye_m)
             in
             let _Quu_inv_chol =
               einsum [ _Quu_chol_inv, "ab"; _Quu_chol_inv, "ac" ] "bc" |> cholesky
             in
-            einsum [ const (Tensor.randn_like dummy_u), "ma"; _Quu_inv_chol, "ca" ] "mc"
+            einsum
+              [ const (Tensor.randn_like (if i = 0 then dummy_u_0 else dummy_u)), "ma"
+              ; _Quu_inv_chol, "ca"
+              ]
+              "mc"
           in
           let u =
             du
@@ -358,12 +378,15 @@ module LGS = struct
             + einsum [ z, "mj"; Option.value_exn backward_info._K, "ij" ] "mi"
           in
           let dkl =
-            let prior_term = gaussian_llh ~inv_std:ones_u u in
+            let prior_term =
+              gaussian_llh ~inv_std:(if i = 0 then ones_u_0 else ones_u) u
+            in
             let q_term = gaussian_llh_chol ~precision_chol:_Quu_chol du in
             q_term - prior_term
           in
           let z =
-            einsum [ _Fx, "ij"; z, "mi" ] "mj" + einsum [ _Fu, "ij"; u, "mi" ] "mj"
+            einsum [ _Fx, "ij"; z, "mi" ] "mj"
+            + einsum [ (if i = 0 then _Fu_0 else _Fu), "ij"; u, "mi" ] "mj"
           in
           u :: accu, kl + dkl, z)
     in
@@ -377,9 +400,7 @@ module LGS = struct
       params_from_f ~x0:(Maths.const x0) ~theta ~o_list
       |> Lds_data.map_naive ~batch_const:Dims.batch_const
     in
-    let sol, backward_info =
-      Lqr._solve  ~batch_const:Dims.batch_const p
-    in
+    let sol, backward_info = Lqr._solve ~batch_const:Dims.batch_const p in
     let ustars = List.map sol ~f:(fun s -> s.u) in
     let kl, u_sampled =
       (* let scaling_factor = Maths.(theta._scaling_factor * ones_u) in *)
@@ -392,7 +413,7 @@ module LGS = struct
         ~scaling_factor
         ustars
         o_list *)
-      sample_and_kl ~_Fx ~_Fu:_Fu_true backward_info
+      sample_and_kl ~_Fx ~_Fu:_Fu_true ~_Fu_0:_Fu_0_true backward_info
     in
     let y_pred = rollout ~u_list:u_sampled theta in
     let lik_term =
