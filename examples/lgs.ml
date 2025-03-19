@@ -377,8 +377,8 @@ module LGS = struct
       params_from_f ~x0:(Maths.const x0) ~theta ~o_list
       |> Lds_data.map_naive ~batch_const:Dims.batch_const
     in
-    let sol, backward_info, _ =
-      Lqr._solve ~laplace:false ~batch_const:Dims.batch_const p
+    let sol, backward_info =
+      Lqr._solve  ~batch_const:Dims.batch_const p
     in
     let ustars = List.map sol ~f:(fun s -> s.u) in
     let kl, u_sampled =

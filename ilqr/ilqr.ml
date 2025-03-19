@@ -102,7 +102,7 @@ let forward
 
 let rec ilqr_loop
           ~batch_const
-          ~laplace
+   
           ~conv_threshold
           ~stop
           ~max_iter
@@ -125,7 +125,7 @@ let rec ilqr_loop
     let common_info =
       backward_common
         ~batch_const
-        ~laplace
+
         (List.map p_curr.Params.params ~f:(fun x -> x.common))
     in
     cleanup ();
@@ -147,7 +147,6 @@ let rec ilqr_loop
     cleanup ();
     ilqr_loop
       ~batch_const
-      ~laplace
       ~conv_threshold
       ~stop
       ~max_iter
@@ -178,7 +177,7 @@ let rollout
 (* when batch_const is true, _Fx_prods, _Fu_prods, _Cxx, _Cxu, _Cuu has no leading batch dimension and special care needs to be taken to deal with these *)
 let _isolve
       ?(batch_const = false)
-      ?(laplace = false)
+
       ~f_theta
       ~cost_func
       ~params_func
@@ -193,7 +192,7 @@ let _isolve
   let tau_final, common_info_final, info_final =
     ilqr_loop
       ~batch_const
-      ~laplace
+
       ~conv_threshold
       ~stop:false
       ~max_iter
@@ -207,14 +206,5 @@ let _isolve
       ~info_prev:None
   in
   cleanup ();
-  (* step 3: calculate covariances if required *)
-  if laplace
-  then (
-    let covariances =
-      covariances
-        ~batch_const
-        ~common_info:(Option.value_exn common_info_final)
-        (params_func tau_final)
-    in
-    tau_final, info_final, Some (List.map covariances ~f:(fun x -> Option.value_exn x)))
-  else tau_final, info_final, None
+  
+ tau_final, info_final

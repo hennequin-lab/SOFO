@@ -78,7 +78,6 @@ let sqrt_precision_of_log_var log_var = Maths.(exp (f (-0.5) * log_var))
    -- Model setup and optimizer
    ----------------------------------------- *)
 
-let laplace = false
 let conv_threshold = 0.01
 let max_iter_ilqr = 200
 
@@ -323,9 +322,8 @@ module GRU = struct
     (* TODO: is there a more elegant way? Currently I need to set batch_const to false since _Fx and _Fu has batch dim. *)
     (* use lqr to obtain the optimal u *)
     let f_theta = rollout_one_step theta in
-    let sol, _, _ =
+    let sol, _ =
       Ilqr._isolve
-        ~laplace
         ~f_theta
         ~batch_const:false
         ~cost_func

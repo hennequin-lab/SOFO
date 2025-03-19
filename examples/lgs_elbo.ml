@@ -270,7 +270,7 @@ module LGS = struct
       params_from_f ~x0:(Maths.const x0) ~theta ~o_list
       |> Lds_data.map_naive ~batch_const:Dims.batch_const
     in
-    let sol, _,_ = Lqr._solve ~laplace:false ~batch_const:Dims.batch_const p in
+    let sol, _ = Lqr._solve  ~batch_const:Dims.batch_const p in
     let optimal_u_list = List.map sol ~f:(fun s -> s.u) in
     (* sample u from the kronecker formation *)
     let u_list =

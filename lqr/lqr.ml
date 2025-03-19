@@ -82,11 +82,7 @@ let neg_inv_symm ~is_vector _b (ell, ell_T) =
   | _ -> None
 
 (* backward recursion: all the (most expensive) common bits. common goes from 0 to T *)
-let backward_common
-      ~laplace
-      ~batch_const
-      (common : (t, t -> t) momentary_params_common list)
-  =
+let backward_common ~batch_const (common : (t, t -> t) momentary_params_common list) =
   let _V =
     match List.last common with
     | None -> failwith "LQR needs a time horizon >= 1"
@@ -139,7 +135,6 @@ let backward_common
         in
         _Qxx +? tmp2
       in
-      (* only save Quu_inv if laplace *)
       _V_new, { _Quu_chol; _Quu_chol_T; _V; _K; _Quu_inv } :: info_list)
   in
   info
@@ -301,76 +296,10 @@ let forward ?(tangent = false) ~batch_const params (backward_info : backward_inf
   in
   List.rev solution
 
-(* TODO: covariances over u only *)
-let covariances
-      ?(batch_const = false)
-      ~(common_info : backward_common_info list)
-      (p : (t option, (t, t -> t) momentary_params list) Params.p)
-  =
-  let common_info_eg = List.hd_exn common_info in
-  let _P_init = Some (zeros_like (Option.value_exn common_info_eg._V)) in
-  (* both params and backward_common need to go from 0 to T-1 *)
-  let params = List.drop_last_exn p.params in
-  (* The sigma list goes from 0 to T-1 *)
-  let _, _Sigma_uu_list =
-    List.fold2_exn
-      params
-      common_info
-      ~init:(_P_init, [])
-      ~f:(fun (_P, _Sigma_uu_list) params common ->
-        let _Sigma_xx = maybe_inv_sqr (_P +? common._V) in
-        let _Sigma_uu =
-          let tmp1 = maybe_batch_matmul common._K _Sigma_xx ~batch_const in
-          let tmp2 = maybe_batch_matmul tmp1 (maybe_btr common._K) ~batch_const in
-          let _Quu_inv =
-            let _Quu =
-              maybe_batch_matmul common._Quu_chol common._Quu_chol_T ~batch_const
-            in
-            maybe_inv_sqr _Quu
-          in
-          tmp2 +? _Quu_inv
-        in
-        let _Px =
-          (* since producted with _F_prod always has a leading batch dim, need to artificially add on some tensors *)
-          let tmp1 = _P +? params.common._Cxx in
-          let tmp1_unsqueezed =
-            if batch_const then maybe_unsqueeze tmp1 ~dim:0 else tmp1
-          in
-          let tmp3 = params.common._Fx_prod_inv *? tmp1_unsqueezed in
-          let tmp4 = params.common._Fx_prod2_inv_trans *? tmp3 in
-          if batch_const then maybe_squeeze tmp4 ~dim:0 else tmp4
-        in
-        let _Pu =
-          let _Px_tmp = if batch_const then maybe_unsqueeze _Px ~dim:0 else _Px in
-          let tmp1 = params.common._Fu_prod *? _Px_tmp in
-          let tmp2 = params.common._Fu_prod2_trans *? tmp1 in
-          let tmp2_squeezed = if batch_const then maybe_squeeze tmp2 ~dim:0 else tmp2 in
-          params.common._Cuu +? tmp2_squeezed
-        in
-        let _P =
-          let _Px_tmp = if batch_const then maybe_unsqueeze _Px ~dim:0 else _Px in
-          let tmp1 = params.common._Fu_prod2_trans *? _Px_tmp in
-          let _Pu_inv = maybe_inv_sqr _Pu in
-          let _Pu_inv_tmp =
-            if batch_const then maybe_unsqueeze _Pu_inv ~dim:0 else _Pu_inv
-          in
-          let tmp2 = maybe_batch_matmul tmp1 _Pu_inv_tmp ~batch_const:false in
-          let tmp3 = params.common._Fu_prod *? _Px_tmp in
-          let tmp4 = maybe_batch_matmul tmp2 tmp3 ~batch_const:false in
-          let tmp5 = if batch_const then maybe_squeeze tmp4 ~dim:0 else tmp4 in
-          _Px -? tmp5
-        in
-        _P, _Sigma_uu :: _Sigma_uu_list)
-  in
-  List.rev _Sigma_uu_list
-
 (* when batch_const is true, _Fx_prods, _Fu_prods, _Cxx, _Cxu, _Cuu has no leading batch dimension and special care needs to be taken to deal with these *)
-let _solve ?(batch_const = false) ?(laplace = false) p =
+let _solve ?(batch_const = false) p =
   let common_info =
-    backward_common
-      ~batch_const
-      ~laplace
-      (List.map p.Params.params ~f:(fun x -> x.common))
+    backward_common ~batch_const (List.map p.Params.params ~f:(fun x -> x.common))
   in
   cleanup ();
   let bck = backward ~batch_const common_info p in
@@ -381,11 +310,7 @@ let _solve ?(batch_const = false) ?(laplace = false) p =
     |> List.map ~f:(fun s ->
       Solution.{ x = Option.value_exn s.x; u = Option.value_exn s.u })
   in
-  if laplace
-  then (
-    let covariances = covariances ~batch_const ~common_info p in
-    sol, bck, Some (List.map covariances ~f:(fun x -> Option.value_exn x)))
-  else sol, bck, None
+  sol, bck
 
 (* backward pass and forward pass with surrogate rhs for the tangent problem;
    s is the solution obtained from lqr through the primals
@@ -542,7 +467,7 @@ let tangent_solve
   in
   List.rev solution
 
-let solve ?(batch_const = false) ?(laplace = false) p =
+let solve ?(batch_const = false) p =
   (* solve the primal problem first *)
   let _p = Option.map ~f:(fun x -> Maths.const (Maths.primal x)) in
   let _p_implicit = Option.map ~f:(fun x -> x.primal) in
@@ -577,10 +502,7 @@ let solve ?(batch_const = false) ?(laplace = false) p =
       }
   in
   let common_info =
-    backward_common
-      ~batch_const
-      ~laplace
-      (List.map p_primal.Params.params ~f:(fun x -> x.common))
+    backward_common ~batch_const (List.map p_primal.Params.params ~f:(fun x -> x.common))
   in
   cleanup ();
   (* SOLVE THE PRIMAL PROBLEM *)
@@ -607,10 +529,4 @@ let solve ?(batch_const = false) ?(laplace = false) p =
       in
       Solution.{ u = zip s.u st.u; x = zip s.x st.x })
   in
-  (* TODO: return backward info list for smoothed posterior covariance over u *)
-  if laplace
-  then (
-    (* TODO: if we need covariances to carry tangents we need to compute everything with tangents, hence cannot be used in this separable method. For now we assume we do not need the covariances to carry tangents i.e. do not differentiate through the samples *)
-    let covariances = covariances ~batch_const ~common_info p_primal in
-    sol, Some (List.map covariances ~f:(fun x -> Option.value_exn x)))
-  else sol, None
+  sol

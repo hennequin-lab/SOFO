@@ -482,9 +482,9 @@ let map_implicit ~batch_const (x : Input.M.t) =
   Lqr.Params.{ x with params }
 
 let f_naive ~batch_const (x : Input.M.t) : Output.M.t =
-  let sol, _, _ = Lqr._solve ~batch_const (map_naive ~batch_const x) in
+  let sol, _ = Lqr._solve ~batch_const (map_naive ~batch_const x) in
   sol
 
 let f_implicit ~batch_const (x : Input.M.t) : Output.M.t =
-  let sol, _ = Lqr.solve ~batch_const (map_implicit ~batch_const x) in
+  let sol = Lqr.solve ~batch_const (map_implicit ~batch_const x) in
   sol

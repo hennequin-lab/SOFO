@@ -145,7 +145,7 @@ let pred_u ~data (theta : P.M.t) =
     params_from_f ~x0:x0_tan ~theta ~o_list
     |> Lds_data.map_implicit ~batch_const:Dims.batch_const
   in
-  let sol, _ = Lqr.solve ~batch_const:Dims.batch_const p in
+  let sol = Lqr.solve ~batch_const:Dims.batch_const p in
   let optimal_u_list = List.map sol ~f:(fun s -> s.u) in
   (* sample u from the kronecker formation *)
   let u_list =
