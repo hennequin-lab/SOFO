@@ -432,13 +432,6 @@ let map_naive ~batch_const (x : Input.M.t) =
             ; _Fx_prod2_tangent = irrelevant
             ; _Fu_prod_tangent = irrelevant
             ; _Fu_prod2_tangent = irrelevant
-            ; _Fx_prod_inv = Some (bmm_inv ~batch_const p._Fx_prod)
-            ; _Fx_prod2_inv = Some (bmm2_inv ~batch_const p._Fx_prod)
-            ; _Fu_prod_trans = Some (bmm_trans ~batch_const p._Fu_prod)
-            ; _Fu_prod2_trans = Some (bmm2_trans ~batch_const p._Fu_prod)
-            ; _Fx_prod_inv_trans = Some (bmm_inv_trans ~batch_const p._Fx_prod)
-            ; _Fx_prod2_inv_trans =
-                Some (bmm2_inv_trans ~batch_const p._Fx_prod)
                 (*  A A^T to make sure tangents are positive definite; not needed in actual lqr. *)
             ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
             ; _Cxu = p._Cxu
@@ -464,12 +457,6 @@ let map_implicit ~batch_const (x : Input.M.t) =
             ; _Fx_prod2_tangent = Some (prod2_tangent ~batch_const p._Fx_prod)
             ; _Fu_prod_tangent = Some (prod_tangent ~batch_const p._Fu_prod)
             ; _Fu_prod2_tangent = Some (prod2_tangent ~batch_const p._Fu_prod)
-            ; _Fx_prod_inv = Some (prod_inv ~batch_const p._Fx_prod)
-            ; _Fx_prod2_inv = Some (prod2_inv ~batch_const p._Fx_prod)
-            ; _Fu_prod_trans = Some (prod_trans ~batch_const p._Fu_prod)
-            ; _Fu_prod2_trans = Some (prod2_trans ~batch_const p._Fu_prod)
-            ; _Fx_prod_inv_trans = Some (prod_inv_trans ~batch_const p._Fx_prod)
-            ; _Fx_prod2_inv_trans = Some (prod2_inv_trans ~batch_const p._Fx_prod)
             ; _Cxx = Some Maths.(p._Cxx *@ btr p._Cxx)
             ; _Cxu = p._Cxu
             ; _Cuu = Some Maths.(p._Cuu *@ btr p._Cuu)

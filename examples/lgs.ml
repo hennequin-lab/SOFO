@@ -569,7 +569,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config ~iter:_ =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.5
+      ; learning_rate = Some 0.3
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false

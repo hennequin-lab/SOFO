@@ -57,6 +57,7 @@ let ones_tmax = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ 
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
 let sample = true
+let gamma = 1.
 
 (* -----------------------------------------
    ----- Utilitiy Functions ------
@@ -132,7 +133,7 @@ module GRU = struct
         (* recognition model; sqrt of the diagonal covariance of space factor *)
       ; _log_time_var : 'a *)
         (* sqrt of the diagonal covariance of the time factor *)
-      ; _scaling_factor : 'a
+      (* ; _scaling_factor : 'a *)
       }
     [@@deriving prms]
   end
@@ -313,9 +314,9 @@ module GRU = struct
     let f_theta = rollout_one_step theta in
     let sol, backward_info =
       Ilqr._isolve
-
-        ~f_theta
         ~batch_const:false
+        ~gamma
+        ~f_theta
         ~cost_func
         ~params_func
         ~conv_threshold
@@ -649,7 +650,7 @@ module GRU = struct
     let _scaling_factor =
       Prms.create ~above:(Tensor.f 0.1) (Tensor.ones [ 1 ] ~device:base.device)
     in
-    { _W; _A; _D; _B; _h; _c; _b; _log_obs_var; _scaling_factor }
+    { _W; _A; _D; _B; _h; _c; _b; _log_obs_var }
 
   let simulate ~theta ~data =
     (* infer the optimal u *)

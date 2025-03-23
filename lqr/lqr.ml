@@ -485,12 +485,6 @@ let solve ?(batch_const = false) p =
                 ; _Fx_prod2_tangent = _p_implicit p.common._Fx_prod2_tangent
                 ; _Fu_prod_tangent = _p_implicit p.common._Fu_prod_tangent
                 ; _Fu_prod2_tangent = _p_implicit p.common._Fu_prod2_tangent
-                ; _Fx_prod_inv = _p_implicit p.common._Fx_prod_inv
-                ; _Fx_prod2_inv = _p_implicit p.common._Fx_prod2_inv
-                ; _Fu_prod_trans = _p_implicit p.common._Fu_prod_trans
-                ; _Fu_prod2_trans = _p_implicit p.common._Fu_prod2_trans
-                ; _Fx_prod_inv_trans = _p_implicit p.common._Fx_prod_inv_trans
-                ; _Fx_prod2_inv_trans = _p_implicit p.common._Fx_prod2_inv_trans
                 ; _Cxx = _p p.common._Cxx
                 ; _Cuu = _p p.common._Cuu
                 ; _Cxu = _p p.common._Cxu

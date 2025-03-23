@@ -80,6 +80,7 @@ let sqrt_precision_of_log_var log_var = Maths.(exp (f (-0.5) * log_var))
 
 let conv_threshold = 0.01
 let max_iter_ilqr = 200
+let gamma = 1.
 
 module GRU = struct
   module PP = struct
@@ -324,8 +325,9 @@ module GRU = struct
     let f_theta = rollout_one_step theta in
     let sol, _ =
       Ilqr._isolve
-        ~f_theta
+        ~gamma
         ~batch_const:false
+        ~f_theta
         ~cost_func
         ~params_func
         ~conv_threshold

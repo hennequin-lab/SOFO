@@ -629,6 +629,7 @@ let ilqr ~targets_batched =
     Ilqr._isolve
       ~f_theta
       ~batch_const:false
+      ~gamma:1.
       ~cost_func
       ~params_func
       ~conv_threshold
