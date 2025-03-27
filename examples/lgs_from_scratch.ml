@@ -55,7 +55,8 @@ let make_a_prms target_sa =
       let sa = Owl.Linalg.D.eigvals w |> Owl.Dense.Matrix.Z.re |> Mat.max' in
       Mat.(Float.(target_sa / sa) $* w)
     in
-    Owl.Linalg.D.expm Mat.((w - eye n) *$ 0.1)
+    (* sometimes we set to 0.1. 1 is coarser *)
+    Owl.Linalg.D.expm Mat.((w - eye n) *$ 0.5)
   in
   let p = Owl.Linalg.D.discrete_lyapunov a Mat.(eye n) in
   let u, s, _ = Owl.Linalg.D.svd p in
@@ -120,7 +121,7 @@ let theta =
     (* |> Prms.pin *)
   in
   let scaling_factor =
-    Prms.create ~above:(Tensor.f 0.1) (Tensor.ones [ 1 ] ~device:base.device) |> Prms.pin
+    Prms.create ~above:(Tensor.f 0.1) (Tensor.ones [ 1 ] ~device:base.device) 
   in
   PP.{ q; d; b; b_0; c; log_obs_var; scaling_factor }
 
@@ -336,7 +337,7 @@ let o_recov =
 let _ = save_time_series ~out:(in_dir "orecov") o_recov
 
 (* approximate filtering distribution of u *)
-(* let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
+ let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
   let open Maths in
   let scaling_factor = reshape scaling_factor ~shape:[ 1; -1 ] in
   let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> Maths.const in
@@ -350,6 +351,7 @@ let _ = save_time_series ~out:(in_dir "orecov") o_recov
   let precision_chol =
     (eye_m + einsum [ btrinv, "io"; c, "jo"; b, "kj" ] "ik" |> cholesky) * scaling_factor
   in
+
   let _, kl, us =
     let u_star_y_list = List.map2_exn ustars o_list ~f:(fun u o -> u, o) in
     List.fold2_exn
@@ -395,8 +397,7 @@ let _ = save_time_series ~out:(in_dir "orecov") o_recov
         in
         z, kl, (ustar + u_sample) :: us)
   in
-  kl, List.rev us     *)
-
+  kl, List.rev us         
 (* approximate kalman smoothed distribution of u *)
 (* let sample_and_kl ~a ~b ~b_0 backward_info =
   let open Maths in
@@ -425,10 +426,10 @@ let _ = save_time_series ~out:(in_dir "orecov") o_recov
         let z = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ (if i = 0 then b_0 else b), "ij"; u, "mi" ] "mj" in
         u :: accu, kl + dkl, z)
   in
-  kl, List.rev us   *)
+  kl, List.rev us    *)
 
 (* use Matheron sampling to get the samples but use filtering to evaluate kl *)
-let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
+(* let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
   let open Maths in
   (* step 1: Matheron sampling to get u *)
   let u_matheron =
@@ -475,12 +476,12 @@ let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
       (eye_m + einsum [ btrinv, "io"; c, "jo"; b, "kj" ] "ik" |> cholesky)
       * scaling_factor
     in
-    let u_star_y_list = List.map2_exn ustars o_list ~f:(fun u o -> u, o) in
+    let u_star_u_math_o_list = List.map3_exn ustars u_matheron o_list ~f:(fun ustar u_math o -> ustar, u_math, o) in
     List.fold2_exn
       (List.range 0 tmax)
-      u_star_y_list
+      u_star_u_math_o_list
       ~init:(z0, f 0., [])
-      ~f:(fun (z, kl, us) i (ustar, ostar) ->
+      ~f:(fun (z, kl, us) i (ustar, u_math, ostar) ->
         Stdlib.Gc.major ();
         let b = if i = 0 then b_0 else b in
         let precision_chol = if i = 0 then precision_chol_0 else precision_chol in
@@ -506,8 +507,8 @@ let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
                   [ bs; (if i = 0 then n else m) ]))
         in
         let u_sample = mu + u_diff_elbo in
-        (* propagate that sample to update z *)
-        let z = zpred + (u_sample *@ b) in
+        (* M1: sample from the posterior filtering distribution to calculate kl *)
+        (* let z = zpred + (u_sample *@ b) in
         (* update the KL divergence *)
         let kl =
           let prior_term =
@@ -516,10 +517,21 @@ let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
           in
           let q_term = gaussian_llh_chol ~precision_chol u_diff_elbo in
           kl + q_term - prior_term
+        in *)
+        (* M2: use u_math to calculate kl *)
+        let z = (z *@ a) + (u_math *@ b) in
+        (* update the KL divergence *)
+        let kl =
+          let prior_term =
+            gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u_math
+          in
+          let q_term = gaussian_llh_chol ~precision_chol (u_math - ustar - mu) in
+          kl + q_term - prior_term
         in
         z, kl, (ustar + u_sample) :: us)
   in
-  kl, u_matheron 
+  kl, u_matheron     
+    *)
 
 let elbo ~data:(o_list : Maths.t list) (theta : P.M.t) =
   let a = a_reparam (theta.q, theta.d) in
@@ -538,7 +550,7 @@ let elbo ~data:(o_list : Maths.t list) (theta : P.M.t) =
       ~scaling_factor
       ustars
       o_list 
-    (* sample_and_kl ~a ~b:theta.b ~b_0:theta.b_0 backward_info *)
+   (* sample_and_kl ~a ~b:theta.b ~b_0:theta.b_0 backward_info  *)
   in
   let y_pred = rollout ~a ~b:theta.b ~b_0:theta.b_0 ~c:theta.c u_sampled in
   let lik_term =
@@ -698,7 +710,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config ~iter:_ =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.01
+      ; learning_rate = Some 0.1
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false
@@ -721,7 +733,7 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (M)
 
   let config ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.0001 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
 
   let init = O.init theta
 end

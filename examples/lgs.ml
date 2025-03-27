@@ -80,20 +80,21 @@ module Dims = struct
   let n = 10
   let m = 5
   let o = 40
-  let tmax = 50
+  let tmax = 10
   let bs = 32
   let batch_const = true
   let kind = base.kind
   let device = base.device
 end
+let true_noise_std = 0.1
 
 
-let x0 = Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.bs; Dims.n ]
-let eye_m = Maths.(const (Tensor.eye ~n:Dims.m ~options:(Dims.kind, Dims.device)))
-let eye_n = Tensor.eye ~n:Dims.n ~options:(Dims.kind, Dims.device) |> Maths.const
-let ones_u = Maths.(const (Tensor.ones ~device:Dims.device ~kind:Dims.kind [ Dims.m ]))
-let ones_u_0 = Maths.(const (Tensor.ones ~device:Dims.device ~kind:Dims.kind [ Dims.n ]))
-let ones_o = Maths.(const (Tensor.ones ~device:Dims.device ~kind:Dims.kind [ Dims.o ]))
+let x0 = Tensor.zeros ~device:base.device ~kind:base.kind [ Dims.bs; Dims.n ]
+let eye_m = Maths.(const (Tensor.eye ~n:Dims.m ~options:(base.kind, base.device)))
+let eye_n = Tensor.eye ~n:Dims.n ~options:(base.kind, base.device) |> Maths.const
+let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ Dims.m ]))
+let ones_x = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ Dims.n ]))
+let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ Dims.o ]))
 
 let make_a_prms ~n target_sa =
   let a =
@@ -131,17 +132,17 @@ let make_c () =
 
 let _q_true, _d_true = make_a_prms ~n:Dims.n 0.8
 let _Fx_true = _Fx_reparam (_q_true, _d_true)
-let eye_n = Tensor.eye ~n:Dims.n ~options:(Dims.kind, Dims.device) |> Maths.const
+let eye_n = Tensor.eye ~n:Dims.n ~options:(base.kind, base.device) |> Maths.const
 let _Fu_true = make_fu ()
 
 (* _Fu_0 is identity *)
 let _Fu_0_true = eye_n
 let _c_true = make_c ()
-let _obs_var_true = Maths.const Tensor.(square (f 0.1))
+let _obs_var_true = Maths.const Tensor.(square (f true_noise_std))
 
 (* u goes from 1 to T-1, o goes from 1 to T *)
 let sample_data () =
-  let x1 = Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.bs; Dims.n ] in
+  let x1 = Tensor.randn ~device:base.device ~kind:base.kind [ Dims.bs; Dims.n ] in
   let sigma = Maths.sqrt _obs_var_true in
   let u =
     List.init (Dims.tmax - 1) ~f:(fun _ ->
@@ -195,7 +196,8 @@ let true_theta =
     { _q = _q_true
     ; _d = _d_true
     ; _c = _c_true
-    ; _log_obs_var = Maths.log _obs_var_true (* ; _scaling_factor = Maths.f 1. *)
+    ; _log_obs_var = Maths.log _obs_var_true 
+    (* ; _scaling_factor = Maths.f 1. *)
     }
 
 module LGS = struct
@@ -287,26 +289,36 @@ module LGS = struct
     List.rev y_list_rev
 
   (* approximate kalman filtered distribution of u *)
-  (* let sample_and_kl ~_Fx ~_Fu ~_c ~obs_precision ~scaling_factor ustars o_list =
+(* let sample_and_kl ~_Fx ~_Fu ~_Fu_0 ~_c ~obs_precision ~scaling_factor ustars o_list =
     let open Maths in
     let o_list = List.map ~f:Maths.const o_list in
-    let scaling_factor = reshape scaling_factor ~shape:[ 1; -1 ] in
-    let z0 =
-      Tensor.zeros ~device:Dims.device ~kind:Dims.kind [ Dims.bs; Dims.n ] |> Maths.const
+        let z0 =
+      Tensor.zeros ~device:base.device ~kind:base.kind [ Dims.bs; Dims.n ] |> Maths.const
     in
+    let btrinv_0 = einsum [ _Fu_0, "ij"; _c, "jo"; obs_precision, "o" ] "io" in
     let btrinv = einsum [ _Fu, "ij"; _c, "jo"; obs_precision, "o" ] "io" in
     (* posterior precision of filtered covariance of u *)
-    let precision_chol =
-      (eye_m + einsum [ btrinv, "io"; _c, "jo"; _Fu, "kj" ] "ik" |> cholesky)
-      * scaling_factor
+    let precision_chol_0 =
+      let tmp = scaling_factor * ones_x |> reshape ~shape:[1;-1] in 
+      (eye_n + einsum [ btrinv_0, "io"; _c, "jo"; _Fu_0, "kj" ] "ik" |> cholesky )
+    * tmp
     in
+    let precision_chol =
+      let tmp = scaling_factor * ones_u |> reshape ~shape:[1;-1] in 
+      (eye_m + einsum [ btrinv, "io"; _c, "jo"; _Fu, "kj" ] "ik" |> cholesky)
+      * (tmp)
+    in
+    let ustars_o_list = List.map2_exn ustars o_list ~f:(fun u o -> (u,o)) in 
     let _, kl, us =
-      List.fold2_exn
-        ustars
-        o_list
+      List.foldi
+        ustars_o_list
         ~init:(z0, f 0., [])
-        ~f:(fun (z, kl, us) ustar o ->
+        ~f:(fun i (z, kl, us) (ustar, o) ->
           Stdlib.Gc.major ();
+          let _Fu = if i = 0 then _Fu_0 else _Fu in 
+          let precision_chol = if i = 0 then precision_chol_0 else precision_chol in
+        let btrinv = if i = 0 then btrinv_0 else btrinv in
+
           let zpred = (z *@ _Fx) + (ustar *@ _Fu) in
           let ypred = zpred *@ _c in
           let delta = o - ypred in
@@ -322,7 +334,7 @@ module LGS = struct
               ~upper:false
               precision_chol
               (const
-                 (Tensor.randn ~device:Dims.device ~kind:Dims.kind [ Dims.bs; Dims.m ]))
+                 (Tensor.randn ~device:base.device ~kind:base.kind [ Dims.bs; (if i = 0 then Dims.n else Dims.m) ]))
           in
           let u_sample = mu + u_diff_elbo in
           (* propagate that sample to update z *)
@@ -331,14 +343,15 @@ module LGS = struct
           let kl =
             let prior_term =
               let u_tmp = ustar + u_sample in
-              gaussian_llh ~inv_std:ones_u u_tmp
+
+              gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u_tmp
             in
             let q_term = gaussian_llh_chol ~precision_chol:precision_chol u_diff_elbo in
             kl + q_term - prior_term
           in
           z, kl, (ustar + u_sample) :: us)
     in
-    kl, List.rev us  *)
+    kl, List.rev us   *)
 
   (* approximate kalman smoothed distribution of u *)
   let sample_and_kl ~_Fx ~_Fu ~_Fu_0 (backward_info : Lqr.backward_info list) =
@@ -379,7 +392,7 @@ module LGS = struct
           in
           let dkl =
             let prior_term =
-              gaussian_llh ~inv_std:(if i = 0 then ones_u_0 else ones_u) u
+              gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u
             in
             let q_term = gaussian_llh_chol ~precision_chol:_Quu_chol du in
             q_term - prior_term
@@ -390,7 +403,7 @@ module LGS = struct
           in
           u :: accu, kl + dkl, z)
     in
-    kl, List.rev us
+    kl, List.rev us 
 
   let elbo ~data:(o_list : Tensor.t list) (theta : P.M.t) =
     let _Fx = _Fx_reparam (theta._q, theta._d) in
@@ -403,17 +416,16 @@ module LGS = struct
     let sol, backward_info = Lqr._solve ~batch_const:Dims.batch_const p in
     let ustars = List.map sol ~f:(fun s -> s.u) in
     let kl, u_sampled =
-      (* let scaling_factor = Maths.(theta._scaling_factor * ones_u) in *)
-
-      (* sample_and_kl 
+    (* sample_and_kl 
         ~_Fx
         ~_Fu:_Fu_true
+        ~_Fu_0:_Fu_0_true
         ~_c:theta._c
         ~obs_precision
-        ~scaling_factor
+        ~scaling_factor:theta._scaling_factor
         ustars
-        o_list *)
-      sample_and_kl ~_Fx ~_Fu:_Fu_true ~_Fu_0:_Fu_0_true backward_info
+        o_list  *)
+       sample_and_kl ~_Fx ~_Fu:_Fu_true ~_Fu_0:_Fu_0_true backward_info 
     in
     let y_pred = rollout ~u_list:u_sampled theta in
     let lik_term =
@@ -480,7 +492,7 @@ module LGS = struct
     in
     let _c = Prms.free (Maths.primal (make_c ())) in
     let _log_obs_var =
-      Tensor.(log (f Float.(square 1.) * ones ~device:Dims.device ~kind:Dims.kind [ 1 ]))
+      Tensor.(log (f Float.(square 1.) * ones ~device:base.device ~kind:base.kind [ 1 ]))
       |> Prms.free
     in
     let _scaling_factor =
@@ -569,7 +581,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config ~iter:_ =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.3
+      ; learning_rate = Some 0.1
       ; n_tangents = 128
       ; sqrt = false
       ; rank_one = false

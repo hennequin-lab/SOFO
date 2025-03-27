@@ -88,59 +88,6 @@ module SOFO (W : Wrapper.T) = struct
 
   (* initialise tangents, where each tangent is normalised. *)
   let init_tangents ~base ~rank_one ~n_tangents theta =
-    (* TODO: this is for shape of std_o=1 only! *)
-    (* let std_o_size = 1 in
-    let sample_rest x =
-      let zeros =
-        Tensor.zeros
-          (std_o_size :: Tensor.shape x)
-          ~device:(Tensor.device x)
-          ~kind:(Tensor.kind x)
-      in
-      let rest =
-        sample_rand_tensor
-          ~base
-          ~rank_one
-          ~shape:((n_tangents - std_o_size) :: Tensor.shape x)
-      in
-      Tensor.concat [ zeros; rest ] ~dim:0
-    in
-    let vs =
-      W.P.map theta ~f:(function
-        | Prms.Const x ->
-          Tensor.zeros
-            ~device:(Tensor.device x)
-            ~kind:(Tensor.kind x)
-            (n_tangents :: Tensor.shape x)
-        | Prms.Free x -> sample_rest x
-        | Prms.Bounded (x, _, _) ->
-          if Int.(List.hd_exn (Tensor.shape x) = std_o_size)
-          then (
-            (* M1: separate tangent for std_o *)
-            (* let id = Tensor.eye ~n:std_o_size ~options:(Tensor.kind x, Tensor.device x) in
-            let rest =
-              Tensor.zeros
-                ((n_tangents - std_o_size) :: [ std_o_size ])
-                ~device:(Tensor.device x)
-                ~kind:(Tensor.kind x)
-            in
-            Tensor.concat [ id; rest ] ~dim:0 *)
-            (* M2: single tangent for std_o and 0 everywhere else *)
-             let id =
-              Tensor.randn
-                ~device:(Tensor.device x)
-                ~kind:(Tensor.kind x)
-                [ 1; std_o_size ]
-            in
-            let rest =
-              Tensor.zeros
-                ((n_tangents - 1) :: [ std_o_size ])
-                ~device:(Tensor.device x)
-                ~kind:(Tensor.kind x)
-            in    
-            Tensor.concat [ id; rest ] ~dim:0)
-          else sample_rest x)
-    in *)
     let vs =
       W.P.map theta ~f:(function
         | Prms.Const x ->
@@ -153,27 +100,20 @@ module SOFO (W : Wrapper.T) = struct
         | Prms.Bounded (x, _, _) ->
           sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
     in
-    (* normalise each tangent *)
-    let normalize vs =
-      let normalizer =
-        W.P.fold vs ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
-          Tensor.(accu + Convenience.sum_except_dim0 (square v)))
-        |> Tensor.sqrt_
-        |> Tensor.reciprocal_
-      in
-      let normed_vs =
-        W.P.map vs ~f:(fun v ->
-          (* reshape normalizer from [n_tangents] to [n_tangents, 1, ...] with same shape as v. *)
-          let normalizer =
-            Tensor.view
-              normalizer
-              ~size:(List.mapi (Tensor.size v) ~f:(fun i si -> if i = 0 then si else 1))
-          in
-          Maths.Direct Tensor.(v * normalizer))
-      in
-      normed_vs
+    (* orthogonalise them all *)
+    let vtv =
+      W.P.fold vs ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
+        let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
+        Tensor.(accu + einsum ~equation:"ij,kj->ik" ~path:None [ v; v ]))
     in
-    normalize vs
+    let u, s, _ = Tensor.svd ~some:true ~compute_uv:true vtv in
+    let normalizer = Tensor.(u / sqrt s |> transpose ~dim0:0 ~dim1:1) in
+    W.P.map vs ~f:(fun v ->
+      let s = Tensor.shape v in
+      let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
+      let v = Tensor.to_kind v ~kind:(Tensor.kind normalizer) in 
+      let v = Tensor.(matmul normalizer v) in
+      Maths.Direct (Tensor.reshape v ~shape:s))
 
   (* fold vs over sets of v_i s, multiply with associated weights. *)
   let weighted_vs_sum vs ~weights =
