@@ -1,4 +1,5 @@
 (* Linear Gaussian Dynamics, with same state/control/cost parameters constant across trials and across time *)
+
 open Base
 open Forward_torch
 open Torch
@@ -23,12 +24,12 @@ let base =
     ; ba_kind = Bigarray.float32
     }
 
-let m = 2
-let n = 5
-let o = 10
-let tmax = 10
-let bs = 16
-let _K = 90
+let m = 5
+let n = 10
+let o = 40
+let tmax = 40
+let bs = 64
+let _K = 64
 let eye_m = Maths.(const (Tensor.of_bigarray ~device:base.device Mat.(eye m)))
 let eye_n = Maths.(const (Tensor.of_bigarray ~device:base.device Mat.(eye n)))
 let ones_1 = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ 1 ]))
@@ -222,26 +223,37 @@ let ustars ~a ~b backward_info =
 let sample_and_kl ~a ~b backward_info =
   let open Maths in
   let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> const in
-  let us, kl, _ =
+  let us, kl, ggn, _ =
     List.foldi
       backward_info
-      ~init:([], f 0., z0)
-      ~f:(fun t (accu, kl, z) (_k, _K, _Quu_chol) ->
+      ~init:([], f 0., f 0., z0)
+      ~f:(fun t (accu, kl, ggn, z) (_k, _K, _Quu_chol) ->
         let b, u_dim = if t = 0 then b0, n else b, m in
         let du =
           let eps = Tensor.randn ~device:base.device ~kind:base.kind [ bs; u_dim ] in
           linsolve_triangular ~left:false ~upper:false _Quu_chol (const eps)
         in
         let u = du + _k + einsum [ _K, "ji"; z, "mj" ] "mi" in
-        let dkl =
+        let dkl, dggn =
           let prior_term = gaussian_llh ~inv_std:(if t = 0 then ones_u' else ones_u) u in
           let q_term = gaussian_llh_chol ~precision_chol:_Quu_chol du in
-          q_term - prior_term
+          let q_term_t = Maths.tangent q_term in
+          let dggn =
+            Option.map q_term_t ~f:(fun qt ->
+              Maths.einsum [ const qt, "ki"; const qt, "li" ] "kl")
+          in
+          q_term - prior_term, dggn
         in
         let z = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ b, "ij"; u, "mi" ] "mj" in
-        u :: accu, kl + dkl, z)
+        let ggn =
+          match dggn with
+          | Some dggn -> ggn + dggn
+          | None -> ggn
+        in
+        u :: accu, kl + dkl, ggn, z)
   in
-  kl, List.rev us
+  let ggn = ggn / f Float.(of_int tmax) in
+  kl, List.rev us, ggn
 
 let filtering_kl ~a ~b ~c ~obs_precision ~(ustar : Maths.t list) y =
   let open Maths in
@@ -254,12 +266,12 @@ let filtering_kl ~a ~b ~c ~obs_precision ~(ustar : Maths.t list) y =
   let precision_chol' =
     eye_n + einsum [ btrinv', "io"; c, "jo"; b0, "kj" ] "ik" |> cholesky
   in
-  let _, _, kl, us =
+  let _, _, kl, ggn, us =
     List.fold2_exn
       ustar
       y
-      ~init:(0, z0, f 0., [])
-      ~f:(fun (t, z, kl, us) ustar y ->
+      ~init:(0, z0, f 0., f 0., [])
+      ~f:(fun (t, z, kl, ggn, us) ustar y ->
         Stdlib.Gc.major ();
         let b = if t = 0 then b0 else b in
         let precision_chol = if t = 0 then precision_chol' else precision_chol in
@@ -282,16 +294,19 @@ let filtering_kl ~a ~b ~c ~obs_precision ~(ustar : Maths.t list) y =
         (* propagate that sample to update z *)
         let z = zpred + (u_sample *@ b) in
         (* update the KL divergence *)
-        let kl =
+        let kl, dggn =
           let prior_term =
             gaussian_llh ~inv_std:(if t = 0 then ones_u' else ones_u) (ustar + u_sample)
           in
           let q_term = gaussian_llh_chol ~precision_chol u_diff in
-          kl + q_term - prior_term
+          let q_term_t = Maths.tangent q_term |> Option.value_exn |> const in
+          let dggn = Maths.einsum [ q_term_t, "ki"; q_term_t, "li" ] "kl" in
+          kl + q_term - prior_term, dggn
         in
-        Int.(t + 1), z, kl, (ustar + u_sample) :: us)
+        Int.(t + 1), z, kl, ggn + dggn, (ustar + u_sample) :: us)
   in
-  kl, List.rev us
+  let ggn = ggn / f Float.(of_int tmax) in
+  kl, List.rev us, ggn
 
 let sample_data (theta : Generative.M.t) =
   let open Maths in
@@ -407,7 +422,7 @@ let elbo ~data:(y : Maths.t list) (theta : Generative.M.t) =
     Maths.(sqrt_precision_of_log_var theta.log_obs_var * ones_o)
   in
   let a = a_reparam (theta.q, theta.d) in
-  let kl, u_sampled =
+  let kl, u_sampled, ggn =
     let obs_precision = Maths.(precision_of_log_var theta.log_obs_var * ones_o) in
     let backward_info = lqr ~a ~b:theta.b ~c:theta.c ~obs_precision y in
     sample_and_kl ~a ~b:theta.b backward_info
@@ -427,45 +442,7 @@ let elbo ~data:(y : Maths.t list) (theta : Generative.M.t) =
     |> Maths.neg
     |> fun x -> Maths.(x / f Float.(of_int o * of_int tmax))
   in
-  neg_elbo, y_pred
-
-let elbo_matheron ~data:(y : Maths.t list) (theta : Generative.M.t) =
-  let inv_sigma_o_expanded =
-    Maths.(sqrt_precision_of_log_var theta.log_obs_var * ones_o)
-  in
-  let a = a_reparam (theta.q, theta.d) in
-  let u_sampled =
-    let theta = Generative.map ~f:primal_detach theta in
-    let a = a_reparam (theta.q, theta.d) in
-    let obs_precision = Maths.(precision_of_log_var theta.log_obs_var * ones_o) in
-    List.init 1 ~f:(fun _ ->
-      let utilde, ytilde = sample_data theta in
-      let du =
-        lqr
-          ~a
-          ~b:theta.b
-          ~c:theta.c
-          ~obs_precision
-          List.(map2_exn y ytilde ~f:Maths.(( - )))
-        |> ustars ~a ~b:theta.b
-      in
-      List.map2_exn utilde du ~f:Maths.(( + )))
-  in
-  let y_pred =
-    List.map u_sampled ~f:(fun u_sampled -> rollout ~a ~b:theta.b ~c:theta.c u_sampled)
-  in
-  let lik_term =
-    List.fold y_pred ~init:(Maths.f 0.) ~f:(fun accu y_pred ->
-      List.fold2_exn y y_pred ~init:accu ~f:(fun accu y y_pred ->
-        Stdlib.Gc.major ();
-        Maths.(accu + gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded y)))
-  in
-  let neg_elbo =
-    Maths.(lik_term / f 1.)
-    |> Maths.neg
-    |> fun x -> Maths.(x / f Float.(of_int o * of_int tmax))
-  in
-  neg_elbo, List.hd_exn y_pred
+  neg_elbo, Maths.primal ggn
 
 let elbo_hack ~data:(y : Maths.t list) (theta : Generative.M.t) =
   let inv_sigma_o_expanded =
@@ -474,7 +451,9 @@ let elbo_hack ~data:(y : Maths.t list) (theta : Generative.M.t) =
   let a = a_reparam (theta.q, theta.d) in
   let obs_precision = Maths.(precision_of_log_var theta.log_obs_var * ones_o) in
   let ustar = lqr ~a ~b:theta.b ~c:theta.c ~obs_precision y |> ustars ~a ~b:theta.b in
-  let kl, u_sampled = filtering_kl ~a ~b:theta.b ~c:theta.c ~obs_precision ~ustar y in
+  let kl, u_sampled, ggn =
+    filtering_kl ~a ~b:theta.b ~c:theta.c ~obs_precision ~ustar y
+  in
   let y_pred = rollout ~a ~b:theta.b ~c:theta.c u_sampled in
   let lik_term =
     List.fold2_exn
@@ -490,7 +469,7 @@ let elbo_hack ~data:(y : Maths.t list) (theta : Generative.M.t) =
     |> Maths.neg
     |> fun x -> Maths.(x / f Float.(of_int o * of_int tmax))
   in
-  neg_elbo, y_pred
+  neg_elbo, Maths.primal ggn
 
 module M = struct
   module P = Generative
@@ -499,40 +478,12 @@ module M = struct
   type args = unit
 
   let f ~update ~data:y ~init ~args:() (theta : P.M.t) =
-    let neg_elbo, y_pred = elbo ~data:y theta in
+    let neg_elbo, ggn = elbo ~data:y theta in
+    let s = Linalg.svdvals (Tensor.to_bigarray ~kind:base.ba_kind ggn) in
+    Mat.(save_txt ~out:(in_dir "svals") (transpose s));
     match update with
     | `loss_only u -> u init (Some neg_elbo)
-    | `loss_and_ggn u ->
-      let obs_precision = precision_of_log_var theta.log_obs_var in
-      let obs_precision_p = Maths.(const (primal obs_precision)) in
-      let sigma2_t =
-        Maths.(tangent (exp theta.log_obs_var)) |> Option.value_exn |> Maths.const
-      in
-      let ggn_part2 =
-        Maths.(
-          einsum
-            [ f Float.(0.5 * of_int bs) * sigma2_t * sqr obs_precision_p, "ky"
-            ; sigma2_t, "ly"
-            ]
-            "kl")
-        |> Maths.primal
-      in
-      let ggn_part1 =
-        List.fold y_pred ~init:(Maths.f 0.) ~f:(fun accu y_pred ->
-          let mu_t = Maths.tangent y_pred |> Option.value_exn |> Maths.const in
-          let ggn_part1 =
-            Maths.(einsum [ mu_t, "kmo"; mu_t, "lmo" ] "kl" * obs_precision_p)
-          in
-          Maths.(accu + const (primal (ggn_part1 / f Float.(of_int o * of_int tmax)))))
-        |> Maths.primal
-      in
-      let ggn =
-        let ggn = Tensor.(ggn_part1 + ggn_part2) in
-        let s = Linalg.svdvals (Tensor.to_bigarray ~kind:base.ba_kind ggn) in
-        Mat.(save_txt ~out:(in_dir "svals") (transpose s));
-        ggn
-      in
-      u init (Some (neg_elbo, Some ggn))
+    | `loss_and_ggn u -> u init (Some (neg_elbo, Some ggn))
 end
 
 (* --------------------------------
@@ -607,7 +558,7 @@ module Do_with_SOFO : Do_with_T = struct
       { base
       ; learning_rate =
           (let lr = Cmdargs.(get_float "-lr" |> default 0.1) in
-           Some Float.(lr / sqrt (1. + (0. * (of_int k / 100.)))))
+           Some Float.(lr / sqrt (1. + (1. * (of_int k / 10.)))))
       ; n_tangents = _K
       ; sqrt = false
       ; rank_one = false
