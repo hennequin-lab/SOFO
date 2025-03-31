@@ -74,7 +74,11 @@ class GRUCell(nn.recurrent.RNNCellBase):
                         (self.dim, self.hidden))
  
         new_h = h@Wl + self.activation_fn(h@C)@Wh + bias
-        return new_h, new_h
+        Wout = self.param('readout', initializers.variance_scaling(
+                                scale=0.2, mode='fan_in', distribution='truncated_normal'),
+                            (self.dim, self.dim))
+        outs = self.activation_fn(new_h) @ Wout
+        return (new_h, outs), outs
 
 
 def make_train_step(apply_fn, tx, sigma, tangent_size, damping):
@@ -96,7 +100,7 @@ def make_train_step(apply_fn, tx, sigma, tangent_size, damping):
         loss_value, grads, pred_y = value_and_grad(
                 z_init = batch_x, 
                 batch = (dummy_input, batch_label)
-            )(rng, params)
+            )(sample_key, params)
 
         updates, opt_state = tx.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
@@ -111,14 +115,14 @@ def main(argv):
     batch_size = 256
     latent_dim = 400
     iteration = 8000
-    learning_rate = 0.1
+    learning_rate = 0.05
     tangent_size = 128
     damping = 1E-5
     sigma = 0.0125
     n_steps = 51
     n_trials = 400
     n_test = 100
-    eval_freq = 100
+    eval_freq = 20
     k = 30
     
     ### load data
@@ -168,8 +172,8 @@ def main(argv):
     def predict(params, x):
         def fun(carry,_):
             h = carry
-            new_h, _ = model.apply(params, h, None)
-            return new_h, new_h
+            (new_h, _), outs = model.apply(params, h, None)
+            return new_h, outs
 
         _, results = jax.lax.scan(
                 fun, init=x, xs=None,
@@ -191,13 +195,12 @@ def main(argv):
     opt_state = tx.init(params)
     train_step = make_train_step(model.apply, tx, sigma, tangent_size, damping)
     training_log = []
+
+    _, _, loss_value, pred_y, batch_y = train_step(params, next(batches), subkey, opt_state)
     for i in range(iteration):
         rng, subkey = random.split(rng)
-        params, opt_state, loss_value, pred_y, batch_y = train_step(params, next(batches), subkey, opt_state)
-        epoch = i * batch_size / n_trials
         
         if i % eval_freq == 0:
-
             test_pred = predict(params, test_x)
             test_loss = jnp.mean(jnp.square(test_pred-test_trajs).mean(axis=-1).sum(axis=-1))
             test_msek = msek(test_pred, test_trajs, k)
@@ -205,7 +208,9 @@ def main(argv):
                         'Step {}: Train loss:{:.4f}, Test loss:{:.4f}, msek:{:.3f}, lr:{:.4f}, tangent:{:d}'.format(
                     i, loss_value.item(), test_loss.item(), test_msek.item(), schedule(i), tangent_size,
                 ))
-        
+
+        params, opt_state, loss_value, pred_y, batch_y = train_step(params, next(batches), subkey, opt_state)
+        epoch = i * batch_size / n_trials
         training_log.append([epoch, loss_value.item(), test_loss.item(), test_msek.item()])
 
     jnp.savez("logs/lorenz/fish_ts{}.npz".format(tangent_size), train=jnp.asarray(training_log))
