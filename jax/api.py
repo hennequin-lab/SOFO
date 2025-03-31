@@ -141,8 +141,10 @@ def value_and_sofo_grad_temporal(
                 fun_loss = lambda logits: loss(logits, labels)
 
                 latent_new, latent_tangents_out, logits  = jmp_apply(fun, (params, latent), (v, latent_tangents))
-                losses_new, vg_new = jmp(fun_loss, latent_new[0], latent_tangents_out)
-                
+                [latent_primal, primal_out] = latent_new
+                [new_latent_tangents_out, tangents_out] = latent_tangents_out
+                losses_new, vg_new = jmp(fun_loss, primal_out[0], tangents_out)
+
                 #TODO: classification?
                 #ybar = jax.nn.softmax(outs[0], axis=-1)
                 #vggv = jnp.mean(
@@ -150,13 +152,13 @@ def value_and_sofo_grad_temporal(
                 #       , axis=0)
 
                 vggv_new = jnp.mean(
-                    jax.vmap(lambda t: t@t.T, in_axes=1)(latent_tangents_out),
+                    jax.vmap(lambda t: t@t.T, in_axes=1)(tangents_out),
                    axis=0)
 
                 losses += losses_new[0]
                 vg += vg_new
                 vggv += vggv_new
-                return (latent_new[0], latent_tangents_out, losses, vg, vggv), logits[0]
+                return (latent_primal[0], new_latent_tangents_out, losses, vg, vggv), logits[0]
         
             (_, _, losses, vg, vggv), preds = jax.lax.scan(
                 fun, init = (
