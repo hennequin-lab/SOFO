@@ -16,8 +16,7 @@ let d = 64
 let n_layers = 3
 let bs = 128
 let n_batches = 100
-let _K = n_layers * 20 * 5
-let top_subspace = d * (d + 1)
+let _K = n_layers * 20
 
 let base =
   Optimizer.Config.Base.
@@ -115,9 +114,9 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   module P = P
   module A = Prms.List (Make (Prms.P))
 
-  type sampling_state = int list
+  type sampling_state = unit
 
-  let init_sampling_state () = List.init n_layers ~f:(fun _ -> 0)
+  let init_sampling_state () = ()
 
   let zero_params _K =
     Tensor.zeros ~device:base.device ~kind:base.kind Int.[ _K; d + 1; d ]
@@ -142,10 +141,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let random_localised_vs _K : P.T.t =
     List.init n_layers ~f:(fun id -> { id; w = random_params _K })
 
-  let eigenvectors ~lambda (key : sampling_state) (_K : int) =
+  let eigenvectors ~lambda () (_K : int) =
     let n_per_layer = _K / n_layers in
     let vs =
-      List.foldi (List.zip_exn lambda key) ~init:None ~f:(fun id accu (lambda, key) ->
+      List.foldi lambda ~init:None ~f:(fun id accu lambda ->
         let u_left, s_left, _ =
           Tensor.svd ~some:true ~compute_uv:true Maths.(primal lambda.left)
         in
@@ -159,16 +158,13 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
             List.mapi s_right ~f:(fun ir sr -> il, ir, Float.(sl * sr)))
           |> List.concat
           |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
-          |> List.permute
-        in
-        let _ =
-          s_all
-          |> List.map ~f:(fun (_, _, x) -> x)
           |> Array.of_list
-          |> (fun x -> Mat.of_array x (-1) 1)
-          |> Mat.save_txt ~out:(in_dir (Printf.sprintf "svals_%i" id))
         in
-        let selection = List.sub ~pos:key ~len:n_per_layer s_all in
+        let selection =
+          List.permute (List.range 0 Int.(d * (d + 1)))
+          |> List.sub ~pos:0 ~len:n_per_layer
+        in
+        let selection = List.map selection ~f:(fun j -> s_all.(j)) in
         let local_vs =
           List.map selection ~f:(fun (il, ir, _) ->
             let u_left =
@@ -212,10 +208,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       |> Tensor.to_bigarray ~kind:Bigarray.float32
       |> Owl.Dense.Matrix.S.save_txt ~out:"sketch2"
     in
-    ( vs
-    , List.map key ~f:(fun k ->
-        let new_k = k + n_per_layer in
-        if new_k + n_per_layer >= top_subspace then 0 else new_k) )
+    vs, ()
 
   let init () =
     let left = Mat.(0.1 $* eye Int.(d + 1)) |> Tensor.of_bigarray ~device:base.device in
@@ -265,7 +258,7 @@ module Make (D : Do_with_T) = struct
     Bos.Cmd.(v "rm" % "-f" % in_dir "aux") |> Bos.OS.Cmd.run |> ignore;
     let rec loop ~iter ~state running_avg data =
       Stdlib.Gc.major ();
-      let data = if iter % 2 = 1 then sample_data () else data in
+      let data = if iter % 2 = 0 then sample_data () else data in
       let loss, new_state = O.step ~config:(config ~iter) ~state ~data with_ggn in
       let running_avg =
         let loss_avg =
@@ -299,7 +292,7 @@ end
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (M) (GGN)
 
-  let name = "sofo_adapt_2"
+  let name = "sofo_adapt"
 
   let config ~iter:k =
     let aux =
@@ -317,7 +310,7 @@ module Do_with_SOFO : Do_with_T = struct
            Some Float.(lr / sqrt (1. + (0. * (of_int k / 100.)))))
       ; n_tangents = _K
       ; rank_one = false
-      ; damping = Some 1e-7
+      ; damping = Some 1e-3
       ; aux = Some aux
       }
 
