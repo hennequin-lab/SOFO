@@ -36,3 +36,16 @@ module type T = sig
     -> P.M.t
     -> 'a
 end
+
+module type Auxiliary = sig
+  module P : Prms.T
+  module A : Prms.T
+
+  type sampling_state
+
+  val init_sampling_state : unit -> sampling_state
+  val g12v : lambda:A.M.t -> P.M.t -> P.M.t
+  val random_localised_vs : int -> P.T.t
+  val eigenvectors : lambda:A.M.t -> sampling_state -> int -> P.T.t * sampling_state
+  val init : unit -> A.tagged
+end

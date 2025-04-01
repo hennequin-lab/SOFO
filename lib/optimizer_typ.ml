@@ -35,25 +35,51 @@ module Config = struct
       }
   end
 
-  module SOFO = struct
+  module Adam = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t
       ; learning_rate : float option
-      ; n_tangents : int
-      ; sqrt : bool
-      ; rank_one : bool
-      ; damping : float option
-      ; momentum : float option
+      ; beta_1 : float
+      ; beta_2 : float
+      ; eps : float
+      ; weight_decay : float option
       }
 
     let default =
       { base = Base.default
       ; learning_rate = None
+      ; beta_1 = 0.9
+      ; beta_2 = 0.999
+      ; eps = 1e-8
+      ; weight_decay = None
+      }
+  end
+
+  module SOFO = struct
+    type ('a, 'b) aux =
+      { steps : int
+      ; file : string
+      ; config : ('a, 'b) Adam.t
+      }
+
+    type ('a, 'b) t =
+      { base : ('a, 'b) Base.t
+      ; learning_rate : float option
+      ; n_tangents : int
+      ; rank_one : bool
+      ; damping : float option
+      ; aux : ('a, 'b) aux option
+      }
+
+    let default_aux file = { steps = 10; file; config = Adam.default }
+
+    let default =
+      { base = Base.default
+      ; learning_rate = None
       ; n_tangents = 10
-      ; sqrt = false
       ; rank_one = false
       ; damping = None
-      ; momentum = None
+      ; aux = None
       }
   end
 
@@ -83,25 +109,5 @@ module Config = struct
       }
 
     let default = { base = Base.default; learning_rate = None; momentum = None }
-  end
-
-  module Adam = struct
-    type ('a, 'b) t =
-      { base : ('a, 'b) Base.t
-      ; learning_rate : float option
-      ; beta_1 : float
-      ; beta_2 : float
-      ; eps : float
-      ; weight_decay : float option
-      }
-
-    let default =
-      { base = Base.default
-      ; learning_rate = None
-      ; beta_1 = 0.9
-      ; beta_2 = 0.999
-      ; eps = 1e-8
-      ; weight_decay = None
-      }
   end
 end

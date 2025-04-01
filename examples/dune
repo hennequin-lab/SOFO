@@ -7,6 +7,7 @@
   lgs_min
   fa
   fa_marginal
+  mlp_adaptive
   lgs_elbo
   lgs_from_scratch
   lgs_done_right

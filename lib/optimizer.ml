@@ -59,53 +59,168 @@ module Momentum (P : Prms.T) = struct
        | Some g_avg -> P.T.((beta $* g_avg) + (Float.(1. - beta) $* g)))
 end
 
-module SOFO (W : Wrapper.T) = struct
+(* Adam needs to be defined first, because SOFO makes use of Adam for optimising
+   the auxiliary loss for learning a GGN approximation *)
+module Adam (W : Wrapper.T) = struct
+  module W = W
+
+  type ('a, 'b) config = ('a, 'b) Config.Adam.t
+  type ('c, _, _) init_opts = W.P.tagged -> 'c
+
+  type state =
+    { theta : W.P.tagged
+    ; m : Tensor.t W.P.p option
+    ; v : Tensor.t W.P.p option
+    ; beta1_t : float
+    ; beta2_t : float
+    }
+
+  let params state = state.theta
+  let init theta = { theta; m = None; v = None; beta1_t = 1.; beta2_t = 1. }
+
+  (* gradient descent on theta *)
+  let update_theta_m_v ~(config : ('a, 'b) config) ~state g =
+    let c = config in
+    let beta1_t = Float.(state.beta1_t * c.beta_1) in
+    let beta2_t = Float.(state.beta2_t * c.beta_2) in
+    let m, v =
+      let g_squared = W.P.T.sqr g in
+      match state.m, state.v with
+      | None, None ->
+        W.P.T.(Float.(1. - c.beta_1) $* g, Float.(1. - c.beta_2) $* g_squared)
+      | Some m, Some v ->
+        let m = W.P.T.((c.beta_1 $* m) + (Float.(1. - c.beta_1) $* g)) in
+        let v = W.P.T.((c.beta_2 $* v) + (Float.(1. - c.beta_2) $* g_squared)) in
+        m, v
+      | _ -> assert false
+    in
+    let theta =
+      match c.learning_rate with
+      | None -> state.theta
+      | Some eta ->
+        let m_hat = W.P.T.(Float.(1. / (1. - beta1_t)) $* m) in
+        let v_hat = W.P.T.(Float.(1. / (1. - beta2_t)) $* v) in
+        let v_hat_sqrt = W.P.T.sqrt v_hat in
+        let dtheta = W.P.T.(m_hat / (c.eps $+ v_hat_sqrt)) in
+        let open W.P.Let_syntax in
+        let+ theta = state.theta
+        and++ dtheta = dtheta in
+        let dtheta_decayed =
+          match c.weight_decay with
+          | None -> dtheta
+          | Some lambda -> Tensor.(dtheta + mul_scalar theta (Scalar.f lambda))
+        in
+        Tensor.(theta - mul_scalar dtheta_decayed (Scalar.f eta))
+    in
+    { theta; m = Some m; v = Some v; beta1_t; beta2_t }
+
+  let step ~(config : ('a, 'b) config) ~state ~data args =
+    Stdlib.Gc.major ();
+    (* initialise tangents *)
+    let theta = params state in
+    let theta_ = W.P.value theta in
+    let theta_dual =
+      W.P.map theta_ ~f:(fun x ->
+        let x = Tensor.copy x |> Tensor.to_device ~device:config.base.device in
+        let x = Tensor.set_requires_grad x ~r:true in
+        Tensor.zero_grad x;
+        Maths.const x)
+    in
+    (* define update function *)
+    let update = `loss_only update_loss_each_step in
+    (* initialise losses and ggn *)
+    let init = Maths.const (Tensor.f 0.) in
+    (* compute the losses and tangents with sgd *)
+    let final_losses = W.f ~update ~data ~init ~args theta_dual in
+    let loss, true_g =
+      let loss = Tensor.mean (Maths.primal final_losses) in
+      Tensor.backward loss;
+      ( Tensor.to_float0_exn loss
+      , W.P.map2 theta (W.P.primal theta_dual) ~f:(fun tagged p ->
+          match tagged with
+          | Prms.Const _ -> Tensor.(f 0.)
+          | _ -> Tensor.grad p) )
+    in
+    let new_state : state = update_theta_m_v ~config ~state true_g in
+    loss, new_state
+end
+
+module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
   module W = W
   module Mom = Momentum (W.P)
 
   type ('a, 'b) config = ('a, 'b) Config.SOFO.t
   type ('c, _, _) init_opts = W.P.tagged -> 'c
-  type state = { theta : W.P.tagged }
+
+  module O = Adam (struct
+      module P = A.A
+
+      type data = W.P.T.t * Tensor.t
+      type args = unit
+
+      let f ~update ~data:(vs, true_sketch) ~init ~args:() lambda =
+        let open Maths in
+        let g12v = A.g12v ~lambda (W.P.map vs ~f:const) in
+        let sketch =
+          W.P.fold
+            g12v
+            ~init:Maths.(f 0.)
+            ~f:(fun accu (gv, _) ->
+              let n_tangents = Convenience.first_dim (primal gv) in
+              let gv = reshape gv ~shape:[ n_tangents; -1 ] in
+              accu + einsum [ gv, "ki"; gv, "li" ] "kl")
+        in
+        let normaliser = mean (sqr (const true_sketch)) in
+        let loss = mean (sqr (sketch - const true_sketch)) / normaliser in
+        match update with
+        | `loss_only u -> u init (Some loss)
+        | `loss_and_ggn _ -> assert false
+    end)
+
+  type state =
+    { t : int
+    ; theta : W.P.tagged
+    ; aux : O.state
+    ; sampling_state : A.sampling_state
+    }
 
   let params state = state.theta
-  let init theta = { theta }
 
-  (* initialise tangents, where each tangent is normalised. *)
-  let init_tangents ~base ~rank_one ~n_tangents theta =
-    let vs =
-      W.P.map theta ~f:(function
-        | Prms.Const x ->
-          Tensor.zeros
-            ~device:(Tensor.device x)
-            ~kind:(Tensor.kind x)
-            (n_tangents :: Tensor.shape x)
-        | Prms.Free x ->
-          sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
-        | Prms.Bounded (x, _, _) ->
-          sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
-    in
-    (* orthogonalise them all *)
+  let init theta =
+    let lambda = A.init () in
+    let aux = O.init lambda in
+    let sampling_state = A.init_sampling_state () in
+    { t = 0; theta; aux; sampling_state }
+
+  (* orthogonalise tangents *)
+  let orthonormalise vs =
     let vtv =
       W.P.fold vs ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
+        let n_tangents = Convenience.first_dim v in
         let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
         Tensor.(accu + einsum ~equation:"ij,kj->ik" ~path:None [ v; v ]))
     in
     let u, s, _ = Tensor.svd ~some:true ~compute_uv:true vtv in
     let normalizer = Tensor.(u / sqrt s |> transpose ~dim0:0 ~dim1:1) in
     W.P.map vs ~f:(fun v ->
+      let n_tangents = Convenience.first_dim v in
       let s = Tensor.shape v in
       let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
       let v = Tensor.(matmul normalizer v) in
-      Maths.Direct (Tensor.reshape v ~shape:s))
+      Tensor.reshape v ~shape:s)
 
-  let proj_onto_vs vs g =
-    W.P.fold2 g vs ~init:(Tensor.f 0.) ~f:(fun accu (g, v, _) ->
-      let v = Maths.tangent' v in
-      let n_tangents = Convenience.first_dim v in
-      let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
-      let n = List.nth_exn (Tensor.shape v) 1 in
-      let g = Tensor.reshape g ~shape:[ n ] in
-      Tensor.(accu + einsum ~equation:"ij,j->i" ~path:None [ v; g ]))
+  (* initialise tangents, where each tangent is normalised. *)
+  let init_tangents ~base ~rank_one ~n_tangents theta =
+    W.P.map theta ~f:(function
+      | Prms.Const x ->
+        Tensor.zeros
+          ~device:(Tensor.device x)
+          ~kind:(Tensor.kind x)
+          (n_tangents :: Tensor.shape x)
+      | Prms.Free x ->
+        sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
+      | Prms.Bounded (x, _, _) ->
+        sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
 
   (* fold vs over sets of v_i s, multiply with associated weights. *)
   let weighted_vs_sum vs ~weights =
@@ -118,7 +233,7 @@ module SOFO (W : Wrapper.T) = struct
       Tensor.(view (matmul weights v_i) ~size:s))
 
   (* calculate natural gradient = V(VtGtGV)^-1 V^t g *)
-  let natural_g ?damping ~sqrt ~vs ~ggn vtg =
+  let natural_g ?damping ~vs ~ggn vtg =
     let u, s, _ = Tensor.svd ~some:true ~compute_uv:true ggn in
     (* how each V should be weighted, as a row array *)
     let weights =
@@ -130,7 +245,6 @@ module SOFO (W : Wrapper.T) = struct
           let offset = Float.(gamma * Tensor.(maximum s |> to_float0_exn)) in
           Tensor.(s + f offset)
       in
-      let ds = if sqrt then Tensor.(sqrt ds) else ds in
       Tensor.(matmul (u / ds) tmp) |> Convenience.trans_2d
     in
     weighted_vs_sum vs ~weights
@@ -149,13 +263,25 @@ module SOFO (W : Wrapper.T) = struct
     Stdlib.Gc.major ();
     (* initialise tangents *)
     let theta = params state in
-    let vs =
-      init_tangents
-        ~base:config.base
-        ~rank_one:config.rank_one
-        ~n_tangents:config.n_tangents
-        theta
+    let _vs, new_sampling_state =
+      match config.aux with
+      | Some _ ->
+        if state.t % 2 = 0
+        then A.random_localised_vs config.n_tangents, state.sampling_state
+        else (
+          let lambda = O.params state.aux in
+          let lambda = A.A.map ~f:(fun x -> Maths.const (Prms.value x)) lambda in
+          A.eigenvectors ~lambda state.sampling_state config.n_tangents)
+      | None ->
+        ( init_tangents
+            ~base:config.base
+            ~rank_one:config.rank_one
+            ~n_tangents:config.n_tangents
+            theta
+        , state.sampling_state )
     in
+    let _vs = orthonormalise _vs in
+    let vs = W.P.map _vs ~f:(fun x -> Maths.Direct x) in
     let theta_dual = W.P.make_dual theta ~t:vs in
     (* define update function *)
     let update = `loss_and_ggn update_each_step in
@@ -168,6 +294,15 @@ module SOFO (W : Wrapper.T) = struct
     let loss = final_losses |> Maths.primal |> Tensor.mean |> Tensor.to_float0_exn in
     (* normalise ggn by batch size *)
     let final_ggn = Tensor.div_scalar_ final_ggn (Scalar.f Float.(of_int batch_size)) in
+    let _ =
+      if state.t % 2 = 1
+      then
+        final_ggn
+        |> Tensor.to_bigarray ~kind:Bigarray.float32
+        |> fun x ->
+        Owl.Dense.Matrix.S.(transpose (diag x))
+        |> Owl.Dense.Matrix.S.save_txt ~out:"sketch"
+    in
     let loss_tangents = final_losses |> Maths.tangent |> Option.value_exn in
     let vtg =
       Tensor.(
@@ -178,11 +313,29 @@ module SOFO (W : Wrapper.T) = struct
           ~keepdim:true)
     in
     (* compute natural gradient and update theta *)
-    let natural_g =
-      natural_g ?damping:config.damping ~sqrt:config.sqrt ~vs ~ggn:final_ggn vtg
-    in
+    let natural_g = natural_g ?damping:config.damping ~vs ~ggn:final_ggn vtg in
     let new_theta = update_theta ?learning_rate:config.learning_rate ~theta natural_g in
-    loss, { theta = new_theta }
+    (* update the auxiliary state by running a few iterations of Adam *)
+    let new_aux =
+      match config.aux with
+      | Some aux_config when state.t % 2 = 0 ->
+        let rec aux_loop ~iter ~state =
+          let data = _vs, final_ggn in
+          let loss, new_state = O.step ~config:aux_config.config ~state ~data () in
+          Owl.Mat.(save_txt ~append:true ~out:aux_config.file (of_array [| loss |] 1 1));
+          if iter < aux_config.steps
+          then aux_loop ~iter:(iter + 1) ~state:new_state
+          else new_state
+        in
+        aux_loop ~iter:0 ~state:state.aux
+      | _ -> state.aux
+    in
+    ( loss
+    , { t = state.t + 1
+      ; theta = new_theta
+      ; aux = new_aux
+      ; sampling_state = new_sampling_state
+      } )
 end
 
 (* forward gradient descent;: g = V V^T g where V^Tg is obtained with forward AD (Kozak 2021) *)
@@ -378,88 +531,4 @@ module SGD (W : Wrapper.T) = struct
     in
     let new_theta = update_theta ?learning_rate ~theta g_avg in
     loss, { theta = new_theta; g_avg = Some g_avg; beta_t }
-end
-
-module Adam (W : Wrapper.T) = struct
-  module W = W
-
-  type ('a, 'b) config = ('a, 'b) Config.Adam.t
-  type ('c, _, _) init_opts = W.P.tagged -> 'c
-
-  type state =
-    { theta : W.P.tagged
-    ; m : Tensor.t W.P.p option
-    ; v : Tensor.t W.P.p option
-    ; beta1_t : float
-    ; beta2_t : float
-    }
-
-  let params state = state.theta
-  let init theta = { theta; m = None; v = None; beta1_t = 1.; beta2_t = 1. }
-
-  (* gradient descent on theta *)
-  let update_theta_m_v ~(config : ('a, 'b) config) ~state g =
-    let c = config in
-    let beta1_t = Float.(state.beta1_t * c.beta_1) in
-    let beta2_t = Float.(state.beta2_t * c.beta_2) in
-    let m, v =
-      let g_squared = W.P.T.sqr g in
-      match state.m, state.v with
-      | None, None ->
-        W.P.T.(Float.(1. - c.beta_1) $* g, Float.(1. - c.beta_2) $* g_squared)
-      | Some m, Some v ->
-        let m = W.P.T.((c.beta_1 $* m) + (Float.(1. - c.beta_1) $* g)) in
-        let v = W.P.T.((c.beta_2 $* v) + (Float.(1. - c.beta_2) $* g_squared)) in
-        m, v
-      | _ -> assert false
-    in
-    let theta =
-      match c.learning_rate with
-      | None -> state.theta
-      | Some eta ->
-        let m_hat = W.P.T.(Float.(1. / (1. - beta1_t)) $* m) in
-        let v_hat = W.P.T.(Float.(1. / (1. - beta2_t)) $* v) in
-        let v_hat_sqrt = W.P.T.sqrt v_hat in
-        let dtheta = W.P.T.(m_hat / (c.eps $+ v_hat_sqrt)) in
-        let open W.P.Let_syntax in
-        let+ theta = state.theta
-        and++ dtheta = dtheta in
-        let dtheta_decayed =
-          match c.weight_decay with
-          | None -> dtheta
-          | Some lambda -> Tensor.(dtheta + mul_scalar theta (Scalar.f lambda))
-        in
-        Tensor.(theta - mul_scalar dtheta_decayed (Scalar.f eta))
-    in
-    { theta; m = Some m; v = Some v; beta1_t; beta2_t }
-
-  let step ~(config : ('a, 'b) config) ~state ~data args =
-    Stdlib.Gc.major ();
-    (* initialise tangents *)
-    let theta = params state in
-    let theta_ = W.P.value theta in
-    let theta_dual =
-      W.P.map theta_ ~f:(fun x ->
-        let x = Tensor.copy x |> Tensor.to_device ~device:config.base.device in
-        let x = Tensor.set_requires_grad x ~r:true in
-        Tensor.zero_grad x;
-        Maths.const x)
-    in
-    (* define update function *)
-    let update = `loss_only update_loss_each_step in
-    (* initialise losses and ggn *)
-    let init = Maths.const (Tensor.f 0.) in
-    (* compute the losses and tangents with sgd *)
-    let final_losses = W.f ~update ~data ~init ~args theta_dual in
-    let loss, true_g =
-      let loss = Tensor.mean (Maths.primal final_losses) in
-      Tensor.backward loss;
-      ( Tensor.to_float0_exn loss
-      , W.P.map2 theta (W.P.primal theta_dual) ~f:(fun tagged p ->
-          match tagged with
-          | Prms.Const _ -> Tensor.(f 0.)
-          | _ -> Tensor.grad p) )
-    in
-    let new_state : state = update_theta_m_v ~config ~state true_g in
-    loss, new_state
 end
