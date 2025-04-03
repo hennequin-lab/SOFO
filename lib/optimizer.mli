@@ -1,6 +1,6 @@
 include module type of Optimizer_typ
 
-module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) :
+module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary  with module P = W.P) :
   T
   with module W = W
    and type ('a, 'b) config = ('a, 'b) Config.SOFO.t

@@ -574,7 +574,7 @@ end
      -------------------------------- *)
 
 module Do_with_SOFO : Do_with_T = struct
-  module O = Optimizer.SOFO (LGS)
+  module O = Optimizer.SOFO (LGS) (GGN)
 
   let name = "sofo"
 
@@ -583,15 +583,13 @@ module Do_with_SOFO : Do_with_T = struct
       { base
       ; learning_rate = Some 0.1
       ; n_tangents = 128
-      ; sqrt = false
       ; rank_one = false
       ; damping = None
-      ; momentum = None
-      ; lm = false
-      ; perturb_thresh = None
+      ; aux = None
+    
       }
 
-  let init = O.init ~config:(config ~iter:0) LGS.init
+  let init = O.init LGS.init
 end
 
 (* --------------------------------

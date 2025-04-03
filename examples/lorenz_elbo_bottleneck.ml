@@ -698,7 +698,7 @@ module Make (D : Do_with_T) = struct
       let data = sample_data () in
       let t0 = Unix.gettimeofday () in
       let config = config_f ~iter in
-      let loss, new_state = O.step ~config ~state ~data ~args:() in
+      let loss, new_state = O.step ~config ~state ~data () in
       let t1 = Unix.gettimeofday () in
       let time_elapsed = Float.(time_elapsed + t1 - t0) in
       let running_avg =
@@ -740,23 +740,20 @@ end
      -------------------------------- *)
 
 module Do_with_SOFO : Do_with_T = struct
-  module O = Optimizer.SOFO (GRU)
+  module O = Optimizer.SOFO (GRU) (GGN)
 
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
       ; learning_rate = Some Float.(0.01 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 60
-      ; sqrt = false
       ; rank_one = false
       ; damping = Some 1e-5
-      ; momentum = None
-      ; lm = false
-      ; perturb_thresh = None
+      ; aux  = None
       }
 
   let name = "sofo"
-  let init = O.init ~config:(config_f ~iter:0) GRU.init
+  let init = O.init  GRU.init
 end
 
 (* --------------------------------

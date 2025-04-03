@@ -268,7 +268,7 @@ module Make (D : Do_with_T) = struct
       let data = sample_data train_set bs in
       let t0 = Unix.gettimeofday () in
       let config = config_f ~iter in
-      let loss, new_state = O.step ~config ~state ~data ~args:() in
+      let loss, new_state = O.step ~config ~state ~data () in
       let t1 = Unix.gettimeofday () in
       let time_elapsed = Float.(time_elapsed + t1 - t0) in
       let running_avg =
@@ -314,33 +314,21 @@ end
      -------------------------------- *)
 
 module Do_with_SOFO : Do_with_T = struct
-  module O = Optimizer.SOFO (VAE)
+  module O = Optimizer.SOFO (VAE) (GGN)
 
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
       ; learning_rate = Some Float.(1e-6 / (1. +. (0. * sqrt (of_int iter))))
       ; n_tangents = 512
-      ; sqrt = false
+      ; damping = Some 1e-3
       ; rank_one = false
-      ; damping = Some 1e-5
-      ; momentum = None
-      ; lm = false
-      ; perturb_thresh = None
+      ; aux = None
       }
 
-  let name =
-    let init_config = config_f ~iter:0 in
-    let gamma_name =
-      Option.value_map init_config.damping ~default:"none" ~f:Float.to_string
-    in
-    sprintf
-      "true_fisher_lr_%s_sqrt_%s_damp_%s"
-      (Float.to_string (Option.value_exn init_config.learning_rate))
-      (Bool.to_string init_config.sqrt)
-      gamma_name
+  let name = "sofo"
 
-  let init = O.init ~config:(config_f ~iter:0) VAE.init
+  let init = O.init  VAE.init
 end
 
 (* --------------------------------

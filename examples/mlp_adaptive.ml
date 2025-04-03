@@ -144,6 +144,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let eigenvectors ~lambda () (_K : int) =
     let n_per_layer = _K / n_layers in
     let vs =
+      (* for each layer, compute the eigenvectors of corresponding ggn and sample from it *)
       List.foldi lambda ~init:None ~f:(fun id accu lambda ->
         let u_left, s_left, _ =
           Tensor.svd ~some:true ~compute_uv:true Maths.(primal lambda.left)
@@ -160,6 +161,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
           |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
           |> Array.of_list
         in
+        (* randomly select the indices *)
         let selection =
           List.permute (List.range 0 Int.(d * (d + 1)))
           |> List.sub ~pos:0 ~len:n_per_layer

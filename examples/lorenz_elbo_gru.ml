@@ -605,33 +605,20 @@ end
      -------------------------------- *)
 
 module Do_with_SOFO : Do_with_T = struct
-  module O = Optimizer.SOFO (GRU)
+  module O = Optimizer.SOFO (GRU) (GGN)
 
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some Float.(0.03 / (1. +. (0.0 * sqrt (of_int iter))))
+      ; learning_rate = Some Float.(0.01 / (1. +. (0.0 * sqrt (of_int iter))))
       ; n_tangents = 60
-      ; sqrt = false
       ; rank_one = false
       ; damping = Some 1e-5
-      ; momentum = None
-      ; lm = false
-      ; perturb_thresh = None
+      ; aux  = None
       }
 
-  let name =
-    let init_config = config_f ~iter:0 in
-    let gamma_name =
-      Option.value_map init_config.damping ~default:"none" ~f:Float.to_string
-    in
-    sprintf
-      "true_fisher_lr_%s_sqrt_%s_damp_%s"
-      (Float.to_string (Option.value_exn init_config.learning_rate))
-      (Bool.to_string init_config.sqrt)
-      gamma_name
-
-  let init = O.init ~config:(config_f ~iter:0) GRU.init
+  let name = "sofo"
+  let init = O.init  GRU.init
 end
 
 (* --------------------------------

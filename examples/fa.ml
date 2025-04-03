@@ -318,7 +318,7 @@ module Make (D : Do_with_T) = struct
       let _, y = sample_data () in
       let config = config_f ~iter in
       let t0 = Unix.gettimeofday () in
-      let loss, new_state = O.step ~config ~state ~data:y ~args:() in
+      let loss, new_state = O.step ~config ~state ~data:y () in
       let std_o_mean =
         let a = M.P.value (O.params state) in
         a.sigma_o_prms |> Tensor.mean |> Tensor.to_float0_exn
@@ -370,22 +370,19 @@ end
    -------------------------------- *)
 
 module Do_with_SOFO : Do_with_T = struct
-  module O = Optimizer.SOFO (M)
+  module O = Optimizer.SOFO (M) (GGN)
 
   let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
       ; learning_rate = Some Float.(0.3 / (1. +. (0. * sqrt (of_int iter))))
       ; n_tangents = 16
-      ; sqrt = false
       ; rank_one = false
       ; damping = None
-      ; momentum = None
-      ; lm = false
-      ; perturb_thresh = None
+      ; aux= None
       }
 
-  let init = O.init ~config:(config_f ~iter:0) theta
+  let init = O.init theta
 
   let name =
     let init_config = config_f ~iter:0 in

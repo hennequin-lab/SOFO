@@ -263,6 +263,7 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
     Stdlib.Gc.major ();
     (* initialise tangents *)
     let theta = params state in
+    (* even trials, use random vs; odd trials, use vs sampled from eigenvectors *)
     let _vs, new_sampling_state =
       match config.aux with
       | Some _ ->
@@ -294,15 +295,15 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
     let loss = final_losses |> Maths.primal |> Tensor.mean |> Tensor.to_float0_exn in
     (* normalise ggn by batch size *)
     let final_ggn = Tensor.div_scalar_ final_ggn (Scalar.f Float.(of_int batch_size)) in
-    let _ =
+    (* let _ =
       if state.t % 2 = 1
       then
         final_ggn
-        |> Tensor.to_bigarray ~kind:Bigarray.float32
+        |> Tensor.to_bigarray ~kind:config.base.ba_kind
         |> fun x ->
-        Owl.Dense.Matrix.S.(transpose (diag x))
-        |> Owl.Dense.Matrix.S.save_txt ~out:"sketch"
-    in
+        Owl.Dense.Matrix.D.(transpose (diag x))
+        |> Owl.Dense.Matrix.D.save_txt ~out:"sketch"
+    in *)
     let loss_tangents = final_losses |> Maths.tangent |> Option.value_exn in
     let vtg =
       Tensor.(
@@ -315,7 +316,7 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
     (* compute natural gradient and update theta *)
     let natural_g = natural_g ?damping:config.damping ~vs ~ggn:final_ggn vtg in
     let new_theta = update_theta ?learning_rate:config.learning_rate ~theta natural_g in
-    (* update the auxiliary state by running a few iterations of Adam *)
+    (* update the auxiliary state by running a few iterations of Adam if using random vs (odd trial) *)
     let new_aux =
       match config.aux with
       | Some aux_config when state.t % 2 = 0 ->

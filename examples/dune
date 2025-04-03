@@ -4,22 +4,18 @@
   lqr_eg
   lorenz
   lgs
-  lgs_min
   fa
-  fa_marginal
   mlp_adaptive
+  mlp_mixer
   lgs_elbo
   lgs_from_scratch
-  lgs_done_right
-  lgs_elbo_simplified
-  lgs_elbo_laplace
+  lorenz_elbo_bottleneck
   lorenz_elbo_gru
   arm_ilqr
   vae)
- (libraries cmdargs bos sofo owl opt domainslib owl-ode lqr ilqr framework)
+ (libraries cmdargs bos sofo owl domainslib owl-ode lqr ilqr framework)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))
-
 
 (env
  (dev

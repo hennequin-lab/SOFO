@@ -34,7 +34,7 @@ module FF =
        end))
 
 (* Optimiser; here you can switch to Adam to compare. *)
-module O = Optimizer.SOFO (FF)
+module O = Optimizer.SOFO (FF) (GGN)
 
 let config =
   Optimizer.Config.SOFO.
@@ -43,10 +43,7 @@ let config =
     ; n_tangents = 10
     ; rank_one = false
     ; damping = None
-    ; momentum = None
-    ; lm = false
-    ; perturb_thresh = None
-    ; sqrt = false
+    ;aux= None
     }
 
 (* -----------------------------------------
@@ -82,7 +79,7 @@ let minibatch bs =
 let rec loop ~t ~out ~state =
   Stdlib.Gc.major ();
   let data = minibatch batch_size in
-  let loss, new_state = O.step ~config ~state ~data ~args:() in
+  let loss, new_state = O.step ~config ~state ~data () in
   if t % 100 = 0
   then (
     Convenience.print [%message (t : int) (loss : float)];
@@ -93,4 +90,4 @@ let rec loop ~t ~out ~state =
 let _ =
   let out = in_dir "loss" in
   Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out ~state:(O.init ~config (One_layer.init ~n ~d))
+  loop ~t:0 ~out ~state:(O.init (One_layer.init ~n ~d))

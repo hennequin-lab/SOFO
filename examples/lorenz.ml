@@ -24,10 +24,8 @@ let config ~base_lr ~gamma =
     ; n_tangents = 128
     ; rank_one = false
     ; damping = gamma
-    ; momentum = None
-    ; lm = false
-    ; perturb_thresh = None
-    ; sqrt = false
+    ; aux = None
+
     }
 
 (* neural network *)
@@ -88,7 +86,7 @@ module FF =
        end))
 
 (* optimiser *)
-module O = Optimizer.SOFO (FF)
+module O = Optimizer.SOFO (FF) (GGN)
 
 (* -----------------------------------------
    -- Generate Lorenz data            ------
@@ -161,7 +159,7 @@ let rec iter ~f_name ~config ~t ~state ~time_elapsed running_avg =
         else (), None) )
   in
   let t0 = Unix.gettimeofday () in
-  let loss, new_state = O.step ~config ~state ~data ~args:init_cond in
+  let loss, new_state = O.step ~config ~state ~data init_cond in
   let t1 = Unix.gettimeofday () in
   let time_elapsed = Float.(time_elapsed + t1 - t0) in
   let running_avg =
@@ -198,4 +196,4 @@ let _ =
   let config = config ~base_lr:0.01 ~gamma:(Some 1e-05) in
   let f_name = "lorenz" in
   Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
-  iter ~f_name ~config ~t:0 ~state:(O.init ~config RNN.(init ~d ~dh)) ~time_elapsed:0. []
+  iter ~f_name ~config ~t:0 ~state:(O.init RNN.(init ~d ~dh)) ~time_elapsed:0. []
