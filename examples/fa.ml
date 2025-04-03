@@ -6,7 +6,7 @@ open Torch
 open Sofo
 
 let _ =
-  Random.init 1996;
+  Random.init 1999;
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
@@ -19,19 +19,20 @@ let base =
     ; ba_kind = Bigarray.float64
     }
 
+let marginal_llh = true
+let marginal_ggn = true
+let sampling = false
+let n_fisher = 30
 let m = 10
 let o = 40
-let bs = 128
-let _K = 128
-let n_samples = 1
-let id_m = Maths.(const (Tensor.of_bigarray ~device:base.device (Owl.Mat.eye m)))
+let bs = 16
 let ones_o = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ o ]))
+let id_o = Maths.(const (Tensor.eye ~n:o ~options:(base.kind, base.device)))
 let ones_u = Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]))
 
-let make_c ~sigma (m, o) =
+let make_c (m, o) =
   Tensor.(
-    f Float.(sigma /. sqrt (of_int m))
-    * randn ~device:base.device ~kind:base.kind [ m; o ])
+    f Float.(1. /. sqrt (of_int m)) * randn ~device:base.device ~kind:base.kind [ m; o ])
   |> Maths.const
 
 module PP = struct
@@ -45,38 +46,33 @@ end
 module P = PP.Make (Prms.P)
 
 let true_theta =
-  let sigma_o_prms = Maths.(log (f 0.1) * ones_o) in
-  let c = make_c ~sigma:1. (m, o) in
+  let sigma_o_prms = Maths.f 0.1 |> Maths.log in
+  let c = make_c (m, o) in
   PP.{ sigma_o_prms; c }
 
 let _ =
-  true_theta.c
+  Maths.(transpose true_theta.c ~dim0:1 ~dim1:0 *@ true_theta.c)
   |> Maths.primal
+  |> Tensor.reshape ~shape:[ -1; 1 ]
   |> Tensor.to_bigarray ~kind:base.ba_kind
-  |> (fun x -> Owl.Mat.(reshape (transpose x *@ x) [| -1; 1 |]))
-  (*   |> (fun x -> Owl.(Mat.reshape (Linalg.D.svdvals x) [| -1; 1 |])) *)
-  |> Owl.Mat.save_txt ~out:(in_dir "true_c")
+  |> Owl.Mat.save_txt ~out:(in_dir (sprintf "true_cct"))
 
 let theta =
-  let c = Prms.free (Maths.primal (make_c ~sigma:1. (m, o))) in
+  let c = Prms.free (Maths.primal (make_c (m, o))) in
   let sigma_o_prms =
     Prms.create
-      ~below:(Tensor.f 5.)
-      Tensor.(f Float.(log 0.1) + zeros ~device:base.device ~kind:base.kind [ 1 ])
-    |> Prms.pin
+      ~above:(Tensor.f (-7.))
+      Tensor.(zeros ~device:base.device ~kind:base.kind [ 1 ])
   in
   PP.{ c; sigma_o_prms }
 
-let sample_data =
-  let sigma_o = Maths.(exp true_theta.sigma_o_prms) in
-  let c = true_theta.c in
-  fun () ->
-    let us =
-      Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const
-    in
-    let xs = Maths.(us *@ c) in
-    let ys = Maths.(xs + (sigma_o * const (Tensor.randn_like (primal xs)))) in
-    us, ys
+let sample_data () =
+  let us = Tensor.(randn ~device:base.device ~kind:base.kind [ bs; m ]) |> Maths.const in
+  let xs = Maths.(us *@ true_theta.c) in
+  let ys =
+    Maths.(xs + (exp true_theta.sigma_o_prms * const (Tensor.randn_like (primal xs))))
+  in
+  us, ys
 
 let solver a y =
   let ell = Maths.cholesky a in
@@ -84,98 +80,129 @@ let solver a y =
   let _x = Maths.linsolve_triangular ~left:false ~upper:true ell_t y in
   Maths.linsolve_triangular ~left:false ~upper:false ell _x
 
-let posterior_precision_chol ~c ~inv_sigma_o =
-  let r = Maths.(sqr inv_sigma_o) in
-  Maths.(id_m + einsum [ c, "ij"; r, "j"; c, "kj" ] "ik") |> Maths.cholesky
+let u_opt ~c ~sigma_o y =
+  let a = Maths.(einsum [ c, "ji"; c, "jk" ] "ik") in
+  let a = Maths.(a + diag_embed ~offset:0 ~dim1:0 ~dim2:1 (sqr sigma_o)) in
+  let solution = solver a y in
+  Maths.(einsum [ c, "ij"; solution, "mj" ] "mi")
 
-let u_opt ~c ~inv_sigma_o y =
-  let r = Maths.(sqr inv_sigma_o) in
-  let a = Maths.(id_m + einsum [ c, "ij"; r, "j"; c, "kj" ] "ik") in
-  let b = Maths.einsum [ c, "ij"; r, "j"; y, "mj" ] "mi" in
-  solver a b
-
-let _ =
-  let u, y = sample_data () in
-  let inv_sigma_o = Maths.(exp (neg true_theta.sigma_o_prms) * ones_o) in
-  let u_recov = u_opt ~c:true_theta.c ~inv_sigma_o y in
-  let u =
-    u
-    |> Maths.primal
-    |> Tensor.to_bigarray ~kind:base.ba_kind
-    |> fun x -> Owl.Mat.reshape x [| -1; 1 |]
+let d_opt_inv ~c ~sigma_o =
+  let sigma_o_inv_vec =
+    Maths.(const (Tensor.ones ~device:base.device ~kind:base.kind [ m ]) / sqr sigma_o)
   in
-  let u_recov =
-    u_recov
-    |> Maths.primal
-    |> Tensor.to_bigarray ~kind:base.ba_kind
-    |> fun x -> Owl.Mat.reshape x [| -1; 1 |]
-  in
-  Owl.Mat.(save_txt ~out:(in_dir "u") (u @|| u_recov))
+  let cct = Maths.(einsum [ c, "ij"; c, "kj" ] "ik") in
+  let a = Maths.(einsum [ cct, "ik"; sigma_o_inv_vec, "k" ] "ik") in
+  let d_opt_inv = Maths.(const (Tensor.eye ~n:m ~options:(base.kind, base.device)) + a) in
+  d_opt_inv
 
-(* log p = -1/2 * (error_term + d * log 2pi + log | Sigma|) *)
-
-let gaussian_llh_chol ?mu ~precision_chol:ell x =
-  let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
-  let error =
-    match mu with
-    | None -> x
-    | Some mu -> Maths.(x - mu)
+let gaussian_llh ?mu ?(fisher_batched = false) ~std x =
+  let inv_std = Maths.(f 1. / std) in
+  let error_term =
+    if fisher_batched
+    then (
+      (* batch dimension l is number of fisher samples *)
+      let error =
+        match mu with
+        | None -> Maths.(einsum [ x, "lma"; inv_std, "a" ] "lma")
+        | Some mu -> Maths.(einsum [ x - mu, "lma"; inv_std, "a" ] "lma")
+      in
+      Maths.einsum [ error, "lma"; error, "lma" ] "lm")
+    else (
+      let error =
+        match mu with
+        | None -> Maths.(einsum [ x, "ma"; inv_std, "a" ] "ma")
+        | Some mu -> Maths.(einsum [ x - mu, "ma"; inv_std, "a" ] "ma")
+      in
+      Maths.einsum [ error, "ma"; error, "ma" ] "m")
   in
-  let error_term = Maths.einsum [ error, "ma"; ell, "ai"; ell, "bi"; error, "mb" ] "m" in
   let cov_term =
-    Maths.(neg (sum (log (sqr (diagonal ~offset:0 ell)))) |> reshape ~shape:[ 1 ])
+    let cov_term_shape = if fisher_batched then [ 1; 1 ] else [ 1 ] in
+    Maths.(sum (log (sqr std))) |> Maths.reshape ~shape:cov_term_shape
   in
-  let const_term = Float.(log (2. * pi) * of_int d) in
-  Maths.(-0.5 $* (const_term $+ error_term + cov_term))
+  let const_term =
+    let o = x |> Maths.primal |> Tensor.shape |> List.last_exn in
+    Float.(log (2. * pi) * of_int o)
+  in
+  Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
 
-let gaussian_llh ?mu ~inv_std x =
-  let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
+let gaussian_llh_chol ?mu ~chol x =
+  let ell_t = Maths.transpose ~dim0:0 ~dim1:1 chol in
   let error_term =
     let error =
       match mu with
-      | None -> Maths.(einsum [ x, "ma"; inv_std, "a" ] "ma")
-      | Some mu -> Maths.(einsum [ x - mu, "ma"; inv_std, "a" ] "ma")
+      | None -> x
+      | Some mu -> Maths.(x - mu)
     in
+    let error = Maths.linsolve_triangular ~left:false ~upper:true ell_t error in
     Maths.einsum [ error, "ma"; error, "ma" ] "m"
   in
-  let cov_term = Maths.(neg (sum (log (sqr inv_std))) |> reshape ~shape:[ 1 ]) in
-  let const_term = Float.(log (2. * pi) * of_int d) in
-  Maths.(-0.5 $* (const_term $+ error_term + cov_term))
+  let cov_term =
+    Maths.(sum (log (sqr (diagonal ~offset:0 chol))) |> reshape ~shape:[ 1 ])
+  in
+  let const_term =
+    let o = x |> Maths.primal |> Tensor.shape |> List.last_exn in
+    Float.(log (2. * pi) * of_int o)
+  in
+  Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
 
-let elbo ~data:y (theta : P.M.t) =
-  let sigma_o = Maths.(exp theta.sigma_o_prms) in
-  let inv_sigma_o = Maths.(exp (neg theta.sigma_o_prms)) in
-  let inv_sigma_o_expanded = Maths.(inv_sigma_o * ones_o) in
-  let u_opt = u_opt ~c:theta.c ~inv_sigma_o:inv_sigma_o_expanded y in
-  let post_prec_chol =
-    posterior_precision_chol ~c:theta.c ~inv_sigma_o:inv_sigma_o_expanded
+let fisher ?(fisher_batched = false) ~n:_ lik_term =
+  let neg_lik_t = Maths.(tangent lik_term) |> Option.value_exn in
+  let n_tangents = List.hd_exn (Tensor.shape neg_lik_t) in
+  let fisher =
+    if fisher_batched
+    then (
+      let fisher_half = Tensor.reshape neg_lik_t ~shape:[ n_tangents; n_fisher; -1 ] in
+      Tensor.einsum ~equation:"kla,jla->lkj" [ fisher_half; fisher_half ] ~path:None)
+    else (
+      let fisher_half = Tensor.reshape neg_lik_t ~shape:[ n_tangents; -1 ] in
+      Tensor.(matmul fisher_half (transpose fisher_half ~dim0:0 ~dim1:1)))
   in
-  let results =
-    List.init n_samples ~f:(fun _ ->
-      let u_diff =
-        let e = Maths.(const (Tensor.randn_like (primal u_opt))) in
-        Maths.linsolve_triangular ~left:false ~upper:false post_prec_chol e
-      in
-      let u_sampled = Maths.(u_opt + u_diff) in
-      (* m x o *)
-      let y_pred = Maths.(u_sampled *@ theta.c) in
-      let lik_term = gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded y in
-      let kl_term =
-        let prior_term = gaussian_llh ~inv_std:ones_u u_sampled in
-        let q_term = gaussian_llh_chol ~precision_chol:post_prec_chol u_diff in
-        Maths.(const (primal (q_term - prior_term)))
-      in
-      let neg_elbo =
-        Maths.(lik_term - kl_term) |> Maths.neg |> fun x -> Maths.(x / f Float.(of_int o))
-      in
-      neg_elbo, y_pred)
+  fisher
+
+let ggn ~y_pred ~std_o =
+  let precision = Maths.(f 1. / sqr std_o) in
+  let ggn_y =
+    let vtgt = Maths.tangent y_pred |> Option.value_exn in
+    let vtgt_h = Tensor.(vtgt * Maths.(primal precision)) in
+    Tensor.(
+      einsum ~equation:"kma,jma->kj" [ vtgt_h; vtgt ] ~path:None / f (Float.of_int o))
   in
-  let y_preds = List.map ~f:snd results in
-  let neg_elbo =
-    List.fold results ~init:(Maths.f 0.) ~f:(fun accu (x, _) -> Maths.(accu + x))
-    |> fun x -> Maths.(x / f Float.(of_int n_samples))
+  let ggn_sigma_o =
+    let vtgt = Maths.tangent precision |> Option.value_exn in
+    let vtgt_h =
+      Tensor.(f Float.(of_int bs / 2.) * vtgt / square (Maths.primal precision))
+    in
+    Tensor.einsum ~equation:"ka,ja->kj" [ vtgt_h; vtgt ] ~path:None
   in
-  neg_elbo, y_preds, sigma_o
+  Tensor.(ggn_y + ggn_sigma_o)
+
+(* ggn matrix when loss is the negative marginal log likelihood *)
+let ggn_marginal ~marginal_cov_chol =
+  let marginal_cov_chol_inv =
+    Maths.linsolve_triangular marginal_cov_chol id_o ~left:true ~upper:false
+  in
+  let marginal_cov_chol_inv_p = Maths.primal marginal_cov_chol_inv in
+  let marginal_cov_inv_p =
+    Tensor.einsum
+      [ marginal_cov_chol_inv_p; marginal_cov_chol_inv_p ]
+      ~path:None
+      ~equation:"ij,ik->jk"
+  in
+  let marginal_cov_t =
+    let marginal_cov =
+      Maths.(marginal_cov_chol *@ transpose marginal_cov_chol ~dim0:1 ~dim1:0)
+    in
+    Maths.tangent marginal_cov |> Option.value_exn
+  in
+  let ggn_half =
+    Tensor.einsum
+      [ marginal_cov_t; marginal_cov_inv_p ]
+      ~path:None
+      ~equation:"koq,qp->kop"
+  in
+  Tensor.(
+    f Float.(of_int bs / (2. * of_int o))
+    * einsum [ ggn_half; ggn_half ] ~path:None ~equation:"kop,jpo->kj")
 
 module M = struct
   module P = P
@@ -183,52 +210,86 @@ module M = struct
   type data = Maths.t
   type args = unit
 
-  let f ~update ~data:y ~init ~args:() (theta : P.M.t) =
-    let neg_elbo, y_pred, sigma_o = elbo ~data:y theta in
-    match update with
-    | `loss_only u -> u init (Some neg_elbo)
-    | `loss_and_ggn u ->
-      let sigma2 = Maths.sqr sigma_o in
-      let sigma2_p = Maths.(const (primal sigma2)) in
-      let preconditioner =
-        List.fold y_pred ~init:(Tensor.f 0.) ~f:(fun accu y_pred ->
-          (*         let sigma2_t = Maths.tangent sigma2 |> Option.value_exn |> Maths.const in *)
-          let mu_t = Maths.tangent y_pred |> Option.value_exn |> Maths.const in
-          let ggn_part1 = Maths.(einsum [ mu_t, "kmo"; mu_t, "lmo" ] "kl" / sigma2_p) in
-          let ggn_part2 = Maths.f 0. in
-          (*let ggn_part2 =
-          Maths.(
-            einsum
-              [ f Float.(0.5 * of_int o * of_int bs) * sigma2_t / sqr sigma2_p, "ky"
-              ; sigma2_t, "ly"
-              ]
-              "kl")
-        in*)
-          Maths.(primal ((ggn_part1 + ggn_part2) / f Float.(of_int o)))
-          |> Tensor.( + ) accu)
-        |> fun x -> Tensor.(x / f Float.(of_int n_samples))
+  let kl ~u_sampled ~u_opt ~u_diff ~d_opt_chol =
+    if sampling
+    then (
+      let prior_term = gaussian_llh ~std:ones_u u_sampled in
+      let q_term = gaussian_llh_chol ~chol:d_opt_chol u_diff in
+      Maths.(q_term - prior_term))
+    else (
+      let d_opt_chol_diag = Maths.diagonal d_opt_chol ~offset:0 in
+      let det1 = Maths.(2. $* sum (log d_opt_chol_diag)) in
+      let _const = Maths.const (Tensor.f Float.(of_int m)) in
+      let tr = d_opt_chol_diag |> Maths.sqr |> Maths.sum in
+      let quad =
+        Maths.(einsum [ u_opt, "mb"; u_opt, "mb" ] "m") |> Maths.reshape ~shape:[ -1 ]
       in
-      let _, s, _ = Tensor.svd ~some:true ~compute_uv:true preconditioner in
-      let s =
-        Tensor.to_bigarray ~kind:base.ba_kind s |> fun x -> Owl.Mat.reshape x [| -1; 1 |]
-      in
-      Owl.Mat.save_txt ~out:(in_dir "svals") s;
-      u init (Some (neg_elbo, Some preconditioner))
+      let tmp = Maths.(tr - _const - det1) |> Maths.reshape ~shape:[ 1 ] in
+      Maths.(0.5 $* tmp + quad))
 
-  let update_good_tangents ~data:y ~tangents (theta : P.tagged) =
-    let theta = P.make_dual theta ~t:tangents in
-    let neg_elbo, _, _ = elbo ~data:y theta in
-    let neg_elbo_t = Maths.tangent neg_elbo |> Option.value_exn in
-    let u, _, _ = Tensor.svd ~some:true ~compute_uv:true neg_elbo_t in
-    (*     let u = Tensor.transpose ~dim0:0 ~dim1:1 u in *)
-    let u = Tensor.slice ~dim:1 ~start:(Some 0) ~end_:(Some Int.(_K / 2)) ~step:1 u in
-    P.map tangents ~f:(fun v ->
-      let v = Maths.tangent' v in
-      let s = Tensor.shape v |> List.tl_exn in
-      let v = Tensor.reshape v ~shape:[ _K; -1 ] in
-      let v = Tensor.einsum ~path:None ~equation:"ki,kj->ji" [ v; u ] in
-      let v = Tensor.reshape v ~shape:((_K / 2) :: s) in
-      Maths.Direct v)
+  let neg_elbo ~y_pred ~y ~u_sampled ~u_opt ~u_diff ~d_opt_chol (theta : P.M.t) =
+    let sigma_o = Maths.exp theta.sigma_o_prms in
+    let sigma_o_extended = Maths.(sigma_o * ones_o) in
+    let llh = gaussian_llh ~mu:y_pred ~std:sigma_o_extended y in
+    let kl = kl ~u_sampled ~u_opt ~u_diff ~d_opt_chol in
+    Maths.(llh - kl) |> Maths.neg
+
+  let marginal_cov_chol (theta : P.M.t) =
+    let sigma_o = Maths.exp theta.sigma_o_prms in
+    let sigma_o_extended = Maths.(sigma_o * ones_o) in
+    Maths.(
+      (transpose theta.c ~dim0:1 ~dim1:0 *@ theta.c)
+      + diag_embed ~offset:0 ~dim1:0 ~dim2:1 (sqr sigma_o_extended))
+    |> Maths.cholesky
+
+  let neg_marginal_llh ~marginal_cov_chol ~y =
+    gaussian_llh_chol ~chol:marginal_cov_chol y |> Maths.neg
+
+  let d_opt_chol (theta : P.M.t) =
+    let sigma_o = Maths.exp theta.sigma_o_prms in
+    let d_opt_inv = d_opt_inv ~c:theta.c ~sigma_o in
+    let d_opt_inv_chol = Maths.cholesky d_opt_inv in
+    Maths.linsolve
+      d_opt_inv_chol
+      (Maths.const (Tensor.eye ~n:m ~options:(base.kind, base.device)))
+      ~left:true
+
+  let f ~update ~data:y ~init ~args:() (theta : P.M.t) =
+    (* sample u *)
+    let d_opt_chol = d_opt_chol theta in
+    let u_opt = u_opt ~c:theta.c ~sigma_o:Maths.(exp theta.sigma_o_prms * ones_o) y in
+    let u_diff =
+      let e = Maths.(const (Tensor.randn_like (primal u_opt))) in
+      Maths.einsum [ e, "mj"; d_opt_chol, "ij" ] "mi"
+    in
+    let u_sampled =
+      (* Maths.(const (primal_tensor_detach (u_opt + u_diff))) *)
+      Maths.(u_opt + u_diff)
+    in
+    let y_pred = Maths.(u_sampled *@ theta.c) in
+    let marginal_cov_chol = marginal_cov_chol theta in
+    let loss =
+      let tmp =
+        if marginal_llh
+        then neg_marginal_llh ~marginal_cov_chol ~y
+        else neg_elbo ~y_pred ~y ~u_sampled ~u_opt ~u_diff ~d_opt_chol (theta : P.M.t)
+      in
+      Maths.(tmp / f Float.(of_int o))
+    in
+    match update with
+    | `loss_only u -> u init (Some loss)
+    | `loss_and_ggn u ->
+      let preconditioner =
+        if marginal_ggn
+        then ggn_marginal ~marginal_cov_chol
+        else ggn ~y_pred ~std_o:(Maths.exp theta.sigma_o_prms)
+      in
+      let _, final_s, _ = Tensor.svd ~some:true ~compute_uv:false preconditioner in
+      final_s
+      |> Tensor.reshape ~shape:[ -1; 1 ]
+      |> Tensor.to_bigarray ~kind:base.ba_kind
+      |> Owl.Mat.save_txt ~out:(in_dir (sprintf "svals"));
+      u init (Some (loss, Some preconditioner))
 end
 
 (* --------------------------------
@@ -243,65 +304,27 @@ module type Do_with_T = sig
      and type W.args = unit
 
   val name : string
-  val config : iter:int -> (float, Bigarray.float64_elt) O.config
+  val config_f : iter:int -> (float, Bigarray.float64_elt) O.config
   val init : O.state
 end
 
 module Make (D : Do_with_T) = struct
   open D
 
-  let init_tangents ~n_tangents theta =
-    O.W.P.map theta ~f:(function
-      | Prms.Const x ->
-        Tensor.zeros
-          ~device:(Tensor.device x)
-          ~kind:(Tensor.kind x)
-          (n_tangents :: Tensor.shape x)
-      | Prms.Free x ->
-        Tensor.randn
-          ~device:(Tensor.device x)
-          ~kind:(Tensor.kind x)
-          (n_tangents :: Tensor.shape x)
-      | Prms.Bounded (x, _, _) ->
-        Tensor.randn
-          ~device:(Tensor.device x)
-          ~kind:(Tensor.kind x)
-          (n_tangents :: Tensor.shape x))
-    |> O.W.P.map ~f:(fun x -> Maths.Direct x)
-
-  (* orthogonalise tangents *)
-  let orthonormalise tangents =
-    let vtv =
-      O.W.P.fold tangents ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
-        let v = Maths.tangent' v in
-        let n_tangents = List.hd_exn Tensor.(shape v) in
-        let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
-        Tensor.(accu + einsum ~equation:"ij,kj->ik" ~path:None [ v; v ]))
-    in
-    let u, s, _ = Tensor.svd ~some:true ~compute_uv:true vtv in
-    let normalizer = Tensor.(u / sqrt s |> transpose ~dim0:0 ~dim1:1) in
-    O.W.P.map tangents ~f:(fun v ->
-      let v = Maths.tangent' v in
-      let n_tangents = List.hd_exn Tensor.(shape v) in
-      let s = Tensor.shape v in
-      let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
-      let v = Tensor.(matmul normalizer v) in
-      Maths.Direct (Tensor.reshape v ~shape:s))
-
-  let complete_tangents good_tangents =
-    O.W.P.map good_tangents ~f:(fun v ->
-      let v = Maths.tangent' v in
-      let v = Tensor.(concat [ v; randn_like v ] ~dim:0) in
-      Maths.Direct v)
-    |> orthonormalise
-
   let optimise max_iter =
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
-    let rec loop ~iter ~state ~good_tangents running_avg =
+    let rec loop ~iter ~state ~time_elapsed running_avg =
       Stdlib.Gc.major ();
       let _, y = sample_data () in
-      let tangents = complete_tangents good_tangents in
-      let loss, new_state = O.step ~tangents ~config:(config ~iter) ~state ~data:y () in
+      let config = config_f ~iter in
+      let t0 = Unix.gettimeofday () in
+      let loss, new_state = O.step ~config ~state ~data:y ~args:() in
+      let std_o_mean =
+        let a = M.P.value (O.params state) in
+        a.sigma_o_prms |> Tensor.mean |> Tensor.to_float0_exn
+      in
+      let t1 = Unix.gettimeofday () in
+      let time_elapsed = Float.(time_elapsed + t1 - t0) in
       let running_avg =
         let loss_avg =
           match running_avg with
@@ -311,9 +334,16 @@ module Make (D : Do_with_T) = struct
         (* save params *)
         if iter % 10 = 0
         then (
-          let ground_truth_elbo, _, _ = elbo ~data:y true_theta in
-          let ground_truth_elbo =
-            Maths.primal ground_truth_elbo |> Tensor.mean |> Tensor.to_float0_exn
+          (* learned cct *)
+          let _ =
+            let c =
+              let a = M.P.value (O.params state) in
+              a.c
+            in
+            Tensor.(matmul (transpose c ~dim0:0 ~dim1:1) c)
+            |> Tensor.reshape ~shape:[ -1; 1 ]
+            |> Tensor.to_bigarray ~kind:base.ba_kind
+            |> Owl.Mat.save_txt ~out:(in_dir (sprintf "learned_cct"))
           in
           (* avg error *)
           Convenience.print [%message (iter : int) (loss_avg : float)];
@@ -322,23 +352,17 @@ module Make (D : Do_with_T) = struct
             save_txt
               ~append:true
               ~out:(in_dir name)
-              (of_array [| Float.of_int t; loss_avg; ground_truth_elbo |] 1 3));
-          O.params new_state
-          |> P.value
-          |> (fun x -> x.PP.c)
-          |> Tensor.to_bigarray ~kind:base.ba_kind
-          |> (fun x -> Owl.Mat.(reshape (transpose x *@ x) [| -1; 1 |]))
-          (*           |> (fun x -> Owl.(Mat.reshape (Linalg.D.svdvals x) [| -1; 1 |])) *)
-          |> Owl.Mat.save_txt ~out:(in_dir "c"));
+              (of_array [| Float.of_int t; time_elapsed; loss_avg; std_o_mean |] 1 4));
+          O.W.P.T.save
+            (M.P.value (O.params new_state))
+            ~kind:base.ba_kind
+            ~out:(in_dir name ^ "_params"));
         []
       in
       if iter < max_iter
-      then (
-        let good_tangents = M.update_good_tangents ~data:y ~tangents (O.params state) in
-        loop ~iter:(iter + 1) ~state:new_state ~good_tangents (loss :: running_avg))
+      then loop ~iter:(iter + 1) ~state:new_state ~time_elapsed (loss :: running_avg)
     in
-    let good_tangents = init_tangents ~n_tangents:(_K / 2) theta in
-    loop ~iter:0 ~state:init ~good_tangents []
+    loop ~iter:0 ~state:init ~time_elapsed:0. []
 end
 
 (* --------------------------------
@@ -348,13 +372,11 @@ end
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (M)
 
-  let name = "sofo"
-
-  let config ~iter:k =
+  let config_f ~iter =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.2
-      ; n_tangents = _K
+      ; learning_rate = Some Float.(0.3 / (1. +. (0. * sqrt (of_int iter))))
+      ; n_tangents = 16
       ; sqrt = false
       ; rank_one = false
       ; damping = None
@@ -363,7 +385,17 @@ module Do_with_SOFO : Do_with_T = struct
       ; perturb_thresh = None
       }
 
-  let init = O.init ~config:(config ~iter:0) theta
+  let init = O.init ~config:(config_f ~iter:0) theta
+
+  let name =
+    let init_config = config_f ~iter:0 in
+    let gamma_name =
+      Option.value_map init_config.damping ~default:"none" ~f:Float.to_string
+    in
+    sprintf
+      "ggn_lr_%s_damp_%s"
+      (Float.to_string (Option.value_exn init_config.learning_rate))
+      gamma_name
 end
 
 (* --------------------------------
@@ -375,8 +407,8 @@ module Do_with_Adam : Do_with_T = struct
 
   module O = Optimizer.Adam (M)
 
-  let config ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.006 }
+  let config_f ~iter:_ =
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
 
   let init = O.init theta
 end

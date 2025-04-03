@@ -12,11 +12,11 @@ let _ =
    -- Define Control Problem          ------
    ----------------------------------------- *)
 module Dims = struct
-  let a = 24
-  let b = 10
+  let n = 24
+  let m = 10
   let o = 0
   let tmax = 10
-  let m = 64
+  let bs = 64
   let k = 64
   let batch_const = false
   let kind = Torch_core.Kind.(T f64)
@@ -30,7 +30,7 @@ let x0 = Data.sample_x0 ()
 
 (* need to sample these first to get the trajectory *)
 let f_list : Maths.t Lds_data.f_params list =
-  let _Fx = Data.sample_fx () in
+  let _Fx = Data.sample_fx ~target_sa:0.8 in
   let _Fu = Data.sample_fu () in
   List.init (Dims.tmax + 1) ~f:(fun _ ->
     Lds_data.

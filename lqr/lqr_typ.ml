@@ -21,12 +21,6 @@ type ('a, 'prod) momentary_params_common =
   ; _Fx_prod2_tangent : 'prod option (* vA product *)
   ; _Fu_prod_tangent : 'prod option (* Bv produt *)
   ; _Fu_prod2_tangent : 'prod option (* vB product *)
-  ; _Fx_prod_inv : 'prod option (* A^-1 v product *)
-  ; _Fx_prod2_inv : 'prod option (* vA^-1 product *)
-  ; _Fu_prod_trans : 'prod option (* B^T v product *)
-  ; _Fu_prod2_trans : 'prod option (* vB^T product *)
-  ; _Fx_prod_inv_trans : 'prod option (* A^-T v product *)
-  ; _Fx_prod2_inv_trans : 'prod option (* vA^-T product *)
   ; _Cxx : 'a option
   ; _Cxu : 'a option
   ; _Cuu : 'a option
@@ -51,6 +45,7 @@ module Params = struct
   [@@deriving prms]
 end
 
+(* u_0 has the same size as x_0 as we force _Fu_0 to be the identity. *)
 module Solution = struct
   type 'a p =
     { u : 'a
@@ -72,6 +67,7 @@ type backward_common_info =
 type backward_info =
   { _K : t option
   ; _k : t option
+  ; _Quu_chol : t option
   }
 
 type backward_info_f =

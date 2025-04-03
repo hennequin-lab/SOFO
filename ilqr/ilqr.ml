@@ -49,6 +49,7 @@ let _u ~tangent ~batch_const ~_k ~_K ~x ~alpha =
 
 let forward
       ~batch_const
+      ~gamma
       ~cost_func
       ~f_theta
       ~(p : (t option, (t, t -> t) momentary_params list) Params.p)
@@ -57,7 +58,7 @@ let forward
       ~conv_threshold
       ~max_iter
   =
-  let rec fwd_loop ~stop  ~i ~alpha ~tau_prev ~cost_prev =
+  let rec fwd_loop ~stop ~i ~alpha ~tau_prev ~cost_prev =
     if stop
     then tau_prev
     else (
@@ -86,6 +87,7 @@ let forward
           in
           Some x_new, u_new, Solution.{ u; x = Some x_new } :: accu)
       in
+      let alpha = gamma *. alpha in
       let tau_curr = List.rev solution in
       let cost_curr = cost_func ~batch_const tau_curr p in
       let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
@@ -93,70 +95,70 @@ let forward
       then failwith "current cost value is nan"
       else (
         cleanup ();
-        let stop = Float.(pct_change < conv_threshold) || (i = max_iter)  in
-        fwd_loop ~stop ~i:Int.(i+1) ~alpha ~tau_prev:tau_curr ~cost_prev:cost_curr))
+        let stop = Float.(pct_change < conv_threshold) || i = max_iter in
+        fwd_loop ~stop ~i:Int.(i + 1) ~alpha ~tau_prev:tau_curr ~cost_prev:cost_curr))
   in
   let alpha = 1. in
   let cost_init = cost_func ~batch_const tau_opt p in
   fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt ~cost_prev:cost_init
 
-let rec ilqr_loop
-          ~batch_const
-          ~laplace
-          ~conv_threshold
-          ~stop 
-          ~max_iter
-          ~i
-          ~cost_prev
-          ~params_func
-          ~cost_func
-          ~f_theta
-          ~(tau_prev : t option Solution.p list)
-          ~common_info_prev
-  =
-  if stop
-  then tau_prev, common_info_prev
-  else (
-    let p_curr : (t option, (t, t -> t) momentary_params list) Params.p =
-      params_func tau_prev
-    in
-    (* batch const is false since fx and fu now has batch dimension in front *)
-    let common_info =
-      backward_common
-        ~batch_const
-        ~laplace
-        (List.map p_curr.Params.params ~f:(fun x -> x.common))
-    in
-    cleanup ();
-    let bck = backward ~batch_const common_info p_curr in
-    let tau_curr =
-      forward
-        ~batch_const
-        ~cost_func
-        ~f_theta
-        ~p:p_curr
-        ~tau_opt:tau_prev
-        ~bck
-        ~conv_threshold
-        ~max_iter
-    in
-    let cost_curr = cost_func ~batch_const tau_curr p_curr in
-    let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
-    let stop = Float.(pct_change < conv_threshold)|| (i = max_iter) in
-    cleanup ();
-    ilqr_loop
+let ilqr_loop
       ~batch_const
-      ~laplace
+      ~gamma
       ~conv_threshold
-      ~stop
       ~max_iter
-      ~i:Int.(i+1)
       ~params_func
       ~cost_func
       ~f_theta
-      ~tau_prev:tau_curr
-      ~cost_prev:cost_curr
-      ~common_info_prev:(Some common_info))
+      ~cost_init
+      ~(tau_init : t option Solution.p list)
+  =
+  let rec ilqr_rec ~stop ~i ~tau_prev ~cost_prev ~common_info_prev ~info_prev =
+    if stop
+    then tau_prev, common_info_prev, info_prev
+    else (
+      let p_curr : (t option, (t, t -> t) momentary_params list) Params.p =
+        params_func tau_prev
+      in
+      (* batch const is false since fx and fu now has batch dimension in front *)
+      let common_info =
+        backward_common
+          ~batch_const
+          (List.map p_curr.Params.params ~f:(fun x -> x.common))
+      in
+      cleanup ();
+      let bck = backward ~batch_const common_info p_curr in
+      let tau_curr =
+        forward
+          ~batch_const
+          ~gamma
+          ~cost_func
+          ~f_theta
+          ~p:p_curr
+          ~tau_opt:tau_prev
+          ~bck
+          ~conv_threshold
+          ~max_iter
+      in
+      let cost_curr = cost_func ~batch_const tau_curr p_curr in
+      let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
+      let stop = Float.(pct_change < conv_threshold) || i = max_iter in
+      cleanup ();
+      ilqr_rec
+        ~stop
+        ~i:Int.(i + 1)
+        ~tau_prev:tau_curr
+        ~cost_prev:cost_curr
+        ~common_info_prev:(Some common_info)
+        ~info_prev:(Some bck))
+  in
+  ilqr_rec
+    ~stop:false
+    ~i:0
+    ~tau_prev:tau_init
+    ~cost_prev:cost_init
+    ~common_info_prev:None
+    ~info_prev:None
 
 let rollout
       ~u_init
@@ -176,42 +178,29 @@ let rollout
 (* when batch_const is true, _Fx_prods, _Fu_prods, _Cxx, _Cxu, _Cuu has no leading batch dimension and special care needs to be taken to deal with these *)
 let _isolve
       ?(batch_const = false)
-      ?(laplace = false)
+      ~gamma
       ~f_theta
       ~cost_func
       ~params_func
       ~conv_threshold
       ~tau_init
-      ~max_iter 
+      ~max_iter
   =
   (* step 1: init params and cost *)
   let p_init = params_func tau_init in
   let cost_init = cost_func ~batch_const tau_init p_init in
   (*step 2: loop to find the best controls and states *)
-  let tau_final, common_info_final =
+  let tau_final, _, info_final =
     ilqr_loop
       ~batch_const
-      ~laplace
+      ~gamma
       ~conv_threshold
-      ~stop:false
-      ~max_iter 
-      ~i:0
+      ~max_iter
       ~params_func
       ~cost_func
       ~f_theta
-      ~tau_prev:tau_init
-      ~cost_prev:cost_init
-      ~common_info_prev:None
+      ~tau_init
+      ~cost_init
   in
   cleanup ();
-  (* step 3: calculate covariances if required *)
-  if laplace
-  then (
-    let covariances =
-      covariances
-        ~batch_const
-        ~common_info:(Option.value_exn common_info_final)
-        (params_func tau_final)
-    in
-    tau_final, Some (List.map covariances ~f:(fun x -> Option.value_exn x)))
-  else tau_final, None
+  tau_final, info_final
