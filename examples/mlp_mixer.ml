@@ -21,6 +21,8 @@ let input_dim = 28
 let output_dim = 10
 let full_batch_size = 60_000
 let batch_size = 64
+let n_epochs_to_run = 70
+let max_iter = Int.(full_batch_size * n_epochs_to_run / batch_size)
 let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size t
 
 (* network hyperparameters *)
@@ -280,8 +282,8 @@ let layer_names_list =
   ; "classification"
   ]
 
-let _K_w = 8
-let _K_b = 1
+let _K_w = 60
+let _K_b = 10
 let _K = Int.(List.length layer_names_list * (_K_w + _K_b))
 let _ = Convenience.print [%message (_K : int)]
 
@@ -710,7 +712,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
           |> Tensor.concatenate ~dim:0
         in
         local_vs, n_per_param
-      | _ -> assert false
     in
     vs |> localise ~param_name ~n_per_param
 
@@ -731,45 +732,48 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let init_eye size =
       Mat.(0.1 $* eye size) |> Tensor.of_bigarray ~device:base.device |> Prms.free
     in
-    { patchify_w_0 = init_eye c
+    let eye_h = init_eye h in
+    let eye_s = init_eye s in
+    let eye_c = init_eye c in
+    { patchify_w_0 = eye_c
     ; patchify_w_1 = init_eye Int.(in_channels / groups)
     ; patchify_w_2 = init_eye patch_size
     ; patchify_w_3 = init_eye patch_size
     ; patchify_b_left = init_eye 1
-    ; patchify_b_right = init_eye c
-    ; token_hidden_0_w_left = init_eye s
-    ; token_hidden_0_w_right = init_eye h
-    ; token_hidden_0_b_left = init_eye h
-    ; token_hidden_0_b_right = init_eye c
-    ; token_output_0_w_left = init_eye h
-    ; token_output_0_w_right = init_eye s
-    ; token_output_0_b_left = init_eye s
-    ; token_output_0_b_right = init_eye c
-    ; channel_hidden_0_w_left = init_eye c
-    ; channel_hidden_0_w_right = init_eye h
-    ; channel_hidden_0_b_left = init_eye h
-    ; channel_hidden_0_b_right = init_eye s
-    ; channel_output_0_w_left = init_eye h
-    ; channel_output_0_w_right = init_eye c
-    ; channel_output_0_b_left = init_eye s
-    ; channel_output_0_b_right = init_eye c
-    ; token_hidden_1_w_left = init_eye s
-    ; token_hidden_1_w_right = init_eye h
-    ; token_hidden_1_b_left = init_eye h
-    ; token_hidden_1_b_right = init_eye c
-    ; token_output_1_w_left = init_eye h
-    ; token_output_1_w_right = init_eye s
-    ; token_output_1_b_left = init_eye s
-    ; token_output_1_b_right = init_eye c
-    ; channel_hidden_1_w_left = init_eye c
-    ; channel_hidden_1_w_right = init_eye h
-    ; channel_hidden_1_b_left = init_eye h
-    ; channel_hidden_1_b_right = init_eye s
-    ; channel_output_1_w_left = init_eye h
-    ; channel_output_1_w_right = init_eye c
-    ; channel_output_1_b_left = init_eye s
-    ; channel_output_1_b_right = init_eye c
-    ; classification_w_left = init_eye c
+    ; patchify_b_right = eye_c
+    ; token_hidden_0_w_left = eye_s
+    ; token_hidden_0_w_right = eye_h
+    ; token_hidden_0_b_left = eye_h
+    ; token_hidden_0_b_right = eye_c
+    ; token_output_0_w_left = eye_h
+    ; token_output_0_w_right = eye_s
+    ; token_output_0_b_left = eye_s
+    ; token_output_0_b_right = eye_c
+    ; channel_hidden_0_w_left = eye_c
+    ; channel_hidden_0_w_right = eye_h
+    ; channel_hidden_0_b_left = eye_h
+    ; channel_hidden_0_b_right = eye_s
+    ; channel_output_0_w_left = eye_h
+    ; channel_output_0_w_right = eye_c
+    ; channel_output_0_b_left = eye_s
+    ; channel_output_0_b_right = eye_c
+    ; token_hidden_1_w_left = eye_s
+    ; token_hidden_1_w_right = eye_h
+    ; token_hidden_1_b_left = eye_h
+    ; token_hidden_1_b_right = eye_c
+    ; token_output_1_w_left = eye_h
+    ; token_output_1_w_right = eye_s
+    ; token_output_1_b_left = eye_s
+    ; token_output_1_b_right = eye_c
+    ; channel_hidden_1_w_left = eye_c
+    ; channel_hidden_1_w_right = eye_h
+    ; channel_hidden_1_b_left = eye_h
+    ; channel_hidden_1_b_right = eye_s
+    ; channel_output_1_w_left = eye_h
+    ; channel_output_1_w_right = eye_c
+    ; channel_output_1_b_left = eye_s
+    ; channel_output_1_b_right = eye_c
+    ; classification_w_left = eye_c
     ; classification_w_right = init_eye output_dim
     ; classification_b_left = init_eye 1
     ; classification_b_right = init_eye output_dim
@@ -797,6 +801,7 @@ module Make (D : Do_with_T) = struct
 
   let optimise max_iter =
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
+    Bos.Cmd.(v "rm" % "-f" % in_dir "aux") |> Bos.OS.Cmd.run |> ignore;
     let rec loop ~iter ~state running_avg =
       Stdlib.Gc.major ();
       let data = sample_data train_set batch_size in
@@ -819,8 +824,10 @@ module Make (D : Do_with_T) = struct
               ~train_data:(Some data)
               MLP_mixer.P.(const (value (O.params new_state)))
           in
+          (* let params = O.params state in 
+          let n_params = O.W.P.T.numel (O.W.P.map params ~f:(fun p -> Prms.value p)) in *)
           (* avg error *)
-          Convenience.print [%message (iter : int) (loss_avg : float) (test_acc : float)];
+          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float)];
           (* save params *)
           if iter % 100 = 0
           then
@@ -853,9 +860,7 @@ module Do_with_SOFO : Do_with_T = struct
     let aux =
       Optimizer.Config.SOFO.
         { (default_aux (in_dir "aux")) with
-          config =
-            Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
+          config = Optimizer.Config.Adam.{ default with base; learning_rate = Some 1e-5 ; eps=1e-4}
         ; steps = 5
         }
     in
@@ -881,13 +886,12 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (FF)
 
   let config ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.02 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 1e-3 }
 
   let init = O.init MLP_mixer.init
 end
 
 let _ =
-  let max_iter = 1000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

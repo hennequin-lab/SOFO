@@ -400,35 +400,6 @@ let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
         z, kl, (ustar + u_sample) :: us)
   in
   kl, List.rev us
-(* approximate kalman smoothed distribution of u *)
-(* let sample_and_kl ~a ~b ~b_0 backward_info =
-  let open Maths in
-  let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> const in
-  let dummy_u = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; m ] in
-  let dummy_u_0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] in
-
-  let us, kl, _ =
-    List.foldi
-      backward_info
-      ~init:([], f 0., z0)
-      ~f:(fun i (accu, kl, z) (_k, _K, _Quu_chol) ->
-        let du =
-          linsolve_triangular
-            ~left:false
-            ~upper:false
-            _Quu_chol
-            (const ( Tensor.randn_like (if i = 0 then dummy_u_0 else dummy_u)))
-        in
-        let u = du + _k + einsum [ _K, "ji"; z, "mj" ] "mi" in
-        let dkl =
-          let prior_term = gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u in
-          let q_term = gaussian_llh_chol ~precision_chol:_Quu_chol du in
-          q_term - prior_term
-        in
-        let z = einsum [ a, "ij"; z, "mi" ] "mj" + einsum [ (if i = 0 then b_0 else b), "ij"; u, "mi" ] "mj" in
-        u :: accu, kl + dkl, z)
-  in
-  kl, List.rev us    *)
 
 let elbo ~data:(o_list : Maths.t list) (theta : P.M.t) =
   let a = a_reparam (theta.q, theta.d) in
@@ -515,8 +486,6 @@ end
 type param_name =
   | Q
   | D
-  (* | B
-  | B_0 *)
   | C
   | Log_obs_var
   | Scaling_factor
@@ -591,14 +560,15 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     { q; d; b; b_0; c; log_obs_var; scaling_factor }
 
   (* set tangents = zero for other parameters but v for this parameter *)
-  let localise ~param_name ~n_per_param v =
-    let q = zero_params ~shape:[ n; n ] n_per_param in
-    let d = zero_params ~shape:[ 1; n ] n_per_param in
-    let b = zero_params ~shape:[ m; n ] n_per_param in
-    let b_0 = zero_params ~shape:[ n; n ] n_per_param in
-    let c = zero_params ~shape:[ n; o ] n_per_param in
-    let log_obs_var = zero_params ~shape:[ 1 ] n_per_param in
-    let scaling_factor = zero_params ~shape:[ 1 ] n_per_param in
+  let localise ~local ~param_name ~n_per_param v =
+    let sample = if local then zero_params else random_params in 
+    let q = sample ~shape:[ n; n ] n_per_param in
+    let d = sample ~shape:[ 1; n ] n_per_param in
+    let b = sample ~shape:[ m; n ] n_per_param in
+    let b_0 = sample ~shape:[ n; n ] n_per_param in
+    let c = sample ~shape:[ n; o ] n_per_param in
+    let log_obs_var = sample ~shape:[ 1 ] n_per_param in
+    let scaling_factor = sample ~shape:[ 1 ] n_per_param in
     let params_tmp = PP.{ q; d; b; b_0; c; log_obs_var; scaling_factor } in
     match param_name with
     | Q -> { params_tmp with q = v }
@@ -617,7 +587,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     ; scaling_factor = random_params ~shape:[ 1 ] _K
     }
 
-  let eigenvectors_for_each_params ~lambda ~param_name =
+  let eigenvectors_for_each_params ~local ~lambda ~param_name =
     let left, right, n_per_param =
       match param_name with
       | Q -> lambda.q_left, lambda.q_right, n_params_q
@@ -672,13 +642,13 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         Tensor.unsqueeze tmp ~dim:0)
       |> Tensor.concatenate ~dim:0
     in
-    local_vs |> localise ~param_name ~n_per_param
+    local_vs |> localise ~local ~param_name ~n_per_param
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
     let param_names_list = [ Q; D; C; Log_obs_var; Scaling_factor ] in
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
-        eigenvectors_for_each_params ~lambda ~param_name)
+        eigenvectors_for_each_params ~local:true ~lambda ~param_name)
     in
     let vs =
       List.fold eigenvectors_each ~init:None ~f:(fun accu local_vs ->
@@ -687,6 +657,8 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         | Some a -> Some (P.map2 a local_vs ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ])))
     in
     Option.value_exn vs, ()
+
+
 
   let init () =
     let init_eye size =
@@ -728,6 +700,7 @@ module Make (D : Do_with_T) = struct
 
   let optimise max_iter =
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
+    Bos.Cmd.(v "rm" % "-f" % in_dir "aux") |> Bos.OS.Cmd.run |> ignore;
     let rec loop ~iter ~state running_avg =
       Stdlib.Gc.major ();
       let _, o_list = sample_data true_theta in
@@ -838,7 +811,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 1000 in
+  let max_iter = 5000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

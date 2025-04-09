@@ -86,9 +86,9 @@ module Dims = struct
   let kind = base.kind
   let device = base.device
 end
+
+let _K = 120
 let true_noise_std = 0.1
-
-
 let x0 = Tensor.zeros ~device:base.device ~kind:base.kind [ Dims.bs; Dims.n ]
 let eye_m = Maths.(const (Tensor.eye ~n:Dims.m ~options:(base.kind, base.device)))
 let eye_n = Tensor.eye ~n:Dims.n ~options:(base.kind, base.device) |> Maths.const
@@ -184,9 +184,8 @@ module PP = struct
     { _q : 'a
     ; _d : 'a
     ; _c : 'a
-    ; _log_obs_var : 'a
-      (* log of covariance of emission noise *)
-      (* ; _scaling_factor : 'a *)
+    ; _log_obs_var : 'a (* log of covariance of emission noise *)
+    ; _scaling_factor : 'a
     }
   [@@deriving prms]
 end
@@ -196,12 +195,14 @@ let true_theta =
     { _q = _q_true
     ; _d = _d_true
     ; _c = _c_true
-    ; _log_obs_var = Maths.log _obs_var_true 
-    (* ; _scaling_factor = Maths.f 1. *)
+    ; _log_obs_var = Maths.log _obs_var_true
+    ; _scaling_factor = Maths.f 1.
     }
 
+module P = PP.Make (Prms.P)
+
 module LGS = struct
-  module P = PP.Make (Prms.P)
+  module P = P
 
   type args = unit
   type data = Tensor.t list
@@ -289,36 +290,33 @@ module LGS = struct
     List.rev y_list_rev
 
   (* approximate kalman filtered distribution of u *)
-(* let sample_and_kl ~_Fx ~_Fu ~_Fu_0 ~_c ~obs_precision ~scaling_factor ustars o_list =
+  let sample_and_kl ~_Fx ~_Fu ~_Fu_0 ~_c ~obs_precision ~scaling_factor ustars o_list =
     let open Maths in
     let o_list = List.map ~f:Maths.const o_list in
-        let z0 =
+    let z0 =
       Tensor.zeros ~device:base.device ~kind:base.kind [ Dims.bs; Dims.n ] |> Maths.const
     in
     let btrinv_0 = einsum [ _Fu_0, "ij"; _c, "jo"; obs_precision, "o" ] "io" in
     let btrinv = einsum [ _Fu, "ij"; _c, "jo"; obs_precision, "o" ] "io" in
     (* posterior precision of filtered covariance of u *)
     let precision_chol_0 =
-      let tmp = scaling_factor * ones_x |> reshape ~shape:[1;-1] in 
-      (eye_n + einsum [ btrinv_0, "io"; _c, "jo"; _Fu_0, "kj" ] "ik" |> cholesky )
-    * tmp
+      let tmp = scaling_factor * ones_x |> reshape ~shape:[ 1; -1 ] in
+      (eye_n + einsum [ btrinv_0, "io"; _c, "jo"; _Fu_0, "kj" ] "ik" |> cholesky) * tmp
     in
     let precision_chol =
-      let tmp = scaling_factor * ones_u |> reshape ~shape:[1;-1] in 
-      (eye_m + einsum [ btrinv, "io"; _c, "jo"; _Fu, "kj" ] "ik" |> cholesky)
-      * (tmp)
+      let tmp = scaling_factor * ones_u |> reshape ~shape:[ 1; -1 ] in
+      (eye_m + einsum [ btrinv, "io"; _c, "jo"; _Fu, "kj" ] "ik" |> cholesky) * tmp
     in
-    let ustars_o_list = List.map2_exn ustars o_list ~f:(fun u o -> (u,o)) in 
+    let ustars_o_list = List.map2_exn ustars o_list ~f:(fun u o -> u, o) in
     let _, kl, us =
       List.foldi
         ustars_o_list
         ~init:(z0, f 0., [])
         ~f:(fun i (z, kl, us) (ustar, o) ->
           Stdlib.Gc.major ();
-          let _Fu = if i = 0 then _Fu_0 else _Fu in 
+          let _Fu = if i = 0 then _Fu_0 else _Fu in
           let precision_chol = if i = 0 then precision_chol_0 else precision_chol in
-        let btrinv = if i = 0 then btrinv_0 else btrinv in
-
+          let btrinv = if i = 0 then btrinv_0 else btrinv in
           let zpred = (z *@ _Fx) + (ustar *@ _Fu) in
           let ypred = zpred *@ _c in
           let delta = o - ypred in
@@ -334,7 +332,10 @@ module LGS = struct
               ~upper:false
               precision_chol
               (const
-                 (Tensor.randn ~device:base.device ~kind:base.kind [ Dims.bs; (if i = 0 then Dims.n else Dims.m) ]))
+                 (Tensor.randn
+                    ~device:base.device
+                    ~kind:base.kind
+                    [ Dims.bs; (if i = 0 then Dims.n else Dims.m) ]))
           in
           let u_sample = mu + u_diff_elbo in
           (* propagate that sample to update z *)
@@ -343,67 +344,14 @@ module LGS = struct
           let kl =
             let prior_term =
               let u_tmp = ustar + u_sample in
-
               gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u_tmp
             in
-            let q_term = gaussian_llh_chol ~precision_chol:precision_chol u_diff_elbo in
+            let q_term = gaussian_llh_chol ~precision_chol u_diff_elbo in
             kl + q_term - prior_term
           in
           z, kl, (ustar + u_sample) :: us)
     in
-    kl, List.rev us   *)
-
-  (* approximate kalman smoothed distribution of u *)
-  let sample_and_kl ~_Fx ~_Fu ~_Fu_0 (backward_info : Lqr.backward_info list) =
-    let open Maths in
-    let dummy_u_0 =
-      Tensor.zeros ~device:base.device ~kind:base.kind [ Dims.bs; Dims.n ]
-    in
-    let dummy_u = Tensor.zeros ~device:base.device ~kind:base.kind [ Dims.bs; Dims.m ] in
-    let us, kl, _ =
-      List.foldi
-        backward_info
-        ~init:([], f 0., Maths.const x0)
-        ~f:(fun i (accu, kl, z) backward_info ->
-          (* LL^T = Quu *)
-          let _Quu_chol = Option.value_exn backward_info._Quu_chol in
-          let du =
-            (* L^-1 *)
-            let _Quu_chol_inv =
-              linsolve_triangular
-                ~left:true
-                ~upper:false
-                _Quu_chol
-                (if i = 0 then eye_n else eye_m)
-            in
-            let _Quu_inv_chol =
-              einsum [ _Quu_chol_inv, "ab"; _Quu_chol_inv, "ac" ] "bc" |> cholesky
-            in
-            einsum
-              [ const (Tensor.randn_like (if i = 0 then dummy_u_0 else dummy_u)), "ma"
-              ; _Quu_inv_chol, "ca"
-              ]
-              "mc"
-          in
-          let u =
-            du
-            + Option.value_exn backward_info._k
-            + einsum [ z, "mj"; Option.value_exn backward_info._K, "ij" ] "mi"
-          in
-          let dkl =
-            let prior_term =
-              gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u
-            in
-            let q_term = gaussian_llh_chol ~precision_chol:_Quu_chol du in
-            q_term - prior_term
-          in
-          let z =
-            einsum [ _Fx, "ij"; z, "mi" ] "mj"
-            + einsum [ (if i = 0 then _Fu_0 else _Fu), "ij"; u, "mi" ] "mj"
-          in
-          u :: accu, kl + dkl, z)
-    in
-    kl, List.rev us 
+    kl, List.rev us
 
   let elbo ~data:(o_list : Tensor.t list) (theta : P.M.t) =
     let _Fx = _Fx_reparam (theta._q, theta._d) in
@@ -413,10 +361,10 @@ module LGS = struct
       params_from_f ~x0:(Maths.const x0) ~theta ~o_list
       |> Lds_data.map_naive ~batch_const:Dims.batch_const
     in
-    let sol, backward_info = Lqr._solve ~batch_const:Dims.batch_const p in
+    let sol, _ = Lqr._solve ~batch_const:Dims.batch_const p in
     let ustars = List.map sol ~f:(fun s -> s.u) in
     let kl, u_sampled =
-    (* sample_and_kl 
+      sample_and_kl
         ~_Fx
         ~_Fu:_Fu_true
         ~_Fu_0:_Fu_0_true
@@ -424,8 +372,7 @@ module LGS = struct
         ~obs_precision
         ~scaling_factor:theta._scaling_factor
         ustars
-        o_list  *)
-       sample_and_kl ~_Fx ~_Fu:_Fu_true ~_Fu_0:_Fu_0_true backward_info 
+        o_list
     in
     let y_pred = rollout ~u_list:u_sampled theta in
     let lik_term =
@@ -498,10 +445,194 @@ module LGS = struct
     let _scaling_factor =
       Prms.create ~above:(Tensor.f 0.1) (Tensor.ones [ 1 ] ~device:base.device)
     in
-    { _q; _d; _c; _log_obs_var }
+    { _q; _d; _c; _log_obs_var; _scaling_factor }
 end
 
 let _ = LGS.save_summary ~out:(in_dir "true_summary") true_theta
+
+(* ------------------------------------------------
+   --- Kronecker approximation of the GGN
+   ------------------------------------------------ *)
+type param_name =
+  | Q
+  | D
+  | C
+  | Log_obs_var
+  | Scaling_factor
+
+let n_params_q = 50
+let n_params_d = 10
+let n_params_c = Int.(_K - 2 - n_params_d - n_params_q)
+let n_params_log_obs_var = 1
+let n_params_scaling_factor = 1
+
+module GGN : Wrapper.Auxiliary with module P = P = struct
+  include struct
+    type 'a p =
+      { q_left : 'a
+      ; q_right : 'a
+      ; d_left : 'a
+      ; d_right : 'a
+      ; c_left : 'a
+      ; c_right : 'a
+      ; log_obs_var_left : 'a
+      ; log_obs_var_right : 'a
+      ; scaling_factor_left : 'a
+      ; scaling_factor_right : 'a
+      }
+    [@@deriving prms]
+  end
+
+  module P = P
+  module A = Make (Prms.P)
+
+  type sampling_state = unit
+
+  let init_sampling_state () = ()
+
+  let zero_params ~shape _K =
+    Tensor.zeros ~device:base.device ~kind:base.kind (_K :: shape)
+
+  let random_params ~shape _K =
+    Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
+
+  (* approximation defined implicitly via Gv products *)
+  let g12v ~(lambda : A.M.t) (v : P.M.t) : P.M.t =
+    let open Maths in
+    let _q = einsum [ lambda.q_left, "in"; v._q, "aij"; lambda.q_right, "jm" ] "anm" in
+    let _d = einsum [ lambda.d_left, "in"; v._d, "aij"; lambda.d_right, "jm" ] "anm" in
+    let _c = einsum [ lambda.c_left, "in"; v._c, "aij"; lambda.c_right, "jm" ] "anm" in
+    let _log_obs_var =
+      einsum
+        [ lambda.log_obs_var_left, "in"
+        ; reshape v._log_obs_var ~shape:[ -1; 1; 1 ], "aij"
+        ; lambda.log_obs_var_right, "jm"
+        ]
+        "anm"
+      |> reshape ~shape:[ -1; 1 ]
+    in
+    let _scaling_factor =
+      einsum
+        [ lambda.scaling_factor_left, "in"
+        ; reshape v._scaling_factor ~shape:[ -1; 1; 1 ], "aij"
+        ; lambda.scaling_factor_right, "jm"
+        ]
+        "anm"
+      |> reshape ~shape:[ -1; 1 ]
+    in
+    { _q; _d; _c; _log_obs_var; _scaling_factor }
+
+  (* set tangents = zero for other parameters but v for this parameter *)
+  let localise ~local ~param_name ~n_per_param v =
+    let sample = if local then zero_params else random_params in
+    let _q = sample ~shape:[ Dims.n; Dims.n ] n_per_param in
+    let _d = sample ~shape:[ 1; Dims.n ] n_per_param in
+    let _c = sample ~shape:[ Dims.n; Dims.o ] n_per_param in
+    let _log_obs_var = sample ~shape:[ 1 ] n_per_param in
+    let _scaling_factor = sample ~shape:[ 1 ] n_per_param in
+    let params_tmp = PP.{ _q; _d; _c; _log_obs_var; _scaling_factor } in
+    match param_name with
+    | Q -> { params_tmp with _q = v }
+    | D -> { params_tmp with _d = v }
+    | C -> { params_tmp with _c = v }
+    | Log_obs_var -> { params_tmp with _log_obs_var = v }
+    | Scaling_factor -> { params_tmp with _scaling_factor = v }
+
+  let random_localised_vs _K : P.T.t =
+    { _q = random_params ~shape:[ Dims.n; Dims.n ] _K
+    ; _d = random_params ~shape:[ 1; Dims.n ] _K
+    ; _c = random_params ~shape:[ Dims.n; Dims.o ] _K
+    ; _log_obs_var = random_params ~shape:[ 1 ] _K
+    ; _scaling_factor = random_params ~shape:[ 1 ] _K
+    }
+
+  let eigenvectors_for_each_params ~local ~lambda ~param_name =
+    let left, right, n_per_param =
+      match param_name with
+      | Q -> lambda.q_left, lambda.q_right, n_params_q
+      | D -> lambda.d_left, lambda.d_right, n_params_d
+      | C -> lambda.c_left, lambda.c_right, n_params_c
+      | Log_obs_var ->
+        lambda.log_obs_var_left, lambda.log_obs_var_right, n_params_log_obs_var
+      | Scaling_factor ->
+        lambda.scaling_factor_left, lambda.scaling_factor_right, n_params_scaling_factor
+    in
+    let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
+    let u_right, s_right, _ =
+      Tensor.svd ~some:true ~compute_uv:true Maths.(primal right)
+    in
+    let s_left = Tensor.to_float1_exn s_left |> Array.to_list in
+    let s_right = Tensor.to_float1_exn s_right |> Array.to_list in
+    let s_all =
+      List.mapi s_left ~f:(fun il sl ->
+        List.mapi s_right ~f:(fun ir sr -> il, ir, Float.(sl * sr)))
+      |> List.concat
+      |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
+      |> Array.of_list
+    in
+    (* randomly select the indices *)
+    let n_params =
+      Convenience.first_dim (Maths.primal left)
+      * Convenience.first_dim (Maths.primal right)
+    in
+    let selection =
+      List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
+    in
+    let selection = List.map selection ~f:(fun j -> s_all.(j)) in
+    let local_vs =
+      List.map selection ~f:(fun (il, ir, _) ->
+        let u_left =
+          Tensor.(
+            squeeze_dim
+              ~dim:1
+              (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
+        in
+        let u_right =
+          Tensor.(
+            squeeze_dim
+              ~dim:1
+              (slice u_right ~dim:1 ~start:(Some ir) ~end_:(Some Int.(ir + 1)) ~step:1))
+        in
+        let tmp =
+          match param_name with
+          | Log_obs_var | Scaling_factor -> Tensor.(u_left * u_right)
+          | _ -> Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ]
+        in
+        Tensor.unsqueeze tmp ~dim:0)
+      |> Tensor.concatenate ~dim:0
+    in
+    local_vs |> localise ~local ~param_name ~n_per_param
+
+  let eigenvectors ~(lambda : A.M.t) () (_K : int) =
+    let param_names_list = [ Q; D; C; Log_obs_var; Scaling_factor ] in
+    let eigenvectors_each =
+      List.map param_names_list ~f:(fun param_name ->
+        eigenvectors_for_each_params ~local:true ~lambda ~param_name)
+    in
+    let vs =
+      List.fold eigenvectors_each ~init:None ~f:(fun accu local_vs ->
+        match accu with
+        | None -> Some local_vs
+        | Some a -> Some (P.map2 a local_vs ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ])))
+    in
+    Option.value_exn vs, ()
+
+  let init () =
+    let init_eye size =
+      Mat.(0.1 $* eye size) |> Tensor.of_bigarray ~device:base.device |> Prms.free
+    in
+    { q_left = init_eye Dims.n
+    ; q_right = init_eye Dims.n
+    ; d_left = init_eye 1
+    ; d_right = init_eye Dims.n
+    ; c_left = init_eye Dims.n
+    ; c_right = init_eye Dims.o
+    ; log_obs_var_left = init_eye 1
+    ; log_obs_var_right = init_eye 1
+    ; scaling_factor_left = init_eye 1
+    ; scaling_factor_right = init_eye 1
+    }
+end
 
 (* --------------------------------
    -- Generic type of optimiser
@@ -531,7 +662,7 @@ module Make (D : Do_with_T) = struct
         o_list
       in
       let t0 = Unix.gettimeofday () in
-      let loss, new_state = O.step ~config:(config ~iter) ~state ~data ~args:() in
+      let loss, new_state = O.step ~config:(config ~iter) ~state ~data () in
       let t1 = Unix.gettimeofday () in
       let time_elapsed = Float.(time_elapsed + t1 - t0) in
       let running_avg =
@@ -586,7 +717,6 @@ module Do_with_SOFO : Do_with_T = struct
       ; rank_one = false
       ; damping = None
       ; aux = None
-    
       }
 
   let init = O.init LGS.init
