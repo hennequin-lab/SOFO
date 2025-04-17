@@ -1,6 +1,12 @@
 (executables
  (names
   linear_regression
+  bit_flipflop_guillaume
+  bit_flipflop_small_net
+  kalman_rnn_no_gain
+  delayed_addition
+  random_class
+  cifar
   lqr_eg
   lorenz
   lgs

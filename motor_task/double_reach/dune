@@ -1,0 +1,25 @@
+(library
+ (name double_reach_common)
+ (modules double_reach_common)
+ (libraries motor)
+ (preprocess
+  (pps ppx_sexp_message ppx-forward-torch)))
+
+(executable
+ (name train)
+ (modules train)
+ (libraries double_reach_common)
+ (preprocess
+  (pps ppx_jane ppx_sexp_message ppx-forward-torch)))
+
+(executable
+ (name analysis)
+ (modules analysis)
+ (libraries double_reach_common)
+ (preprocess
+  (pps ppx_jane ppx_sexp_message ppx-forward-torch)))
+
+(env
+ (dev
+  (flags
+   (:standard -warn-error -A))))

@@ -655,6 +655,7 @@ module Make (D : Do_with_T) = struct
 
   let optimise max_iter =
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
+    Bos.Cmd.(v "rm" % "-f" % in_dir "aux") |> Bos.OS.Cmd.run |> ignore;
     let rec loop ~iter ~state ~time_elapsed running_avg =
       Stdlib.Gc.major ();
       let data =
@@ -710,13 +711,22 @@ module Do_with_SOFO : Do_with_T = struct
   let name = "sofo"
 
   let config ~iter:_ =
+    let aux =
+      Optimizer.Config.SOFO.
+        { (default_aux (in_dir "aux")) with
+          config =
+            Optimizer.Config.Adam.
+              { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
+        ; steps = 5
+        }
+    in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.1
-      ; n_tangents = 128
+      ; learning_rate = Some 1.
+      ; n_tangents = _K
       ; rank_one = false
-      ; damping = None
-      ; aux = None
+      ; damping = Some 1e-3
+      ; aux = Some aux
       }
 
   let init = O.init LGS.init
@@ -738,7 +748,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 10000 in
+  let max_iter = 2000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

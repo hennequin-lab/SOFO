@@ -40,11 +40,45 @@ let c = 32
 
 (* expanded hidden size *)
 let h = c * 2
-let groups = 1
+
+type layer =
+  | Patchify
+  | TokenHidden of int
+  | TokenOutput of int
+  | ChannelHidden of int
+  | ChannelOutput of int
+  | Classification
+
+let equal_layer a b =
+  match a, b with
+  | Patchify, Patchify -> true
+  | Classification, Classification -> true
+  | TokenHidden i, TokenHidden j -> i = j
+  | TokenOutput i, TokenOutput j -> i = j
+  | ChannelHidden i, ChannelHidden j -> i = j
+  | ChannelOutput i, ChannelOutput j -> i = j
+  | _, _ -> false
+
+type param_type =
+  | W
+  | B
+
+let layer_list =
+  [ Patchify
+  ; TokenHidden 0
+  ; TokenOutput 0
+  ; ChannelHidden 0
+  ; ChannelOutput 0
+  ; TokenHidden 1
+  ; TokenOutput 1
+  ; ChannelHidden 1
+  ; ChannelOutput 1
+  ; Classification
+  ]
 
 module MLP_Layer = struct
   type 'a t =
-    { layer_name : string
+    { layer_name : layer
     ; w : 'a
     ; b : 'a
     }
@@ -126,15 +160,14 @@ module MLP_mixer = struct
           (Tensor.randn
              ~kind:base.kind
              ~device:base.device
-             [ c; Int.(in_channels / groups); patch_size; patch_size ])
+             [ c; in_channels; patch_size; patch_size ])
           (Scalar.f normaliser)
       in
       let b = Tensor.zeros ~kind:base.kind ~device:base.device [ 1; c ] in
-      { layer_name = "patchify"; w; b }
+      { layer_name = Patchify; w; b }
     in
     let mixer_layers =
       List.map blocks_list ~f:(fun i ->
-        let block_idx = Int.to_string i in
         let token_hidden =
           let w =
             Convenience.gaussian_tensor_2d_normed
@@ -145,8 +178,7 @@ module MLP_mixer = struct
               ~sigma:1.
           in
           let b = Tensor.zeros ~kind:base.kind ~device:base.device [ h; c ] in
-          let layer_name = sprintf "token_hidden_%s" block_idx in
-          { layer_name; w; b }
+          { layer_name = TokenHidden i; w; b }
         in
         let token_output =
           let w =
@@ -158,8 +190,7 @@ module MLP_mixer = struct
               ~sigma:1.
           in
           let b = Tensor.zeros ~kind:base.kind ~device:base.device [ s; c ] in
-          let layer_name = sprintf "token_output_%s" block_idx in
-          { layer_name; w; b }
+          { layer_name = TokenOutput i; w; b }
         in
         let channel_hidden =
           let w =
@@ -171,8 +202,7 @@ module MLP_mixer = struct
               ~sigma:1.
           in
           let b = Tensor.zeros ~kind:base.kind ~device:base.device [ h; s ] in
-          let layer_name = sprintf "channel_hidden_%s" block_idx in
-          { layer_name; w; b }
+          { layer_name = ChannelHidden i; w; b }
         in
         let channel_output =
           let w =
@@ -184,8 +214,7 @@ module MLP_mixer = struct
               ~sigma:1.
           in
           let b = Tensor.zeros ~kind:base.kind ~device:base.device [ s; c ] in
-          let layer_name = sprintf "channel_output_%s" block_idx in
-          { layer_name; w; b }
+          { layer_name = ChannelOutput i; w; b }
         in
         [| token_hidden; token_output; channel_hidden; channel_output |])
     in
@@ -199,13 +228,13 @@ module MLP_mixer = struct
           ~sigma:1.
       in
       let b = Tensor.zeros ~kind:base.kind ~device:base.device [ 1; output_dim ] in
-      { layer_name = "classification"; w; b }
+      { layer_name = Classification; w; b }
     in
     Array.concat ([ [| patchify |] ] @ mixer_layers @ [ [| classification_head |] ])
     |> P.map ~f:Prms.free
 end
 
-(* feedforward model with mse loss *)
+(* feedforward model with ce loss *)
 module FF =
   Wrapper.Feedforward
     (MLP_mixer)
@@ -269,31 +298,16 @@ let test_eval ~train_data theta =
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
-let layer_names_list =
-  [ "patchify"
-  ; "token_hidden_0"
-  ; "token_output_0"
-  ; "channel_hidden_0"
-  ; "channel_output_0"
-  ; "token_hidden_1"
-  ; "token_output_1"
-  ; "channel_hidden_1"
-  ; "channel_output_1"
-  ; "classification"
-  ]
-
-let _K_w = 60
-let _K_b = 10
-let _K = Int.(List.length layer_names_list * (_K_w + _K_b))
+let _K_w = 30
+let _K_b = 2
+let _K = Int.(List.length layer_list * (_K_w + _K_b))
 let _ = Convenience.print [%message (_K : int)]
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
     type 'a p =
-      { patchify_w_0 : 'a
-      ; patchify_w_1 : 'a
-      ; patchify_w_2 : 'a
-      ; patchify_w_3 : 'a
+      { patchify_w_left : 'a
+      ; patchify_w_right : 'a
       ; patchify_b_left : 'a
       ; patchify_b_right : 'a
       ; token_hidden_0_w_left : 'a
@@ -337,7 +351,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   end
 
   let param_names_list =
-    List.map layer_names_list ~f:(fun name -> [ name ^ "_w"; name ^ "_b" ]) |> List.concat
+    List.map layer_list ~f:(fun name -> [ name, W; name, B ]) |> List.concat
 
   module P = P
   module A = Make (Prms.P)
@@ -359,27 +373,18 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     Array.map v ~f:(fun v ->
       let w, b =
         match v.layer_name with
-        | "patchify" ->
+        | Patchify ->
           let w =
-            let w_0_dim = List.last_exn (shape lambda.patchify_w_0) in
-            let w_1_dim = List.last_exn (shape lambda.patchify_w_1) in
-            let w_2_dim = List.last_exn (shape lambda.patchify_w_2) in
-            let w_3_dim = List.last_exn (shape lambda.patchify_w_3) in
-            let right_tmp =
-              kron lambda.patchify_w_3 lambda.patchify_w_2
-              |> reshape ~shape:[ w_2_dim; w_3_dim; -1 ]
-            in
-            let left_tmp =
-              kron lambda.patchify_w_1 lambda.patchify_w_0
-              |> reshape ~shape:[ w_0_dim; w_1_dim; -1 ]
-            in
-            einsum [ left_tmp, "abc"; v.w, "kabde"; right_tmp, "def" ] "kcf"
+            let n_tangents = List.hd_exn (shape v.w) in
+            let v_w = reshape v.w ~shape:[ n_tangents; c; -1 ] in
+            einsum_w ~left:lambda.patchify_w_left ~right:lambda.patchify_w_right v_w
+            |> reshape ~shape:[ n_tangents; c; in_channels; patch_size; patch_size ]
           in
           let b =
             einsum_w ~left:lambda.patchify_b_left ~right:lambda.patchify_b_right v.b
           in
           w, b
-        | "token_hidden_0" ->
+        | TokenHidden 0 ->
           let w =
             einsum_w
               ~left:lambda.token_hidden_0_w_left
@@ -393,7 +398,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
               v.b
           in
           w, b
-        | "token_output_0" ->
+        | TokenOutput 0 ->
           let w =
             einsum_w
               ~left:lambda.token_output_0_w_left
@@ -407,7 +412,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
               v.b
           in
           w, b
-        | "channel_hidden_0" ->
+        | ChannelHidden 0 ->
           let w =
             einsum_w
               ~left:lambda.channel_hidden_0_w_left
@@ -421,7 +426,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
               v.b
           in
           w, b
-        | "channel_output_0" ->
+        | ChannelOutput 0 ->
           let w =
             einsum_w
               ~left:lambda.channel_output_0_w_left
@@ -435,7 +440,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
               v.b
           in
           w, b
-        | "token_hidden_1" ->
+        | TokenHidden 1 ->
           let w =
             einsum_w
               ~left:lambda.token_hidden_1_w_left
@@ -449,7 +454,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
               v.b
           in
           w, b
-        | "token_output_1" ->
+        | TokenOutput 1 ->
           let w =
             einsum_w
               ~left:lambda.token_output_1_w_left
@@ -463,7 +468,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
               v.b
           in
           w, b
-        | "channel_hidden_1" ->
+        | ChannelHidden 1 ->
           let w =
             einsum_w
               ~left:lambda.channel_hidden_1_w_left
@@ -477,7 +482,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
               v.b
           in
           w, b
-        | "channel_output_1" ->
+        | ChannelOutput 1 ->
           let w =
             einsum_w
               ~left:lambda.channel_output_1_w_left
@@ -491,7 +496,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
               v.b
           in
           w, b
-        | "classification" ->
+        | Classification ->
           let w =
             einsum_w
               ~left:lambda.classification_w_left
@@ -509,209 +514,140 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       in
       MLP_Layer.{ layer_name = v.layer_name; w; b })
 
-  let get_shapes layer_name =
+  let get_shapes (layer_name : layer) =
     let w_shape, b_shape =
       match layer_name with
-      | "patchify" -> [ c; Int.(in_channels / groups); patch_size; patch_size ], [ 1; c ]
-      | "token_hidden_0" | "token_hidden_1" -> [ s; h ], [ h; c ]
-      | "token_output_0" | "token_output_1" -> [ h; s ], [ s; c ]
-      | "channel_hidden_0" | "channel_hidden_1" -> [ c; h ], [ h; s ]
-      | "channel_output_0" | "channel_output_1" -> [ h; c ], [ s; c ]
-      | "classification" -> [ c; output_dim ], [ 1; output_dim ]
-      | _ -> assert false
+      | Patchify -> [ c; in_channels; patch_size; patch_size ], [ 1; c ]
+      | TokenHidden _ -> [ s; h ], [ h; c ]
+      | TokenOutput _ -> [ h; s ], [ s; c ]
+      | ChannelHidden _ -> [ c; h ], [ h; s ]
+      | ChannelOutput _ -> [ h; c ], [ s; c ]
+      | Classification -> [ c; output_dim ], [ 1; output_dim ]
     in
     w_shape, b_shape
 
   (* set tangents = zero for other parameters but v for this parameter *)
-  let localise ~param_name ~n_per_param v =
-    List.map layer_names_list ~f:(fun layer_name ->
+  let localise ~(param_name : layer * param_type) ~n_per_param v =
+    let param_name_p, param_type_p = param_name in
+    List.map layer_list ~f:(fun layer_name ->
       let w_shape, b_shape = get_shapes layer_name in
       let w = zero_params ~shape:w_shape n_per_param in
       let b = zero_params ~shape:b_shape n_per_param in
       let params_tmp = MLP_Layer.{ layer_name; w; b } in
-      match param_name with
-      | _ when String.equal param_name (layer_name ^ "_w") ->
-        MLP_Layer.{ params_tmp with w = v }
-      | _ when String.equal param_name (layer_name ^ "_b") ->
-        MLP_Layer.{ params_tmp with b = v }
-      | _ -> params_tmp)
+      if equal_layer layer_name param_name_p
+      then (
+        match param_type_p with
+        | W -> MLP_Layer.{ params_tmp with w = v }
+        | B -> MLP_Layer.{ params_tmp with b = v })
+      else params_tmp)
     |> List.to_array
 
   let random_localised_vs _K : P.T.t =
-    List.map layer_names_list ~f:(fun layer_name ->
+    List.map layer_list ~f:(fun layer_name ->
       let w_shape, b_shape = get_shapes layer_name in
       let w = random_params ~shape:w_shape _K in
       let b = random_params ~shape:b_shape _K in
       MLP_Layer.{ layer_name; w; b })
     |> List.to_array
 
-  let eigenvectors_for_each_params ~lambda ~param_name =
+  let eigenvectors_for_each_params ~lambda ~(param_name : layer * param_type) =
     let vs, n_per_param =
-      match param_name with
-      (* special case, 4 dims *)
-      | "patchify_w" ->
-        let n_per_param = _K_w in
-        let w_0, w_1, w_2, w_3 =
-          ( lambda.patchify_w_0
-          , lambda.patchify_w_1
-          , lambda.patchify_w_2
-          , lambda.patchify_w_3 )
-        in
-        let u_0, s_0, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal w_0) in
-        let u_1, s_1, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal w_1) in
-        let u_2, s_2, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal w_2) in
-        let u_3, s_3, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal w_3) in
-        let s_0 = Tensor.to_float1_exn s_0 |> Array.to_list in
-        let s_1 = Tensor.to_float1_exn s_1 |> Array.to_list in
-        let s_2 = Tensor.to_float1_exn s_2 |> Array.to_list in
-        let s_3 = Tensor.to_float1_exn s_3 |> Array.to_list in
-        let s_all =
-          List.mapi s_0 ~f:(fun i0 s0 ->
-            List.concat
-              (List.mapi s_1 ~f:(fun i1 s1 ->
-                 List.concat
-                   (List.mapi s_2 ~f:(fun i2 s2 ->
-                      List.mapi s_3 ~f:(fun i3 s3 ->
-                        i0, i1, i2, i3, Float.(s0 * s1 * s2 * s3)))))))
-          |> List.concat
-          |> List.sort ~compare:(fun (_, _, _, _, a) (_, _, _, _, b) -> Float.compare b a)
-          |> Array.of_list
-        in
-        (* randomly select the indices *)
-        let n_params =
-          Convenience.first_dim (Maths.primal w_0)
-          * Convenience.first_dim (Maths.primal w_1)
-          * Convenience.first_dim (Maths.primal w_2)
-          * Convenience.first_dim (Maths.primal w_3)
-        in
-        let selection =
-          List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
-        in
-        let selection = List.map selection ~f:(fun j -> s_all.(j)) in
-        let local_vs =
-          List.map selection ~f:(fun (i_0, i1, i2, i3, _) ->
-            let u_0 =
-              Tensor.(
-                squeeze_dim
-                  ~dim:1
-                  (slice u_0 ~dim:1 ~start:(Some i_0) ~end_:(Some Int.(i_0 + 1)) ~step:1))
-            in
-            let u_1 =
-              Tensor.(
-                squeeze_dim
-                  ~dim:1
-                  (slice u_1 ~dim:1 ~start:(Some i1) ~end_:(Some Int.(i1 + 1)) ~step:1))
-            in
-            let u_2 =
-              Tensor.(
-                squeeze_dim
-                  ~dim:1
-                  (slice u_2 ~dim:1 ~start:(Some i2) ~end_:(Some Int.(i2 + 1)) ~step:1))
-            in
-            let u_3 =
-              Tensor.(
-                squeeze_dim
-                  ~dim:1
-                  (slice u_3 ~dim:1 ~start:(Some i3) ~end_:(Some Int.(i3 + 1)) ~step:1))
-            in
-            let tmp =
-              Tensor.einsum ~path:None ~equation:"i,j,k,l->ijkl" [ u_0; u_1; u_2; u_3 ]
-            in
-            Tensor.unsqueeze tmp ~dim:0)
-          |> Tensor.concatenate ~dim:0
-        in
-        local_vs, n_per_param
-      (* all other cases, 2 dim *)
-      | _ ->
-        let left, right, n_per_param =
-          match param_name with
-          | "patchify_b" -> lambda.patchify_b_left, lambda.patchify_b_right, _K_b
-          | "token_hidden_0_w" ->
-            lambda.token_hidden_0_w_left, lambda.token_hidden_0_w_right, _K_w
-          | "token_hidden_0_b" ->
-            lambda.token_hidden_0_b_left, lambda.token_hidden_0_b_right, _K_b
-          | "token_output_0_w" ->
-            lambda.token_output_0_w_left, lambda.token_output_0_w_right, _K_w
-          | "token_output_0_b" ->
-            lambda.token_output_0_b_left, lambda.token_output_0_b_right, _K_b
-          | "channel_hidden_0_w" ->
-            lambda.channel_hidden_0_w_left, lambda.channel_hidden_0_w_right, _K_w
-          | "channel_hidden_0_b" ->
-            lambda.channel_hidden_0_b_left, lambda.channel_hidden_0_b_right, _K_b
-          | "channel_output_0_w" ->
-            lambda.channel_output_0_w_left, lambda.channel_output_0_w_right, _K_w
-          | "channel_output_0_b" ->
-            lambda.channel_output_0_b_left, lambda.channel_output_0_b_right, _K_b
-          | "token_hidden_1_w" ->
-            lambda.token_hidden_1_w_left, lambda.token_hidden_1_w_right, _K_w
-          | "token_hidden_1_b" ->
-            lambda.token_hidden_1_b_left, lambda.token_hidden_1_b_right, _K_b
-          | "token_output_1_w" ->
-            lambda.token_output_1_w_left, lambda.token_output_1_w_right, _K_w
-          | "token_output_1_b" ->
-            lambda.token_output_1_b_left, lambda.token_output_1_b_right, _K_b
-          | "channel_hidden_1_w" ->
-            lambda.channel_hidden_1_w_left, lambda.channel_hidden_1_w_right, _K_w
-          | "channel_hidden_1_b" ->
-            lambda.channel_hidden_1_b_left, lambda.channel_hidden_1_b_right, _K_b
-          | "channel_output_1_w" ->
-            lambda.channel_output_1_w_left, lambda.channel_output_1_w_right, _K_w
-          | "channel_output_1_b" ->
-            lambda.channel_output_1_b_left, lambda.channel_output_1_b_right, _K_b
-          | "classification_w" ->
-            lambda.classification_w_left, lambda.classification_w_right, _K_w
-          | "classification_b" ->
-            lambda.classification_b_left, lambda.classification_b_right, _K_b
-          | _ -> assert false
-        in
-        let u_left, s_left, _ =
-          Tensor.svd ~some:true ~compute_uv:true Maths.(primal left)
-        in
-        let u_right, s_right, _ =
-          Tensor.svd ~some:true ~compute_uv:true Maths.(primal right)
-        in
-        let s_left = Tensor.to_float1_exn s_left |> Array.to_list in
-        let s_right = Tensor.to_float1_exn s_right |> Array.to_list in
-        let s_all =
-          List.mapi s_left ~f:(fun il sl ->
-            List.mapi s_right ~f:(fun ir sr -> il, ir, Float.(sl * sr)))
-          |> List.concat
-          |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
-          |> Array.of_list
-        in
-        (* randomly select the indices *)
-        let n_params =
-          Convenience.first_dim (Maths.primal left)
-          * Convenience.first_dim (Maths.primal right)
-        in
-        let selection =
-          List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
-        in
-        let selection = List.map selection ~f:(fun j -> s_all.(j)) in
-        let local_vs =
-          List.map selection ~f:(fun (il, ir, _) ->
-            let u_left =
-              Tensor.(
-                squeeze_dim
-                  ~dim:1
-                  (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
-            in
-            let u_right =
-              Tensor.(
-                squeeze_dim
-                  ~dim:1
-                  (slice
-                     u_right
-                     ~dim:1
-                     ~start:(Some ir)
-                     ~end_:(Some Int.(ir + 1))
-                     ~step:1))
-            in
-            let tmp = Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ] in
-            Tensor.unsqueeze tmp ~dim:0)
-          |> Tensor.concatenate ~dim:0
-        in
-        local_vs, n_per_param
+      let left, right, n_per_param =
+        match param_name with
+        | Patchify, W -> lambda.patchify_w_left, lambda.patchify_w_right, _K_w
+        | Patchify, B -> lambda.patchify_b_left, lambda.patchify_b_right, _K_b
+        | TokenHidden 0, W ->
+          lambda.token_hidden_0_w_left, lambda.token_hidden_0_w_right, _K_w
+        | TokenHidden 0, B ->
+          lambda.token_hidden_0_b_left, lambda.token_hidden_0_b_right, _K_b
+        | TokenOutput 0, W ->
+          lambda.token_output_0_w_left, lambda.token_output_0_w_right, _K_w
+        | TokenOutput 0, B ->
+          lambda.token_output_0_b_left, lambda.token_output_0_b_right, _K_b
+        | ChannelHidden 0, W ->
+          lambda.channel_hidden_0_w_left, lambda.channel_hidden_0_w_right, _K_w
+        | ChannelHidden 0, B ->
+          lambda.channel_hidden_0_b_left, lambda.channel_hidden_0_b_right, _K_b
+        | ChannelOutput 0, W ->
+          lambda.channel_output_0_w_left, lambda.channel_output_0_w_right, _K_w
+        | ChannelOutput 0, B ->
+          lambda.channel_output_0_b_left, lambda.channel_output_0_b_right, _K_b
+        | TokenHidden 1, W ->
+          lambda.token_hidden_1_w_left, lambda.token_hidden_1_w_right, _K_w
+        | TokenHidden 1, B ->
+          lambda.token_hidden_1_b_left, lambda.token_hidden_1_b_right, _K_b
+        | TokenOutput 1, W ->
+          lambda.token_output_1_w_left, lambda.token_output_1_w_right, _K_w
+        | TokenOutput 1, B ->
+          lambda.token_output_1_b_left, lambda.token_output_1_b_right, _K_b
+        | ChannelHidden 1, W ->
+          lambda.channel_hidden_1_w_left, lambda.channel_hidden_1_w_right, _K_w
+        | ChannelHidden 1, B ->
+          lambda.channel_hidden_1_b_left, lambda.channel_hidden_1_b_right, _K_b
+        | ChannelOutput 1, W ->
+          lambda.channel_output_1_w_left, lambda.channel_output_1_w_right, _K_w
+        | ChannelOutput 1, B ->
+          lambda.channel_output_1_b_left, lambda.channel_output_1_b_right, _K_b
+        | Classification, W ->
+          lambda.classification_w_left, lambda.classification_w_right, _K_w
+        | Classification, B ->
+          lambda.classification_b_left, lambda.classification_b_right, _K_b
+        | _ -> assert false
+      in
+      let u_left, s_left, _ =
+        Tensor.svd ~some:true ~compute_uv:true Maths.(primal left)
+      in
+      let u_right, s_right, _ =
+        Tensor.svd ~some:true ~compute_uv:true Maths.(primal right)
+      in
+      let s_left = Tensor.to_float1_exn s_left |> Array.to_list in
+      let s_right = Tensor.to_float1_exn s_right |> Array.to_list in
+      let s_all =
+        List.mapi s_left ~f:(fun il sl ->
+          List.mapi s_right ~f:(fun ir sr -> il, ir, Float.(sl * sr)))
+        |> List.concat
+        |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
+        |> Array.of_list
+      in
+      (* randomly select the indices *)
+      let n_params =
+        Convenience.first_dim (Maths.primal left)
+        * Convenience.first_dim (Maths.primal right)
+      in
+      let selection =
+        List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
+      in
+      let selection = List.map selection ~f:(fun j -> s_all.(j)) in
+      let local_vs =
+        List.map selection ~f:(fun (il, ir, _) ->
+          let u_left =
+            Tensor.(
+              squeeze_dim
+                ~dim:1
+                (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
+          in
+          let u_right =
+            Tensor.(
+              squeeze_dim
+                ~dim:1
+                (slice u_right ~dim:1 ~start:(Some ir) ~end_:(Some Int.(ir + 1)) ~step:1))
+          in
+          let tmp =
+            match param_name with
+            | Patchify, W ->
+              let u_right_reshaped =
+                Tensor.reshape u_right ~shape:[ in_channels; patch_size; patch_size ]
+              in
+              Tensor.einsum
+                ~path:None
+                ~equation:"i,jkl->ijkl"
+                [ u_left; u_right_reshaped ]
+            | _ -> Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ]
+          in
+          Tensor.unsqueeze tmp ~dim:0)
+        |> Tensor.concatenate ~dim:0
+      in
+      local_vs, n_per_param
     in
     vs |> localise ~param_name ~n_per_param
 
@@ -735,10 +671,8 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let eye_h = init_eye h in
     let eye_s = init_eye s in
     let eye_c = init_eye c in
-    { patchify_w_0 = eye_c
-    ; patchify_w_1 = init_eye Int.(in_channels / groups)
-    ; patchify_w_2 = init_eye patch_size
-    ; patchify_w_3 = init_eye patch_size
+    { patchify_w_left = init_eye c
+    ; patchify_w_right = init_eye Int.(in_channels * patch_size * patch_size)
     ; patchify_b_left = init_eye 1
     ; patchify_b_right = eye_c
     ; token_hidden_0_w_left = eye_s
@@ -860,7 +794,9 @@ module Do_with_SOFO : Do_with_T = struct
     let aux =
       Optimizer.Config.SOFO.
         { (default_aux (in_dir "aux")) with
-          config = Optimizer.Config.Adam.{ default with base; learning_rate = Some 1e-5 ; eps=1e-4}
+          config =
+            Optimizer.Config.Adam.
+              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
         ; steps = 5
         }
     in
