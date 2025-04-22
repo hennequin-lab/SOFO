@@ -6,10 +6,10 @@ open Sofo
 open Motor
 module Mat = Owl.Dense.Matrix.S
 module Arr = Owl.Dense.Ndarray.S
-open Double_reach_common
+open Single_reach_common
 open Rnn_typ
 
-let n_input_channels = 6
+let n_input_channels = 3
 let max_iter = 5000
 
 let _ =
@@ -231,7 +231,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
 end
 
 (* -----------------------------------------
-   --- Training for double reaches
+   --- Training for single reaches
    ----------------------------------------- *)
 
 module Run (X : sig
@@ -240,7 +240,7 @@ module Run (X : sig
 
     val config : iter:int -> (float, Bigarray.float32_elt) O.config
 
-    (* val init : O.W.P.tagged -> O.state *)
+    (* val init : O.W.P.t -> O.state *)
     val name : string
     val init : O.state
   end) =
@@ -276,32 +276,23 @@ struct
           Mat.(row (to_mat' (fst r.torques)) i @|| row (to_mat' (snd r.torques)) i))
         |> Mat.concatenate ~axis:0
       in
-      let target =
-        Mat.(
-          of_array
-            [| trial.target1.pos.x1
-             ; trial.target1.pos.x2
-             ; trial.target2.pos.x1
-             ; trial.target2.pos.x2
-            |]
-            1
-            4)
-      in
+      let target = Mat.(of_array [| trial.target.pos.x1; trial.target.pos.x2 |] 1 2) in
       Mat.save_txt ~out:(in_dir (sprintf "target%i_%s" i name)) target;
       Option.iter network ~f:(Mat.save_txt ~out:(in_dir (sprintf "x%i_%s" i name)));
       Mat.save_txt ~out:(in_dir (sprintf "h%i_%s" i name)) hand;
       Mat.save_txt ~out:(in_dir (sprintf "tau%i_%s" i name)) torques)
 
   let rec loop k wallclock state =
-    if k < max_iter
+    if k < 1001
     then (
       let data = t_tot, List.init bs ~f:(fun _ -> trial ()) in
       let tic = Unix.gettimeofday () in
-      let loss, state = O.step ~config:(config ~iter:k) ~state ~data () in
+      let loss, new_state = O.step ~config:(config ~iter:k) ~state ~data () in
       let toc = Unix.gettimeofday () in
       let it_took = Float.(toc - tic) in
+      (* guards against spikes in the loss *)
       let wallclock = Float.(wallclock + it_took) in
-      print [%message (k : int) (loss : float)];
+      print [%message (k : int) (loss : float) ];
       Owl.Mat.(
         save_txt
           ~append:true
@@ -310,10 +301,12 @@ struct
       if k % 10 = 0
       then (
         let prms = W.P.value (O.params state) in
-        if k % 500 = 0 then save_samples (W.P.map ~f:Maths.const prms);
+        if k % 50 = 0 then save_samples (W.P.map ~f:Maths.const prms);
         (* save the parameters so they can later be loaded for analysis *)
         prms |> W.P.T.save ~kind:base.ba_kind ~out:(in_dir (sprintf "prms_%s.bin" name)));
-      loop (k + 1) wallclock state)
+      loop (k + 1) wallclock new_state)
+
+  let prms = R.init ~base ~n_input_channels
 
   let run () =
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
@@ -332,7 +325,7 @@ module With_Adam = struct
     Optimizer.Config.Adam.
       { default with
         base = Arm.base
-      ; learning_rate = Some 0.0005
+      ; learning_rate = Some 0.001
       ; beta_2 = 0.999
       ; eps = 1e-7
       }
@@ -342,8 +335,8 @@ module With_Adam = struct
 end
 
 (* -----------------------------------------
-   --- SGN optimiser
-   ----------------------------------------- *)
+     --- SGN optimiser
+     ----------------------------------------- *)
 module With_standard = struct
   module O = Optimizer.SOFO (W) (GGN)
 
@@ -353,17 +346,17 @@ module With_standard = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 3e-2; eps = 1e-8 }
-        ; steps = 3
+              { default with base; learning_rate = Some 1e-2; eps = 1e-8 }
+        ; steps = 5
         }
     in
     Optimizer.Config.SOFO.
       { base = Arm.base
-      ; learning_rate = Some 0.05
+      ; learning_rate = Some 0.1
       ; rank_one = false
       ; n_tangents = _K
       ; damping = Some 1e-5
-      ; aux = Some aux
+      ; aux =Some aux
       }
 
   let init = O.init (R.init ~base ~n_input_channels)
@@ -375,12 +368,12 @@ end
    ----------------------------------------- *)
 
 let _ =
-  match Cmdargs.(get_string "-m" |> force ~usage:"-method [adam|sofo]") with
-  | "adam" ->
-    let module R = Run (With_Adam) in
-    R.run ()
-  | "sofo" ->
-    let module R = Run (With_standard) in
-    R.run ()
-  | _ -> failwith "bad method option"
-
+    match Cmdargs.(get_string "-method" |> force ~usage:"-method [adam|sofo]") with
+    | "adam" ->
+      let module R = Run (With_Adam) in
+      R.run ()
+    | "sofo" ->
+      let module R = Run (With_standard) in
+      R.run ()
+    | _ -> failwith "bad method option"
+ 

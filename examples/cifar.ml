@@ -16,7 +16,7 @@ let in_dir = Cmdargs.in_dir "-d"
 let cast = Dense.Matrix.Generic.cast_d2s
 let base = Optimizer.Config.Base.default
 let output_dim = 10
-let batch_size = 128
+let batch_size = 256
 
 (* for cifar *)
 let input_size = Int.(32 * 32 * 3)
@@ -26,7 +26,7 @@ let input_size = Int.(32 * 32 * 3)
 let full_batch_size = 50_000
 let layer_sizes = [|  128; output_dim |]
 let n_layers = Array.length layer_sizes
-let num_epochs_to_run = 30
+let num_epochs_to_run = 200
 
 let num_train_loops =
   Convenience.num_train_loops ~full_batch_size ~batch_size num_epochs_to_run
@@ -187,7 +187,7 @@ type param_name =
   | W
   | B
 
-let n_params_w, n_params_b = 80, 5
+let n_params_w, n_params_b = 320, 10
 let _K = Array.length layer_sizes * (n_params_w + n_params_b)
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
@@ -419,11 +419,11 @@ module Do_with_SOFO : Do_with_T = struct
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.01
+      ; learning_rate = Some 0.03
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
-      ; aux = None
+      ; aux = Some aux
       }
 
   let init = O.init MLP.init

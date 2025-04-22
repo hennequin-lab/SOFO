@@ -557,8 +557,8 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
-        ; steps = 3 
+              { default with base; learning_rate = Some 5e-3; eps = 1e-4 }
+        ; steps = 5
         }
     in
     Optimizer.Config.SOFO.
@@ -567,7 +567,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
-      ; aux = Some aux
+      ; aux =Some aux
       }
 
   let init = O.init (RNN.init ~r ~c')
@@ -589,7 +589,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 1000 in
+  let max_iter = 100000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

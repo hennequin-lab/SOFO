@@ -25,7 +25,7 @@ let m = 5
 let n = 10
 let o = 40
 let true_noise_std = 0.1
-let tmax = 10
+let tmax = 50
 let bs = 32
 let _K = 120
 let eye_m = Maths.(const (Tensor.of_bigarray ~device:base.device Mat.(eye m)))
@@ -779,16 +779,16 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-2; eps = 1e-4 }
-        ; steps = 1
+              { default with base; learning_rate = Some 5e-3; eps = 1e-8 }
+        ; steps = 5
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 1.
+      ; learning_rate = Some 0.3
       ; n_tangents = _K
       ; rank_one = false
-      ; damping = Some 1e-3
+      ; damping = Some 1e-5
       ; aux = Some aux
       }
 
