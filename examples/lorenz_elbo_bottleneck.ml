@@ -123,7 +123,6 @@ module PP = struct
     ; _A : 'a
     ; _D : 'a
     ; _B : 'a
-    ; _h : 'a
     ; _c : 'a (* likelihood: o = N(x _c + _b, std_o^2) *)
     ; _b : 'a (* all std params live in log space *)
     ; _log_obs_var : 'a (* log of the diagonal covariance of emission noise; *)
@@ -151,7 +150,14 @@ module GRU = struct
     Maths.(((tmp2 * x) + f 1.) /$ 2.)
 
   let pre_soft_relu ~x ~u (theta : P.M.t) =
-    Maths.((x *@ theta._D) + (u *@ theta._B) + theta._h)
+    let bs = Maths.shape x |> List.hd_exn in
+    let x =
+      Maths.concat
+        x
+        (Maths.const (Tensor.ones ~device:base.device ~kind:base.kind [ bs; 1 ]))
+        ~dim:1
+    in
+    Maths.((x *@ theta._D) + (u *@ theta._B))
 
   (* rollout x list under sampled u *)
   let rollout_one_step ~x ~u (theta : P.M.t) =
@@ -172,7 +178,8 @@ module GRU = struct
     | Some x, Some u ->
       let d_soft_relu = d_soft_relu (pre_soft_relu ~x ~u theta) in
       let tmp1 =
-        Maths.einsum [ theta._D, "mp"; d_soft_relu, "bp"; theta._W, "pn" ] "bmn"
+        let _D = Maths.slice theta._D ~dim:0 ~start:(Some 0) ~end_:(Some n) ~step:1 in 
+        Maths.einsum [ _D, "mp"; d_soft_relu, "bp"; theta._W, "pn" ] "bmn"
       in
       let tmp2 = Maths.unsqueeze theta._A ~dim:0 in
       Maths.(tmp1 + tmp2)
@@ -382,9 +389,7 @@ module GRU = struct
           let z = rollout_one_step ~x:z ~u:u_final theta in
           (* update the KL divergence *)
           let kl =
-            let prior_term =
-              gaussian_llh ~inv_std:ones_u u_final
-            in
+            let prior_term = gaussian_llh ~inv_std:ones_u u_final in
             let q_term =
               gaussian_llh_chol ~batched_chol:true ~precision_chol u_diff_elbo
             in
@@ -472,7 +477,7 @@ module GRU = struct
       Convenience.gaussian_tensor_2d_normed
         ~device:base.device
         ~kind:base.kind
-        ~a:n
+        ~a:(n+1)
         ~b:p
         ~sigma:1.
       |> Prms.free
@@ -486,7 +491,6 @@ module GRU = struct
         ~sigma:1.
       |> Prms.free
     in
-    let _h = Tensor.zeros ~device:base.device [ 1; p ] |> Prms.free in
     let _c =
       Convenience.gaussian_tensor_2d_normed
         ~device:base.device
@@ -504,7 +508,7 @@ module GRU = struct
     let _scaling_factor =
       Prms.create ~above:(Tensor.f 0.1) (Tensor.ones [ 1 ] ~device:base.device)
     in
-    { _W; _A; _D; _B; _h; _c; _b; _log_obs_var; _scaling_factor }
+    { _W; _A; _D; _B; _c; _b; _log_obs_var; _scaling_factor }
 
   let simulate ~theta ~data =
     (* infer the optimal u *)
@@ -535,7 +539,6 @@ type param_name =
   | A
   | D
   | B
-  | H
   | C
   | B_bias
   | Log_obs_var
@@ -544,8 +547,8 @@ type param_name =
 let n_params_a = 20
 let n_params_b = 20
 let n_params_c = 20
-let n_params_h = 1
-let n_params_b_bias = 1
+
+let n_params_b_bias = 2
 let n_params_log_obs_var = 1
 let n_params_scaling_factor = 1
 let n_params_w = Int.((_K - (n_params_a * 3) - 4) / 2)
@@ -562,8 +565,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       ; d_right : 'a
       ; b_left : 'a
       ; b_right : 'a
-      ; h_left : 'a
-      ; h_right : 'a
+
       ; c_left : 'a
       ; c_right : 'a
       ; b_bias_left : 'a
@@ -597,7 +599,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let _A = einsum_w ~left:lambda.a_left ~right:lambda.a_right v._A in
     let _D = einsum_w ~left:lambda.d_left ~right:lambda.d_right v._D in
     let _B = einsum_w ~left:lambda.b_left ~right:lambda.b_right v._B in
-    let _h = einsum_w ~left:lambda.h_left ~right:lambda.h_right v._h in
+
     let _c = einsum_w ~left:lambda.c_left ~right:lambda.c_right v._c in
     let _b = einsum_w ~left:lambda.b_bias_left ~right:lambda.b_bias_right v._b in
     let _log_obs_var =
@@ -612,27 +614,25 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         ~right:lambda.scaling_factor_right
         (reshape v._scaling_factor ~shape:[ -1; 1; 1 ])
     in
-    { _W; _A; _D; _B; _h; _b; _c; _log_obs_var; _scaling_factor }
+    { _W; _A; _D; _B;  _b; _c; _log_obs_var; _scaling_factor }
 
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~local ~param_name ~n_per_param v =
     let sample = if local then zero_params else random_params in
     let _W = sample ~shape:[ p; n ] n_per_param in
     let _A = sample ~shape:[ n; n ] n_per_param in
-    let _D = sample ~shape:[ n; p ] n_per_param in
+    let _D = sample ~shape:[ n+1; p ] n_per_param in
     let _B = sample ~shape:[ m; p ] n_per_param in
-    let _h = sample ~shape:[ 1; p ] n_per_param in
     let _c = sample ~shape:[ n; o ] n_per_param in
     let _b = sample ~shape:[ 1; o ] n_per_param in
     let _log_obs_var = sample ~shape:[ 1 ] n_per_param in
     let _scaling_factor = sample ~shape:[ 1 ] n_per_param in
-    let params_tmp = PP.{ _W; _A; _D; _B; _h; _c; _b; _log_obs_var; _scaling_factor } in
+    let params_tmp = PP.{ _W; _A; _D; _B; _c; _b; _log_obs_var; _scaling_factor } in
     match param_name with
     | W -> { params_tmp with _W = v }
     | A -> { params_tmp with _A = v }
     | D -> { params_tmp with _D = v }
     | B -> { params_tmp with _B = v }
-    | H -> { params_tmp with _h = v }
     | C -> { params_tmp with _c = v }
     | B_bias -> { params_tmp with _b = v }
     | Log_obs_var -> { params_tmp with _log_obs_var = v }
@@ -641,9 +641,8 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let random_localised_vs _K : P.T.t =
     { _W = random_params ~shape:[ p; n ] _K
     ; _A = random_params ~shape:[ n; n ] _K
-    ; _D = random_params ~shape:[ n; p ] _K
+    ; _D = random_params ~shape:[ n+1; p ] _K
     ; _B = random_params ~shape:[ m; p ] _K
-    ; _h = random_params ~shape:[ 1; p ] _K
     ; _c = random_params ~shape:[ n; o ] _K
     ; _b = random_params ~shape:[ 1; o ] _K
     ; _log_obs_var = random_params ~shape:[ 1 ] _K
@@ -657,7 +656,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       | A -> lambda.a_left, lambda.a_right, n_params_a
       | D -> lambda.d_left, lambda.d_right, n_params_d
       | B -> lambda.b_left, lambda.b_right, n_params_b
-      | H -> lambda.h_left, lambda.h_right, n_params_h
       | C -> lambda.c_left, lambda.c_right, n_params_c
       | B_bias -> lambda.b_bias_left, lambda.b_bias_right, n_params_b_bias
       | Log_obs_var ->
@@ -712,7 +710,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     local_vs |> localise ~local ~param_name ~n_per_param
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ W; A; D; B; H; C; B_bias; Log_obs_var; Scaling_factor ] in
+    let param_names_list = [ W; A; D; B;  C; B_bias; Log_obs_var; Scaling_factor ] in
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
         eigenvectors_for_each_params ~local:true ~lambda ~param_name)
@@ -733,12 +731,11 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     ; w_right = init_eye n
     ; a_left = init_eye n
     ; a_right = init_eye n
-    ; d_left = init_eye n
+    ; d_left = init_eye (n+1)
     ; d_right = init_eye p
     ; b_left = init_eye m
     ; b_right = init_eye p
-    ; h_left = init_eye 1
-    ; h_right = init_eye p
+
     ; c_left = init_eye n
     ; c_right = init_eye o
     ; b_bias_left = init_eye 1

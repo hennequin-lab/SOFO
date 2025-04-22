@@ -51,8 +51,6 @@ module RNN_P = struct
     ; c : 'a
     ; b : 'a
     ; a : 'a
-    ; e : 'a
-    ; d : 'a
     ; o : 'a
     }
   [@@deriving prms]
@@ -68,16 +66,25 @@ module RNN = struct
 
   (* input is the (input, labels, cue) and z is the internal state *)
   let forward ~(theta : P.M.t) ~input z =
+    let bs = Tensor.shape input |> List.hd_exn in
+    let input =
+      Maths.concat
+        (Maths.const input)
+        (Maths.const (Tensor.ones ~device:base.device ~kind:base.kind [ bs; 1 ]))
+        ~dim:1
+    in
     match z with
     | Some z ->
-      Maths.(
-        (z *@ theta.a)
-        + (phi (theta.e + (z *@ theta.c)) *@ theta.w)
-        + (const input *@ theta.b)
-        + theta.d)
+      let z_tmp =
+        Maths.concat
+          z
+          (Maths.const (Tensor.ones ~device:base.device ~kind:base.kind [ bs; 1 ]))
+          ~dim:1
+      in
+      Maths.((z *@ theta.a) + (phi (z_tmp *@ theta.c) *@ theta.w) + (input *@ theta.b))
     | None ->
       (* this is the equivalent of initialising at z = 0 *)
-      Maths.((phi theta.e *@ theta.w) + (const input *@ theta.b) + theta.d)
+      Maths.(input *@ theta.b)
 
   let prediction ~(theta : P.M.t) z = Maths.(relu (z *@ theta.o))
 
@@ -95,7 +102,7 @@ module RNN = struct
       Convenience.gaussian_tensor_2d_normed
         ~kind:base.kind
         ~device:base.device
-        ~a:r
+        ~a:(r + 1)
         ~b:c'
         ~sigma:1.0
       |> Prms.free
@@ -104,7 +111,7 @@ module RNN = struct
       Convenience.gaussian_tensor_2d_normed
         ~kind:base.kind
         ~device:base.device
-        ~a:Int.((2 * Settings.cl) + 1)
+        ~a:Int.((2 * Settings.cl) + 2)
         ~b:r
         ~sigma:1.0
       |> Prms.free
@@ -119,9 +126,7 @@ module RNN = struct
       |> Prms.free
     in
     let a = Tensor.zeros ~kind:base.kind ~device:base.device [ r; r ] |> Prms.free in
-    let e = Tensor.zeros ~device:base.device [ 1; c' ] |> Prms.free
-    and d = Tensor.zeros ~device:base.device [ 1; r ] |> Prms.free in
-    { w; c; b; a; e; d; o }
+    { w; c; b; a; o }
 
   type data = (Tensor.t * Tensor.t option) list
   type args = unit
@@ -297,12 +302,10 @@ type param_name =
   | C
   | B
   | A
-  | E
-  | D
   | O
 
-let n_params_a, n_params_c,n_params_w, n_params_b, n_params_e, n_params_d, n_params_o =
-  Int.(_K - 220), 100, 100, 5, 5, 5, 5
+let n_params_a, n_params_c, n_params_w, n_params_b, n_params_o =
+  Int.(_K - 210), 100, 100, 5, 5
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -315,10 +318,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       ; b_right : 'a
       ; a_left : 'a
       ; a_right : 'a
-      ; e_left : 'a
-      ; e_right : 'a
-      ; d_left : 'a
-      ; d_right : 'a
       ; o_left : 'a
       ; o_right : 'a
       }
@@ -346,38 +345,30 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let c = tmp_einsum lambda.c_left lambda.c_right v.c in
     let b = tmp_einsum lambda.b_left lambda.b_right v.b in
     let a = tmp_einsum lambda.a_left lambda.a_right v.a in
-    let e = tmp_einsum lambda.e_left lambda.e_right v.e in
-    let d = tmp_einsum lambda.d_left lambda.d_right v.d in
     let o = tmp_einsum lambda.o_left lambda.o_right v.o in
-    { w; c; b; a; e; d; o }
+    { w; c; b; a; o }
 
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~local ~param_name ~n_per_param v =
     let sample = if local then zero_params else random_params in
     let w = sample ~shape:[ c'; r ] n_per_param in
-    let c = sample ~shape:[ r; c' ] n_per_param in
-    let b = sample ~shape:[ Int.((2 * Settings.cl) + 1); r ] n_per_param in
+    let c = sample ~shape:[ r + 1; c' ] n_per_param in
+    let b = sample ~shape:[ Int.((2 * Settings.cl) + 2); r ] n_per_param in
     let a = sample ~shape:[ r; r ] n_per_param in
-    let e = sample ~shape:[ 1; c' ] n_per_param in
-    let d = sample ~shape:[ 1; r ] n_per_param in
     let o = sample ~shape:[ r; Settings.cl ] n_per_param in
-    let params_tmp = RNN_P.{ w; c; b; a; e; d; o } in
+    let params_tmp = RNN_P.{ w; c; b; a; o } in
     match param_name with
     | W -> { params_tmp with w = v }
     | C -> { params_tmp with c = v }
     | B -> { params_tmp with b = v }
     | A -> { params_tmp with a = v }
-    | E -> { params_tmp with e = v }
-    | D -> { params_tmp with d = v }
     | O -> { params_tmp with o = v }
 
   let random_localised_vs _K : P.T.t =
     { w = random_params ~shape:[ c'; r ] _K
-    ; c = random_params ~shape:[ r; c' ] _K
-    ; b = random_params ~shape:[ Int.((2 * Settings.cl) + 1); r ] _K
+    ; c = random_params ~shape:[ r + 1; c' ] _K
+    ; b = random_params ~shape:[ Int.((2 * Settings.cl) + 2); r ] _K
     ; a = random_params ~shape:[ r; r ] _K
-    ; e = random_params ~shape:[ 1; c' ] _K
-    ; d = random_params ~shape:[ 1; r ] _K
     ; o = random_params ~shape:[ r; Settings.cl ] _K
     }
 
@@ -386,8 +377,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       match param_name with
       | W -> lambda.w_left, lambda.w_right, n_params_w
       | A -> lambda.a_left, lambda.a_right, n_params_a
-      | D -> lambda.d_left, lambda.d_right, n_params_d
-      | E -> lambda.e_left, lambda.e_right, n_params_e
       | C -> lambda.c_left, lambda.c_right, n_params_c
       | B -> lambda.b_left, lambda.b_right, n_params_b
       | O -> lambda.o_left, lambda.o_right, n_params_o
@@ -435,7 +424,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     local_vs |> localise ~local ~param_name ~n_per_param
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ C; B; E; O ] in
+    let param_names_list = [ C; B; W; A; O ] in
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
         eigenvectors_for_each_params ~local:true ~lambda ~param_name)
@@ -454,16 +443,12 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     { w_left = init_eye c'
     ; w_right = init_eye r
-    ; c_left = init_eye r
+    ; c_left = init_eye (r + 1)
     ; c_right = init_eye c'
-    ; b_left = init_eye Int.((2 * Settings.cl) + 1)
+    ; b_left = init_eye Int.((2 * Settings.cl) + 2)
     ; b_right = init_eye r
     ; a_left = init_eye r
     ; a_right = init_eye r
-    ; e_left = init_eye 1
-    ; e_right = init_eye c'
-    ; d_left = init_eye 1
-    ; d_right = init_eye r
     ; o_left = init_eye r
     ; o_right = init_eye Settings.cl
     }
@@ -567,7 +552,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
-      ; aux =Some aux
+      ; aux = Some aux
       }
 
   let init = O.init (RNN.init ~r ~c')

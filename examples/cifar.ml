@@ -24,7 +24,7 @@ let input_size = Int.(32 * 32 * 3)
 (* for mlp *)
 (* let input_size = Int.(28 * 28) *)
 let full_batch_size = 50_000
-let layer_sizes = [|  128; output_dim |]
+let layer_sizes = [| 128; output_dim |]
 let n_layers = Array.length layer_sizes
 let num_epochs_to_run = 200
 
@@ -37,7 +37,6 @@ module MLP_Layer = struct
   type 'a t =
     { id : int
     ; w : 'a
-    ; b : 'a
     }
   [@@deriving prms]
 end
@@ -51,9 +50,17 @@ module MLP = struct
   type input = Tensor.t
 
   let f ~(theta : P.M.t) ~(input : input) =
+    let bs = Tensor.shape input |> List.hd_exn in 
     Array.foldi theta ~init:(Maths.const input) ~f:(fun i accu wb ->
       let open MLP_Layer in
-      let pre_activation = Maths.((accu *@ wb.w) + wb.b) in
+      let accu =
+        Maths.concat
+          accu
+          (Maths.const
+             (Tensor.ones ~device:base.device ~kind:base.kind [ bs; 1 ]))
+          ~dim:1
+      in
+      let pre_activation = Maths.(accu *@ wb.w) in
       if false && i = Array.length layer_sizes - 1
       then pre_activation
       else Maths.relu pre_activation)
@@ -66,12 +73,11 @@ module MLP = struct
         Convenience.gaussian_tensor_2d_normed
           ~kind:base.kind
           ~device:base.device
-          ~a:n_i
+          ~a:(n_i + 1)
           ~b:n_o
           ~sigma:1.
       in
-      let b = Tensor.zeros ~kind:base.kind ~device:base.device [ 1; n_o ] in
-      { id = i; w; b })
+      { id = i; w })
     |> P.map ~f:Prms.free
 end
 
@@ -183,20 +189,15 @@ let test_eval ~train_data theta =
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
-type param_name =
-  | W
-  | B
 
-let n_params_w, n_params_b = 320, 10
-let _K = Array.length layer_sizes * (n_params_w + n_params_b)
+let n_params_w = 330
+let _K = Array.length layer_sizes * n_params_w
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
     type 'a p =
       { w_left : 'a
       ; w_right : 'a
-      ; b_left : 'a
-      ; b_right : 'a
       }
     [@@deriving prms]
   end
@@ -219,48 +220,35 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let open Maths in
     Array.map2_exn lambda v ~f:(fun lambda v ->
       let w = einsum [ lambda.w_left, "in"; v.w, "aij"; lambda.w_right, "jm" ] "anm" in
-      let b = einsum [ lambda.b_left, "in"; v.b, "aij"; lambda.b_right, "jm" ] "anm" in
-      MLP_Layer.{ id = 0; w; b })
+      MLP_Layer.{ id = 0; w })
 
   let get_shapes id =
     match id with
-    | 0 -> [ input_size; layer_sizes.(0) ], [ 1; layer_sizes.(0) ]
-    | 1 -> [ layer_sizes.(0); layer_sizes.(1) ], [ 1; layer_sizes.(1) ]
-    | 2 -> [ layer_sizes.(1); layer_sizes.(2) ], [ 1; layer_sizes.(2) ]
-    (* | 3 -> [ layer_sizes.(2); layer_sizes.(3) ], [ 1; layer_sizes.(3) ] *)
+    | 0 -> [ input_size + 1; layer_sizes.(0) ]
+    | 1 -> [ layer_sizes.(0)+ 1; layer_sizes.(1) ]
+    | 2 -> [ layer_sizes.(1)+ 1; layer_sizes.(2) ]
     | _ -> assert false
 
   (* set tangents = zero for other parameters but v for this parameter *)
 
-  let localise ~local ~id:i ~param_name ~n_per_param v =
+  let localise ~local ~id:i ~n_per_param v =
     Array.init n_layers ~f:(fun id ->
       let sample = if local then zero_params else random_params in
       let params_tmp =
-        let w_shape, b_shape = get_shapes id in
+        let w_shape = get_shapes id in
         let w = sample ~shape:w_shape n_per_param in
-        let b = sample ~shape:b_shape n_per_param in
-        MLP_Layer.{ id; w; b }
+        MLP_Layer.{ id; w }
       in
-      if id = i
-      then (
-        match param_name with
-        | W -> { params_tmp with w = v }
-        | B -> { params_tmp with b = v })
-      else params_tmp)
+      if id = i then { params_tmp with w = v } else params_tmp)
 
   let random_localised_vs _K : P.T.t =
     Array.init n_layers ~f:(fun id ->
-      let w_shape, b_shape = get_shapes id in
+      let w_shape = get_shapes id in
       let w = random_params ~shape:w_shape _K in
-      let b = random_params ~shape:b_shape _K in
-      MLP_Layer.{ id; w; b })
+      MLP_Layer.{ id; w })
 
-  let eigenvectors_for_each_params ~local ~lambda ~id ~param_name =
-    let left, right, n_per_param =
-      match param_name with
-      | W -> lambda.w_left, lambda.w_right, n_params_w
-      | B -> lambda.b_left, lambda.b_right, n_params_b
-    in
+  let eigenvectors_for_each_params ~local ~lambda ~id =
+    let left, right, n_per_param = lambda.w_left, lambda.w_right, n_params_w in
     let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
     let u_right, s_right, _ =
       Tensor.svd ~some:true ~compute_uv:true Maths.(primal right)
@@ -301,19 +289,13 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         |> Tensor.unsqueeze ~dim:0)
       |> Tensor.concatenate ~dim:0
     in
-    localise ~local ~id ~param_name ~n_per_param local_vs
+    localise ~local ~id ~n_per_param local_vs
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
     let concat_vs a b = P.map2 a b ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ]) in
     let vs =
       Array.foldi lambda ~init:None ~f:(fun id accu lambda ->
-        let local_vs_w =
-          eigenvectors_for_each_params ~local:true ~lambda ~id ~param_name:W
-        in
-        let local_vs_b =
-          eigenvectors_for_each_params ~local:true ~lambda ~id ~param_name:B
-        in
-        let local_vs = concat_vs local_vs_w local_vs_b in
+        let local_vs = eigenvectors_for_each_params ~local:true ~lambda ~id in
         match accu with
         | None -> Some local_vs
         | Some a -> Some (concat_vs a local_vs))
@@ -325,12 +307,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       Mat.(0.1 $* eye size) |> Tensor.of_bigarray ~device:base.device |> Prms.free
     in
     Array.init n_layers ~f:(fun id ->
-      let w_shape, b_shape = get_shapes id in
+      let w_shape = get_shapes id in
       let w_left = init_eye (List.hd_exn w_shape) in
       let w_right = init_eye (List.last_exn w_shape) in
-      let b_left = init_eye (List.hd_exn b_shape) in
-      let b_right = init_eye (List.last_exn b_shape) in
-      { w_left; w_right; b_left; b_right })
+      { w_left; w_right })
 end
 
 (* --------------------------------
@@ -375,10 +355,10 @@ module Make (D : Do_with_T) = struct
           let train_acc =
             test_eval ~train_data:(Some data) MLP.P.(const (value (O.params new_state)))
           in
-           (* let params = O.params state in
+          (* let params = O.params state in
           let n_params = O.W.P.T.numel (O.W.P.map params ~f:(fun p -> Prms.value p)) in  *)
           (* avg error *)
-          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float) ];
+          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float)];
           (* save params *)
           if iter % 100 = 0
           then

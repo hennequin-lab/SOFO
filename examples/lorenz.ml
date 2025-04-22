@@ -21,7 +21,6 @@ module PP = struct
   type 'a p =
     { w : 'a
     ; c : 'a
-    ; b : 'a
     ; a : 'a
     }
   [@@deriving prms]
@@ -36,7 +35,14 @@ module RNN = struct
   type input = unit
 
   let f ~(theta : P.M.t) ~input:_ y =
-    Maths.((y *@ theta.a) + (relu (theta.b + (y *@ theta.c)) *@ theta.w))
+    let bs = Maths.shape y |> List.hd_exn in
+    let y_tmp =
+      Maths.concat
+        y
+        (Maths.const (Tensor.ones ~device:base.device ~kind:base.kind [ bs; 1 ]))
+        ~dim:1
+    in
+    Maths.((y *@ theta.a) + (relu (y_tmp *@ theta.c) *@ theta.w))
 
   let init ~d ~dh : P.tagged =
     let w =
@@ -51,15 +57,14 @@ module RNN = struct
       Convenience.gaussian_tensor_2d_normed
         ~kind:base.kind
         ~device:base.device
-        ~a:d
+        ~a:(d + 1)
         ~b:dh
         ~sigma:1.
       |> Prms.free
-    and b = Tensor.zeros ~device:base.device [ 1; dh ] |> Prms.free
     and a =
       Tensor.(mul_scalar (eye ~n:d ~options:(base.kind, base.device)) (Scalar.f 0.9))
     in
-    { w; c; b; a = Prms.free a }
+    { w; c; a = Prms.free a }
 
   let simulate ~(theta : P.M.t) ~horizon y0 =
     let rec iter t accu y =
@@ -136,10 +141,9 @@ let _K = 128
 type param_name =
   | W
   | C
-  | B
   | A
 
-let n_params_w, n_params_c, n_params_b, n_params_a = 50, 50, Int.(_K - 101), 1
+let n_params_w, n_params_c, n_params_a = 60, 60, Int.(_K - 120)
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -148,8 +152,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       ; w_right : 'a
       ; c_left : 'a
       ; c_right : 'a
-      ; b_left : 'a
-      ; b_right : 'a
       ; a_left : 'a
       ; a_right : 'a
       }
@@ -175,28 +177,24 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let tmp_einsum left right w = einsum [ left, "in"; w, "aij"; right, "jm" ] "anm" in
     let w = tmp_einsum lambda.w_left lambda.w_right v.w in
     let c = tmp_einsum lambda.c_left lambda.c_right v.c in
-    let b = tmp_einsum lambda.b_left lambda.b_right v.b in
     let a = tmp_einsum lambda.a_left lambda.a_right v.a in
-    { w; c; b; a }
+    { w; c; a }
 
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~local ~param_name ~n_per_param v =
     let sample = if local then zero_params else random_params in
     let w = sample ~shape:[ dh; d ] n_per_param in
-    let c = sample ~shape:[ d; dh ] n_per_param in
-    let b = sample ~shape:[ 1; dh ] n_per_param in
+    let c = sample ~shape:[ d + 1; dh ] n_per_param in
     let a = sample ~shape:[ d; d ] n_per_param in
-    let params_tmp = PP.{ w; c; b; a } in
+    let params_tmp = PP.{ w; c; a } in
     match param_name with
     | W -> { params_tmp with w = v }
     | C -> { params_tmp with c = v }
-    | B -> { params_tmp with b = v }
     | A -> { params_tmp with a = v }
 
   let random_localised_vs _K : P.T.t =
     { w = random_params ~shape:[ dh; d ] _K
-    ; c = random_params ~shape:[ d; dh ] _K
-    ; b = random_params ~shape:[ 1; dh ] _K
+    ; c = random_params ~shape:[ d + 1; dh ] _K
     ; a = random_params ~shape:[ d; d ] _K
     }
 
@@ -205,7 +203,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       match param_name with
       | W -> lambda.w_left, lambda.w_right, n_params_w
       | C -> lambda.c_left, lambda.c_right, n_params_c
-      | B -> lambda.b_left, lambda.b_right, n_params_b
       | A -> lambda.a_left, lambda.a_right, n_params_a
     in
     let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
@@ -251,7 +248,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     local_vs |> localise ~local ~param_name ~n_per_param
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ W; C; B; A ] in
+    let param_names_list = [ W; C; A ] in
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
         eigenvectors_for_each_params ~local:true ~lambda ~param_name)
@@ -270,10 +267,8 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     { w_left = init_eye dh
     ; w_right = init_eye d
-    ; c_left = init_eye d
+    ; c_left = init_eye (d + 1)
     ; c_right = init_eye dh
-    ; b_left = init_eye 1
-    ; b_right = init_eye dh
     ; a_left = init_eye d
     ; a_right = init_eye d
     }

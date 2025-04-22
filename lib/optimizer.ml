@@ -328,7 +328,7 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
           then aux_loop ~iter:(iter + 1) ~state:new_state
           else new_state
         in
-        aux_loop ~iter:0 ~state:state.aux
+        aux_loop ~iter:1 ~state:state.aux
       | _ -> state.aux
     in
     ( loss

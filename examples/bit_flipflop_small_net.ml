@@ -37,7 +37,6 @@ module RNN_P = struct
     ; fb : Maths.t
     ; b : 'a
     ; w : 'a
-    ; h : 'a
     }
   [@@deriving prms]
 end
@@ -65,7 +64,7 @@ module RNN = struct
       |> Prms.free
     in
     let j =
-      Mat.(gaussian n n *$ Float.(g / sqrt (of_int n)))
+      Mat.(gaussian Int.(n+1) n *$ Float.(g / sqrt (of_int n)))
       |> Tensor.of_bigarray ~device:base.device
       |> Prms.free
     in
@@ -75,17 +74,25 @@ module RNN = struct
       |> Tensor.of_bigarray ~device:base.device
       |> Prms.free
     in
-    let h = Mat.(zeros 1 n) |> Tensor.of_bigarray ~device:base.device |> Prms.free in
-    { j; fb; b; w; h }
+
+    { j; fb; b; w }
 
   let phi = Maths.relu
 
   let forward ~(theta : P.M.t) ~input z =
+    let bs = Tensor.shape input |> List.hd_exn in
     let input = Maths.(const input *@ theta.b) in
     let phi_z = phi z in
     let prev_outputs = Maths.(phi_z *@ theta.w) in
     let feedback = Maths.(prev_outputs *@ theta.fb) in
-    let dz = Maths.((neg z + (phi_z *@ theta.j) + feedback + input + theta.h) /$ tau) in
+    (* TODO: merge h into j *)
+    let phi_z =
+      Maths.concat
+        phi_z
+        (Maths.const (Tensor.ones ~device:base.device ~kind:base.kind [ bs; 1 ]))
+        ~dim:1
+    in
+    let dz = Maths.((neg z + (phi_z *@ theta.j) + feedback + input) /$ tau) in
     Maths.(z + dz)
 
   type data = Tensor.t * Tensor.t
@@ -221,9 +228,9 @@ type param_name =
   | J
   | B
   | W
-  | H
 
-let n_params_j, n_params_b, n_params_w, n_params_h = 50, 50, Int.(_K - 101), 1
+
+let n_params_j, n_params_b, n_params_w = 50, 50, Int.(_K - 100)
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -234,8 +241,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       ; b_right : 'a
       ; w_left : 'a
       ; w_right : 'a
-      ; h_left : 'a
-      ; h_right : 'a
       }
     [@@deriving prms]
   end
@@ -260,28 +265,24 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let j = tmp_einsum lambda.j_left lambda.j_right v.j in
     let b = tmp_einsum lambda.b_left lambda.b_right v.b in
     let w = tmp_einsum lambda.w_left lambda.w_right v.w in
-    let h = tmp_einsum lambda.h_left lambda.h_right v.h in
-    { j; b; w; h; fb }
+    { j; b; w; fb }
 
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~local ~param_name ~n_per_param v =
     let sample = if local then zero_params else random_params in
-    let j = sample ~shape:[ n; n] n_per_param in
+    let j = sample ~shape:[ Int.(n+1); n ] n_per_param in
     let b = sample ~shape:[ Settings.b; n ] n_per_param in
     let w = sample ~shape:[ n; Settings.b ] n_per_param in
-    let h = sample ~shape:[ 1; n ] n_per_param in
-    let params_tmp = RNN_P.{ j; b; w; h; fb } in
+    let params_tmp = RNN_P.{ j; b; w;  fb } in
     match param_name with
     | J -> { params_tmp with j = v }
     | B -> { params_tmp with b = v }
     | W -> { params_tmp with w = v }
-    | H -> { params_tmp with h = v }
 
   let random_localised_vs _K : P.T.t =
-    { j = random_params ~shape:[ n; n ] _K
+    { j = random_params ~shape:[ Int.(n+1); n ] _K
     ; b = random_params ~shape:[ Settings.b; n ] _K
     ; w = random_params ~shape:[ n; Settings.b ] _K
-    ; h = random_params ~shape:[ 1; n ] _K
     ; fb
     }
 
@@ -291,7 +292,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       | W -> lambda.w_left, lambda.w_right, n_params_w
       | J -> lambda.j_left, lambda.j_right, n_params_j
       | B -> lambda.b_left, lambda.b_right, n_params_b
-      | H -> lambda.h_left, lambda.h_right, n_params_h
     in
     let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
     let u_right, s_right, _ =
@@ -336,7 +336,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     local_vs |> localise ~local ~param_name ~n_per_param
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ J; B; W; H ] in
+    let param_names_list = [ J; B; W ] in
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
         eigenvectors_for_each_params ~local:true ~lambda ~param_name)
@@ -353,14 +353,12 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let init_eye size =
       Mat.(0.1 $* eye size) |> Tensor.of_bigarray ~device:base.device |> Prms.free
     in
-    { j_left = init_eye n
+    { j_left = init_eye Int.(n+1)
     ; j_right = init_eye n
     ; b_left = init_eye Settings.b
     ; b_right = init_eye n
     ; w_left = init_eye n
     ; w_right = init_eye Settings.b
-    ; h_left = init_eye 1
-    ; h_right = init_eye n
     }
 end
 
@@ -388,7 +386,6 @@ module Make (D : Do_with_T) = struct
     Bos.Cmd.(v "rm" % "-f" % in_dir "aux") |> Bos.OS.Cmd.run |> ignore;
     let rec loop ~iter ~state ~time_elapsed running_avg =
       Stdlib.Gc.major ();
-
       let t = iter in
       let data = sample_batch ~n_steps:Settings.n_steps batch_size in
       let t0 = Unix.gettimeofday () in
@@ -449,7 +446,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-5
-      ; aux = None
+      ; aux = Some aux
       }
 
   let init = O.init (RNN.init ())

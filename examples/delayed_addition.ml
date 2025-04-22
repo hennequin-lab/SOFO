@@ -38,7 +38,6 @@ module RNN_P = struct
   type 'a p =
     { c : 'a
     ; b : 'a
-    ; e : 'a
     ; o : 'a
     }
   [@@deriving prms]
@@ -54,13 +53,20 @@ module RNN = struct
 
   (* input is the (number, signal) pair and z is the internal state *)
   let forward ~(theta : P.M.t) ~input z =
+    let bs = Tensor.shape input |> List.hd_exn in
+    let input =
+      Maths.concat
+        (Maths.const input)
+        (Maths.const (Tensor.ones ~device:base.device ~kind:base.kind [ bs; 1 ]))
+        ~dim:1
+    in
     match z with
     | Some z ->
       let leak = Maths.(Float.(1. - alpha) $* z) in
-      Maths.(leak + (alpha $* phi (theta.e + (z *@ theta.c) + (const input *@ theta.b))))
+      Maths.(leak + (alpha $* phi ((z *@ theta.c) + (input *@ theta.b))))
     | None ->
       (* this is the equivalent of initialising at z = 0 *)
-      Maths.(phi (theta.e + (const input *@ theta.b)))
+      Maths.(phi (input *@ theta.b))
 
   let prediction ~(theta : P.M.t) z = Maths.(z *@ theta.o)
 
@@ -78,7 +84,7 @@ module RNN = struct
       Convenience.gaussian_tensor_2d_normed
         ~kind:base.kind
         ~device:base.device
-        ~a:2
+        ~a:3
         ~b:n
         ~sigma:1.0
       |> Prms.free
@@ -93,8 +99,7 @@ module RNN = struct
         ~sigma:1.0
       |> Prms.free
     in
-    let e = Tensor.zeros ~device:base.device [ 1; n ] |> Prms.free in
-    { c; b; e; o }
+    { c; b; o }
 
   type data = Tensor.t * Tensor.t
   type args = unit
@@ -150,7 +155,6 @@ let _K = 128
 type param_name =
   | C
   | B
-  | E
   | O
 
 let n_params_c, n_params_b, n_params_e, n_params_o = Int.(_K - 6), 2, 2, 2
@@ -162,8 +166,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       ; c_right : 'a
       ; b_left : 'a
       ; b_right : 'a
-      ; e_left : 'a
-      ; e_right : 'a
       ; o_left : 'a
       ; o_right : 'a
       }
@@ -189,35 +191,30 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let tmp_einsum left right w = einsum [ left, "in"; w, "aij"; right, "jm" ] "anm" in
     let c = tmp_einsum lambda.c_left lambda.c_right v.c in
     let b = tmp_einsum lambda.b_left lambda.b_right v.b in
-    let e = tmp_einsum lambda.e_left lambda.e_right v.e in
     let o = tmp_einsum lambda.o_left lambda.o_right v.o in
-    { c; b; e; o }
+    { c; b;  o }
 
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~local ~param_name ~n_per_param v =
     let sample = if local then zero_params else random_params in
     let c = sample ~shape:[ n; n ] n_per_param in
-    let b = sample ~shape:[ 2; n ] n_per_param in
-    let e = sample ~shape:[ 1; n ] n_per_param in
+    let b = sample ~shape:[ 3; n ] n_per_param in
     let o = sample ~shape:[ n; 2 ] n_per_param in
-    let params_tmp = RNN_P.{ c; b; e; o } in
+    let params_tmp = RNN_P.{ c; b;  o } in
     match param_name with
     | C -> { params_tmp with c = v }
     | B -> { params_tmp with b = v }
-    | E -> { params_tmp with e = v }
     | O -> { params_tmp with o = v }
 
   let random_localised_vs _K : P.T.t =
     { c = random_params ~shape:[ n; n ] _K
-    ; b = random_params ~shape:[ 2; n ] _K
-    ; e = random_params ~shape:[ 1; n ] _K
+    ; b = random_params ~shape:[ 3; n ] _K
     ; o = random_params ~shape:[ n; 2 ] _K
     }
 
   let eigenvectors_for_each_params ~local ~lambda ~param_name =
     let left, right, n_per_param =
       match param_name with
-      | E -> lambda.e_left, lambda.e_right, n_params_e
       | C -> lambda.c_left, lambda.c_right, n_params_c
       | B -> lambda.b_left, lambda.b_right, n_params_b
       | O -> lambda.o_left, lambda.o_right, n_params_o
@@ -265,7 +262,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     local_vs |> localise ~local ~param_name ~n_per_param
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ C; B; E; O ] in
+    let param_names_list = [ C; B;  O ] in
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
         eigenvectors_for_each_params ~local:true ~lambda ~param_name)
@@ -284,10 +281,8 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     { c_left = init_eye n
     ; c_right = init_eye n
-    ; b_left = init_eye 2
+    ; b_left = init_eye 3
     ; b_right = init_eye n
-    ; e_left = init_eye 1
-    ; e_right = init_eye n
     ; o_left = init_eye n
     ; o_right = init_eye 2
     }
