@@ -21,8 +21,7 @@ struct
       Convenience.gaussian_tensor_2d_normed ~device:base.device ~kind:base.kind
     in
     let init_cond = Tensor.(zeros ~device:base.device [ 1; n ]) in
-    let w = randn ~a:n ~b:n ~sigma:Float.(0.5 / sqrt (of_int n)) in
-    let bias = Tensor.(zeros ~device:base.device [ 1; n ]) in
+    let w = randn ~a:(n + 1) ~b:n ~sigma:Float.(0.5 / sqrt (of_int n)) in
     let b = randn ~a:n_input_channels ~b:n ~sigma:0.1 in
     let feedback_weights () =
       let sigma = 0.1 in
@@ -34,7 +33,6 @@ struct
     in
     { init_cond = Prms.free init_cond
     ; w = Prms.free w
-    ; bias = Prms.free bias
     ; b = Prms.free b
     ; f1 = Prms.free (feedback_weights ())
     ; f2 = Prms.free (feedback_weights ())
@@ -47,6 +45,7 @@ struct
   let phi x = Maths.relu x
 
   let step_forward ?noise ~prms input (z, a) =
+    let bs = Tensor.shape input |> List.hd_exn in
     let r =
       match noise with
       | None -> phi z
@@ -54,11 +53,20 @@ struct
     in
     let z =
       let z_leak = Maths.(Float.(1. - (dt / tau)) $* z) in
+      let r =
+        Maths.concat
+          r
+          (Maths.const
+             (Tensor.ones
+                ~device:(Tensor.device input)
+                ~kind:(Tensor.kind input)
+                [ bs; 1 ]))
+          ~dim:1
+      in
       Maths.(
         z_leak
         + (Float.(dt / tau)
            $* (r *@ prms.w)
-              + prms.bias
               + (Maths.const input *@ prms.b)
               + (a.Arm.pos.x1 *@ prms.f1)
               + (a.Arm.pos.x2 *@ prms.f2)

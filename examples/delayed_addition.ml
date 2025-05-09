@@ -401,7 +401,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-5
-      ; aux = None
+      ; aux = Some aux
       }
 
   let init = O.init RNN.init

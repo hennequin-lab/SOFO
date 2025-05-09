@@ -109,7 +109,7 @@ val conv2d
   :  ?padding:int * int
   -> ?dilation:int * int
   -> ?groups:int
-  -> bias:t
+  -> bias:t option
   -> stride:int * int
   -> t
   -> t

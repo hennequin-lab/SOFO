@@ -6,13 +6,14 @@
   kalman_rnn_no_gain
   delayed_addition
   random_class
-  cifar
+  mlp_classification
   lqr_eg
   lorenz
   lgs
   fa
   mlp_adaptive
   mlp_mixer
+  learn_ggn
   lgs_elbo
   lgs_from_scratch
   lorenz_elbo_bottleneck

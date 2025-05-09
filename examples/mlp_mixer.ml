@@ -16,27 +16,36 @@ let in_dir = Cmdargs.in_dir "-d"
 let cast = Dense.Matrix.Generic.cast_d2s
 let base = Optimizer.Config.Base.default
 
-(* for MNIST *)
-let input_dim = 28
+let cifar =
+  match Cmdargs.(get_string "-dataset") with
+  | Some "mnist" -> false
+  | Some "cifar" -> true
+  | _ -> failwith "-dataset [mnist | cifar ]"
+
+(* Input/output dimensions *)
+let input_dim = if cifar then 32 else 28
 let output_dim = 10
+
+(* Batch configuration *)
 let full_batch_size = 60_000
-let batch_size = 64
+
+let batch_size = 2
 let n_epochs_to_run = 70
 let max_iter = Int.(full_batch_size * n_epochs_to_run / batch_size)
 let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size t
 
-(* network hyperparameters *)
+(* Network hyperparameters *)
 let n_blocks = 2
 let blocks_list = List.range 0 n_blocks
 let n_layers = (n_blocks * 4) + 2
-let in_channels = 1
-let patch_size = 7
+let in_channels = if cifar then 3 else 1 
+let patch_size = if cifar then 4 else 7
 
-(* number of patches; s=16 *)
+(* number of patches *)
 let s = (input_dim / patch_size) ** 2
 
 (* hidden size *)
-let c = 32
+let c = 64
 
 (* expanded hidden size *)
 let h = c * 2
@@ -59,10 +68,6 @@ let equal_layer a b =
   | ChannelOutput i, ChannelOutput j -> i = j
   | _, _ -> false
 
-type param_type =
-  | W
-  | B
-
 let layer_list =
   [ Patchify
   ; TokenHidden 0
@@ -80,7 +85,6 @@ module MLP_Layer = struct
   type 'a t =
     { layer_name : layer
     ; w : 'a
-    ; b : 'a
     }
   [@@deriving prms]
 end
@@ -97,26 +101,47 @@ module MLP_mixer = struct
 
   let phi = Maths.relu
 
-  (* use conv2d for patchification; https://github.com/rishikksh20/MLP-Mixer-pytorch/blob/master/mlp-mixer.py *)
+  (* use conv2d for patchification; https://github.com/rishikksh20/MLP-Mixer-pytorch/blob/master/mlp-mixer.py; 
+  https://github.com/d-li14/mlp-mixer.pytorch/blob/main/mixer.py *)
   let patchify ~(theta : P.M.t) ~input =
     (* w has shape [out_channels x in_channels x kerl_x x kerl_y] *)
     Maths.conv2d
       (Maths.const input)
       theta.(0).w
-      ~bias:(Maths.squeeze ~dim:0 theta.(0).b)
+      ~bias:None
       ~stride:(patch_size, patch_size)
 
   let token_mixer ~(theta : P.M.t) ~layer_idx1 ~layer_idx2 x =
-    let hidden = Maths.einsum [ x, "msc"; theta.(layer_idx1).w, "sq" ] "mqc" in
-    let hidden_bias = Maths.(phi (hidden + unsqueeze ~dim:0 theta.(layer_idx1).b)) in
-    let output = Maths.einsum [ hidden_bias, "mqc"; theta.(layer_idx2).w, "qs" ] "msc" in
-    Maths.(output + unsqueeze ~dim:0 theta.(layer_idx2).b)
+    let hidden =
+      let x_appended =
+        let tmp = Maths.transpose x ~dim0:1 ~dim1:2 in
+        Convenience.expand_dim tmp
+      in
+      phi (Maths.einsum [ x_appended, "mcs"; theta.(layer_idx1).w, "sq" ] "mqc")
+    in
+    let output =
+      let hidden_appended =
+        let tmp = Maths.transpose hidden ~dim0:1 ~dim1:2 in
+        Convenience.expand_dim tmp
+      in
+      Maths.einsum [ hidden_appended, "mcq"; theta.(layer_idx2).w, "qs" ] "msc"
+    in
+    output
+
 
   let channel_mixer ~(theta : P.M.t) ~layer_idx1 ~layer_idx2 x =
-    let hidden = Maths.einsum [ x, "msc"; theta.(layer_idx1).w, "cq" ] "mqs" in
-    let hidden_bias = Maths.(phi (hidden + unsqueeze ~dim:0 theta.(layer_idx1).b)) in
-    let output = Maths.einsum [ hidden_bias, "mqs"; theta.(layer_idx2).w, "qc" ] "msc" in
-    Maths.(output + unsqueeze ~dim:0 theta.(layer_idx2).b)
+    let hidden =
+      let x_appended = Convenience.expand_dim x in
+      phi (Maths.einsum [ x_appended, "msc"; theta.(layer_idx1).w, "cq" ] "mqs")
+    in
+    let output =
+      let hidden_appended =
+        let tmp = Maths.transpose hidden ~dim0:1 ~dim1:2 in
+        Convenience.expand_dim tmp
+      in
+      Maths.einsum [ hidden_appended, "msq"; theta.(layer_idx2).w, "qc" ] "msc"
+    in
+    output
 
   let f ~(theta : P.M.t) ~(input : input) =
     (* patchify and map to hidden -> blocks -> classification *)
@@ -147,7 +172,7 @@ module MLP_mixer = struct
     in
     let final_layer = theta.(n_layers - 1) in
     let output = Maths.einsum [ mixer_blocked_mean, "mc"; final_layer.w, "cd" ] "md" in
-    Maths.(output + final_layer.b)
+    Maths.(output)
 
   let init =
     let open MLP_Layer in
@@ -163,8 +188,7 @@ module MLP_mixer = struct
              [ c; in_channels; patch_size; patch_size ])
           (Scalar.f normaliser)
       in
-      let b = Tensor.zeros ~kind:base.kind ~device:base.device [ 1; c ] in
-      { layer_name = Patchify; w; b }
+      { layer_name = Patchify; w }
     in
     let mixer_layers =
       List.map blocks_list ~f:(fun i ->
@@ -173,48 +197,44 @@ module MLP_mixer = struct
             Convenience.gaussian_tensor_2d_normed
               ~kind:base.kind
               ~device:base.device
-              ~a:s
+              ~a:(s + 1)
               ~b:h
               ~sigma:1.
           in
-          let b = Tensor.zeros ~kind:base.kind ~device:base.device [ h; c ] in
-          { layer_name = TokenHidden i; w; b }
+          { layer_name = TokenHidden i; w }
         in
         let token_output =
           let w =
             Convenience.gaussian_tensor_2d_normed
               ~kind:base.kind
               ~device:base.device
-              ~a:h
+              ~a:(h + 1)
               ~b:s
               ~sigma:1.
           in
-          let b = Tensor.zeros ~kind:base.kind ~device:base.device [ s; c ] in
-          { layer_name = TokenOutput i; w; b }
+          { layer_name = TokenOutput i; w }
         in
         let channel_hidden =
           let w =
             Convenience.gaussian_tensor_2d_normed
               ~kind:base.kind
               ~device:base.device
-              ~a:c
+              ~a:(c + 1)
               ~b:h
               ~sigma:1.
           in
-          let b = Tensor.zeros ~kind:base.kind ~device:base.device [ h; s ] in
-          { layer_name = ChannelHidden i; w; b }
+          { layer_name = ChannelHidden i; w }
         in
         let channel_output =
           let w =
             Convenience.gaussian_tensor_2d_normed
               ~kind:base.kind
               ~device:base.device
-              ~a:h
+              ~a:(h + 1)
               ~b:c
               ~sigma:1.
           in
-          let b = Tensor.zeros ~kind:base.kind ~device:base.device [ s; c ] in
-          { layer_name = ChannelOutput i; w; b }
+          { layer_name = ChannelOutput i; w }
         in
         [| token_hidden; token_output; channel_hidden; channel_output |])
     in
@@ -227,8 +247,7 @@ module MLP_mixer = struct
           ~b:output_dim
           ~sigma:1.
       in
-      let b = Tensor.zeros ~kind:base.kind ~device:base.device [ 1; output_dim ] in
-      { layer_name = Classification; w; b }
+      { layer_name = Classification; w }
     in
     Array.concat ([ [| patchify |] ] @ mixer_layers @ [ [| classification_head |] ])
     |> P.map ~f:Prms.free
@@ -243,43 +262,96 @@ module FF =
        end))
 
 (* -----------------------------------------
-   ---- Read in MNIST data       ------
-   ----------------------------------------- *)
-
-let dataset typ =
-  let suffix =
-    match typ with
-    | `train -> "train"
-    | `test -> "test"
-  in
-  let x = Owl.Arr.load_npy ("_data/x_" ^ suffix ^ ".npy") in
-  let y = Owl.Arr.load_npy ("_data/t_" ^ suffix ^ ".npy") |> Owl.Arr.one_hot output_dim in
-  let mu = 0.13062754273414612
-  and sigma = 0.30810779333114624 in
-  let x = Owl.Arr.(((x /$ 255.) -$ mu) /$ sigma) in
-  cast x, cast y
-
-let train_set = dataset `train
-let test_set = dataset `test
+  -- Read in data. ------
+  ----------------------------------------- *)
+let train_set, test_set =
+  if cifar
+  then (
+    (* train data has size [10000 x 32 x 32 x 3 ]*)
+    let x_train, y_train =
+      List.fold
+        (List.init 5 ~f:(fun id -> id))
+        ~init:None
+        ~f:(fun accu i ->
+          let x_train, _, y_train = Owl.Dataset.load_cifar_train_data Int.(i + 1) in
+          match accu with
+          | None -> Some (x_train, y_train)
+          | Some (x_train_accu, y_train_accu) ->
+            let new_x_train_accu = Arr.concatenate [| x_train_accu; x_train |] ~axis:0 in
+            let new_y_train_accu = Arr.concatenate [| y_train_accu; y_train |] ~axis:0 in
+            Some (new_x_train_accu, new_y_train_accu))
+      |> Option.value_exn
+    in
+    let x_test, _, y_test = Owl.Dataset.load_cifar_test_data () in
+    (* from torchvision *)
+    let mu = cast (Owl.Arr.of_array [| 0.4914; 0.4822; 0.4465 |] [| 1; 1; 1; 3 |])
+    and sigma = cast (Owl.Arr.of_array [| 0.2023; 0.1994; 0.2010 |] [| 1; 1; 1; 3 |]) in
+    (* cifar10 from Owl dataset already scaled between 0 and 1! *)
+    let x_train = Owl.Arr.((x_train - mu) / sigma) in
+    let x_test = Owl.Arr.((x_test - mu) / sigma) in
+    (* transpose so dim is [bs x channels x height x width]*)
+    let transpose_ =  Owl.Dense.Ndarray.S.transpose ~axis:[|0;3;1;2|] in 
+    (transpose_ x_train, y_train), (transpose_ x_test, y_test))
+  else (
+    let dataset_mnist typ =
+      let suffix =
+        match typ with
+        | `train -> "train"
+        | `test -> "test"
+      in
+      let x = Owl.Arr.load_npy ("_data/x_" ^ suffix ^ ".npy") in
+      let y =
+        Owl.Arr.load_npy ("_data/t_" ^ suffix ^ ".npy") |> Owl.Arr.one_hot output_dim
+      in
+      let mu = 0.13062754273414612
+      and sigma = 0.30810779333114624 in
+      let x = Owl.Arr.(((x /$ 255.) -$ mu) /$ sigma) in
+      cast x, cast y
+    in
+    dataset_mnist `train, dataset_mnist `test)
 
 let sample_data (set_x, set_y) =
-  let a = Mat.row_num set_x in
-  fun batch_size ->
-    if batch_size < 0
-    then (
-      (* reshape x to [batch size x 1 x input_dim x input_dim]. *)
-      let total_bs = Mat.row_num set_x in
-      let xs_tensor = Tensor.of_bigarray ~device:base.device set_x in
-      let xs = Tensor.reshape xs_tensor ~shape:[ total_bs; 1; input_dim; input_dim ] in
-      xs, Tensor.of_bigarray ~device:base.device set_y)
-    else (
-      let ids = List.init batch_size ~f:(fun _ -> Random.int a) in
-      let x_tensor =
-        Tensor.of_bigarray ~device:base.device (Mat.get_fancy [ L ids ] set_x)
-      in
-      let xs = Tensor.reshape x_tensor ~shape:[ batch_size; 1; input_dim; input_dim ] in
-      let ys = Tensor.of_bigarray ~device:base.device (Mat.get_fancy [ L ids ] set_y) in
-      xs, ys)
+  if cifar
+  then (
+    let a = (Arr.shape set_x).(0) in
+    (* let a = Mat.row_num set_x in *)
+    fun batch_size ->
+      if batch_size < 0
+      then
+        ( Tensor.of_bigarray ~device:base.device set_x
+        , Tensor.of_bigarray ~device:base.device set_y )
+      else (
+        let ids = List.init batch_size ~f:(fun _ -> Random.int a) in
+        let xs = Tensor.of_bigarray ~device:base.device (Mat.get_fancy [ L ids ] set_x) in
+        let ys = Tensor.of_bigarray ~device:base.device (Mat.get_fancy [ L ids ] set_y) in
+         xs, ys))
+  else (
+    let mnist_input_dim = 28 in
+    let a = Mat.row_num set_x in
+    fun batch_size ->
+      if batch_size < 0
+      then (
+        (* reshape x to [batch size x 1 x input_dim x input_dim]. *)
+        let total_bs = Mat.row_num set_x in
+        let xs_tensor = Tensor.of_bigarray ~device:base.device set_x in
+        let xs =
+          Tensor.reshape
+            xs_tensor
+            ~shape:[ total_bs; 1; mnist_input_dim; mnist_input_dim ]
+        in
+        xs, Tensor.of_bigarray ~device:base.device set_y)
+      else (
+        let ids = List.init batch_size ~f:(fun _ -> Random.int a) in
+        let x_tensor =
+          Tensor.of_bigarray ~device:base.device (Mat.get_fancy [ L ids ] set_x)
+        in
+        let xs =
+          Tensor.reshape
+            x_tensor
+            ~shape:[ batch_size; 1; mnist_input_dim; mnist_input_dim ]
+        in
+        let ys = Tensor.of_bigarray ~device:base.device (Mat.get_fancy [ L ids ] set_y) in
+        xs, ys))
 
 let test_eval ~train_data theta =
   let x, y =
@@ -298,9 +370,8 @@ let test_eval ~train_data theta =
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
-let _K_w = 30
-let _K_b = 2
-let _K = Int.(List.length layer_list * (_K_w + _K_b))
+let _K_w = 32
+let _K = Int.(List.length layer_list * _K_w)
 let _ = Convenience.print [%message (_K : int)]
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
@@ -308,50 +379,27 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     type 'a p =
       { patchify_w_left : 'a
       ; patchify_w_right : 'a
-      ; patchify_b_left : 'a
-      ; patchify_b_right : 'a
       ; token_hidden_0_w_left : 'a
       ; token_hidden_0_w_right : 'a
-      ; token_hidden_0_b_left : 'a
-      ; token_hidden_0_b_right : 'a
       ; token_output_0_w_left : 'a
       ; token_output_0_w_right : 'a
-      ; token_output_0_b_left : 'a
-      ; token_output_0_b_right : 'a
       ; channel_hidden_0_w_left : 'a
       ; channel_hidden_0_w_right : 'a
-      ; channel_hidden_0_b_left : 'a
-      ; channel_hidden_0_b_right : 'a
       ; channel_output_0_w_left : 'a
       ; channel_output_0_w_right : 'a
-      ; channel_output_0_b_left : 'a
-      ; channel_output_0_b_right : 'a
       ; token_hidden_1_w_left : 'a
       ; token_hidden_1_w_right : 'a
-      ; token_hidden_1_b_left : 'a
-      ; token_hidden_1_b_right : 'a
       ; token_output_1_w_left : 'a
       ; token_output_1_w_right : 'a
-      ; token_output_1_b_left : 'a
-      ; token_output_1_b_right : 'a
       ; channel_hidden_1_w_left : 'a
       ; channel_hidden_1_w_right : 'a
-      ; channel_hidden_1_b_left : 'a
-      ; channel_hidden_1_b_right : 'a
       ; channel_output_1_w_left : 'a
       ; channel_output_1_w_right : 'a
-      ; channel_output_1_b_left : 'a
-      ; channel_output_1_b_right : 'a
       ; classification_w_left : 'a
       ; classification_w_right : 'a
-      ; classification_b_left : 'a
-      ; classification_b_right : 'a
       }
     [@@deriving prms]
   end
-
-  let param_names_list =
-    List.map layer_list ~f:(fun name -> [ name, W; name, B ]) |> List.concat
 
   module P = P
   module A = Make (Prms.P)
@@ -371,227 +419,115 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let open Maths in
     let einsum_w ~left ~right w = einsum [ left, "in"; w, "aij"; right, "jm" ] "anm" in
     Array.map v ~f:(fun v ->
-      let w, b =
+      let w =
         match v.layer_name with
         | Patchify ->
-          let w =
-            let n_tangents = List.hd_exn (shape v.w) in
-            let v_w = reshape v.w ~shape:[ n_tangents; c; -1 ] in
-            einsum_w ~left:lambda.patchify_w_left ~right:lambda.patchify_w_right v_w
-            |> reshape ~shape:[ n_tangents; c; in_channels; patch_size; patch_size ]
-          in
-          let b =
-            einsum_w ~left:lambda.patchify_b_left ~right:lambda.patchify_b_right v.b
-          in
-          w, b
+          let n_tangents = List.hd_exn (shape v.w) in
+          let v_w = reshape v.w ~shape:[ n_tangents; c; -1 ] in
+          einsum_w ~left:lambda.patchify_w_left ~right:lambda.patchify_w_right v_w
+          |> reshape ~shape:[ n_tangents; c; in_channels; patch_size; patch_size ]
         | TokenHidden 0 ->
-          let w =
-            einsum_w
-              ~left:lambda.token_hidden_0_w_left
-              ~right:lambda.token_hidden_0_w_right
-              v.w
-          in
-          let b =
-            einsum_w
-              ~left:lambda.token_hidden_0_b_left
-              ~right:lambda.token_hidden_0_b_right
-              v.b
-          in
-          w, b
+          einsum_w
+            ~left:lambda.token_hidden_0_w_left
+            ~right:lambda.token_hidden_0_w_right
+            v.w
         | TokenOutput 0 ->
-          let w =
-            einsum_w
-              ~left:lambda.token_output_0_w_left
-              ~right:lambda.token_output_0_w_right
-              v.w
-          in
-          let b =
-            einsum_w
-              ~left:lambda.token_output_0_b_left
-              ~right:lambda.token_output_0_b_right
-              v.b
-          in
-          w, b
+          einsum_w
+            ~left:lambda.token_output_0_w_left
+            ~right:lambda.token_output_0_w_right
+            v.w
         | ChannelHidden 0 ->
-          let w =
-            einsum_w
-              ~left:lambda.channel_hidden_0_w_left
-              ~right:lambda.channel_hidden_0_w_right
-              v.w
-          in
-          let b =
-            einsum_w
-              ~left:lambda.channel_hidden_0_b_left
-              ~right:lambda.channel_hidden_0_b_right
-              v.b
-          in
-          w, b
+          einsum_w
+            ~left:lambda.channel_hidden_0_w_left
+            ~right:lambda.channel_hidden_0_w_right
+            v.w
         | ChannelOutput 0 ->
-          let w =
-            einsum_w
-              ~left:lambda.channel_output_0_w_left
-              ~right:lambda.channel_output_0_w_right
-              v.w
-          in
-          let b =
-            einsum_w
-              ~left:lambda.channel_output_0_b_left
-              ~right:lambda.channel_output_0_b_right
-              v.b
-          in
-          w, b
+          einsum_w
+            ~left:lambda.channel_output_0_w_left
+            ~right:lambda.channel_output_0_w_right
+            v.w
         | TokenHidden 1 ->
-          let w =
-            einsum_w
-              ~left:lambda.token_hidden_1_w_left
-              ~right:lambda.token_hidden_1_w_right
-              v.w
-          in
-          let b =
-            einsum_w
-              ~left:lambda.token_hidden_1_b_left
-              ~right:lambda.token_hidden_1_b_right
-              v.b
-          in
-          w, b
+          einsum_w
+            ~left:lambda.token_hidden_1_w_left
+            ~right:lambda.token_hidden_1_w_right
+            v.w
         | TokenOutput 1 ->
-          let w =
-            einsum_w
-              ~left:lambda.token_output_1_w_left
-              ~right:lambda.token_output_1_w_right
-              v.w
-          in
-          let b =
-            einsum_w
-              ~left:lambda.token_output_1_b_left
-              ~right:lambda.token_output_1_b_right
-              v.b
-          in
-          w, b
+          einsum_w
+            ~left:lambda.token_output_1_w_left
+            ~right:lambda.token_output_1_w_right
+            v.w
         | ChannelHidden 1 ->
-          let w =
-            einsum_w
-              ~left:lambda.channel_hidden_1_w_left
-              ~right:lambda.channel_hidden_1_w_right
-              v.w
-          in
-          let b =
-            einsum_w
-              ~left:lambda.channel_hidden_1_b_left
-              ~right:lambda.channel_hidden_1_b_right
-              v.b
-          in
-          w, b
+          einsum_w
+            ~left:lambda.channel_hidden_1_w_left
+            ~right:lambda.channel_hidden_1_w_right
+            v.w
         | ChannelOutput 1 ->
-          let w =
-            einsum_w
-              ~left:lambda.channel_output_1_w_left
-              ~right:lambda.channel_output_1_w_right
-              v.w
-          in
-          let b =
-            einsum_w
-              ~left:lambda.channel_output_1_b_left
-              ~right:lambda.channel_output_1_b_right
-              v.b
-          in
-          w, b
+          einsum_w
+            ~left:lambda.channel_output_1_w_left
+            ~right:lambda.channel_output_1_w_right
+            v.w
         | Classification ->
-          let w =
-            einsum_w
-              ~left:lambda.classification_w_left
-              ~right:lambda.classification_w_right
-              v.w
-          in
-          let b =
-            einsum_w
-              ~left:lambda.classification_b_left
-              ~right:lambda.classification_b_right
-              v.b
-          in
-          w, b
+          einsum_w
+            ~left:lambda.classification_w_left
+            ~right:lambda.classification_w_right
+            v.w
         | _ -> assert false
       in
-      MLP_Layer.{ layer_name = v.layer_name; w; b })
+      MLP_Layer.{ layer_name = v.layer_name; w })
 
   let get_shapes (layer_name : layer) =
-    let w_shape, b_shape =
+    let w_shape =
       match layer_name with
-      | Patchify -> [ c; in_channels; patch_size; patch_size ], [ 1; c ]
-      | TokenHidden _ -> [ s; h ], [ h; c ]
-      | TokenOutput _ -> [ h; s ], [ s; c ]
-      | ChannelHidden _ -> [ c; h ], [ h; s ]
-      | ChannelOutput _ -> [ h; c ], [ s; c ]
-      | Classification -> [ c; output_dim ], [ 1; output_dim ]
+      | Patchify -> [ c; in_channels; patch_size; patch_size ]
+      | TokenHidden _ -> [ s + 1; h ]
+      | TokenOutput _ -> [ h + 1; s ]
+      | ChannelHidden _ -> [ c + 1; h ]
+      | ChannelOutput _ -> [ h + 1; c ]
+      | Classification -> [ c; output_dim ]
     in
-    w_shape, b_shape
+    w_shape
 
   (* set tangents = zero for other parameters but v for this parameter *)
-  let localise ~(param_name : layer * param_type) ~n_per_param v =
-    let param_name_p, param_type_p = param_name in
+  let localise ~(param_name : layer) ~n_per_param v =
     List.map layer_list ~f:(fun layer_name ->
-      let w_shape, b_shape = get_shapes layer_name in
+      let w_shape = get_shapes layer_name in
       let w = zero_params ~shape:w_shape n_per_param in
-      let b = zero_params ~shape:b_shape n_per_param in
-      let params_tmp = MLP_Layer.{ layer_name; w; b } in
-      if equal_layer layer_name param_name_p
-      then (
-        match param_type_p with
-        | W -> MLP_Layer.{ params_tmp with w = v }
-        | B -> MLP_Layer.{ params_tmp with b = v })
+      let params_tmp = MLP_Layer.{ layer_name; w } in
+      if equal_layer layer_name param_name
+      then MLP_Layer.{ params_tmp with w = v }
       else params_tmp)
     |> List.to_array
 
   let random_localised_vs _K : P.T.t =
     List.map layer_list ~f:(fun layer_name ->
-      let w_shape, b_shape = get_shapes layer_name in
+      let w_shape = get_shapes layer_name in
       let w = random_params ~shape:w_shape _K in
-      let b = random_params ~shape:b_shape _K in
-      MLP_Layer.{ layer_name; w; b })
+      MLP_Layer.{ layer_name; w })
     |> List.to_array
 
-  let eigenvectors_for_each_params ~lambda ~(param_name : layer * param_type) =
+  let eigenvectors_for_each_params ~lambda ~(param_name : layer) =
     let vs, n_per_param =
       let left, right, n_per_param =
         match param_name with
-        | Patchify, W -> lambda.patchify_w_left, lambda.patchify_w_right, _K_w
-        | Patchify, B -> lambda.patchify_b_left, lambda.patchify_b_right, _K_b
-        | TokenHidden 0, W ->
+        | Patchify -> lambda.patchify_w_left, lambda.patchify_w_right, _K_w
+        | TokenHidden 0 ->
           lambda.token_hidden_0_w_left, lambda.token_hidden_0_w_right, _K_w
-        | TokenHidden 0, B ->
-          lambda.token_hidden_0_b_left, lambda.token_hidden_0_b_right, _K_b
-        | TokenOutput 0, W ->
+        | TokenOutput 0 ->
           lambda.token_output_0_w_left, lambda.token_output_0_w_right, _K_w
-        | TokenOutput 0, B ->
-          lambda.token_output_0_b_left, lambda.token_output_0_b_right, _K_b
-        | ChannelHidden 0, W ->
+        | ChannelHidden 0 ->
           lambda.channel_hidden_0_w_left, lambda.channel_hidden_0_w_right, _K_w
-        | ChannelHidden 0, B ->
-          lambda.channel_hidden_0_b_left, lambda.channel_hidden_0_b_right, _K_b
-        | ChannelOutput 0, W ->
+        | ChannelOutput 0 ->
           lambda.channel_output_0_w_left, lambda.channel_output_0_w_right, _K_w
-        | ChannelOutput 0, B ->
-          lambda.channel_output_0_b_left, lambda.channel_output_0_b_right, _K_b
-        | TokenHidden 1, W ->
+        | TokenHidden 1 ->
           lambda.token_hidden_1_w_left, lambda.token_hidden_1_w_right, _K_w
-        | TokenHidden 1, B ->
-          lambda.token_hidden_1_b_left, lambda.token_hidden_1_b_right, _K_b
-        | TokenOutput 1, W ->
+        | TokenOutput 1 ->
           lambda.token_output_1_w_left, lambda.token_output_1_w_right, _K_w
-        | TokenOutput 1, B ->
-          lambda.token_output_1_b_left, lambda.token_output_1_b_right, _K_b
-        | ChannelHidden 1, W ->
+        | ChannelHidden 1 ->
           lambda.channel_hidden_1_w_left, lambda.channel_hidden_1_w_right, _K_w
-        | ChannelHidden 1, B ->
-          lambda.channel_hidden_1_b_left, lambda.channel_hidden_1_b_right, _K_b
-        | ChannelOutput 1, W ->
+        | ChannelOutput 1 ->
           lambda.channel_output_1_w_left, lambda.channel_output_1_w_right, _K_w
-        | ChannelOutput 1, B ->
-          lambda.channel_output_1_b_left, lambda.channel_output_1_b_right, _K_b
-        | Classification, W ->
+        | Classification ->
           lambda.classification_w_left, lambda.classification_w_right, _K_w
-        | Classification, B ->
-          lambda.classification_b_left, lambda.classification_b_right, _K_b
         | _ -> assert false
       in
       let u_left, s_left, _ =
@@ -634,7 +570,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
           in
           let tmp =
             match param_name with
-            | Patchify, W ->
+            | Patchify ->
               let u_right_reshaped =
                 Tensor.reshape u_right ~shape:[ in_channels; patch_size; patch_size ]
               in
@@ -653,7 +589,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
     let eigenvectors_each =
-      List.map param_names_list ~f:(fun param_name ->
+      List.map layer_list ~f:(fun param_name ->
         eigenvectors_for_each_params ~lambda ~param_name)
     in
     let vs =
@@ -669,48 +605,31 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       Mat.(0.1 $* eye size) |> Tensor.of_bigarray ~device:base.device |> Prms.free
     in
     let eye_h = init_eye h in
+    let eye_h_1 = init_eye (h + 1) in
     let eye_s = init_eye s in
+    let eye_s_1 = init_eye (s + 1) in
     let eye_c = init_eye c in
+    let eye_c_1 = init_eye (c + 1) in
     { patchify_w_left = init_eye c
     ; patchify_w_right = init_eye Int.(in_channels * patch_size * patch_size)
-    ; patchify_b_left = init_eye 1
-    ; patchify_b_right = eye_c
-    ; token_hidden_0_w_left = eye_s
+    ; token_hidden_0_w_left = eye_s_1
     ; token_hidden_0_w_right = eye_h
-    ; token_hidden_0_b_left = eye_h
-    ; token_hidden_0_b_right = eye_c
-    ; token_output_0_w_left = eye_h
+    ; token_output_0_w_left = eye_h_1
     ; token_output_0_w_right = eye_s
-    ; token_output_0_b_left = eye_s
-    ; token_output_0_b_right = eye_c
-    ; channel_hidden_0_w_left = eye_c
+    ; channel_hidden_0_w_left = eye_c_1
     ; channel_hidden_0_w_right = eye_h
-    ; channel_hidden_0_b_left = eye_h
-    ; channel_hidden_0_b_right = eye_s
-    ; channel_output_0_w_left = eye_h
+    ; channel_output_0_w_left = eye_h_1
     ; channel_output_0_w_right = eye_c
-    ; channel_output_0_b_left = eye_s
-    ; channel_output_0_b_right = eye_c
-    ; token_hidden_1_w_left = eye_s
+    ; token_hidden_1_w_left = eye_s_1
     ; token_hidden_1_w_right = eye_h
-    ; token_hidden_1_b_left = eye_h
-    ; token_hidden_1_b_right = eye_c
-    ; token_output_1_w_left = eye_h
+    ; token_output_1_w_left = eye_h_1
     ; token_output_1_w_right = eye_s
-    ; token_output_1_b_left = eye_s
-    ; token_output_1_b_right = eye_c
-    ; channel_hidden_1_w_left = eye_c
+    ; channel_hidden_1_w_left = eye_c_1
     ; channel_hidden_1_w_right = eye_h
-    ; channel_hidden_1_b_left = eye_h
-    ; channel_hidden_1_b_right = eye_s
-    ; channel_output_1_w_left = eye_h
+    ; channel_output_1_w_left = eye_h_1
     ; channel_output_1_w_right = eye_c
-    ; channel_output_1_b_left = eye_s
-    ; channel_output_1_b_right = eye_c
     ; classification_w_left = eye_c
     ; classification_w_right = init_eye output_dim
-    ; classification_b_left = init_eye 1
-    ; classification_b_right = init_eye output_dim
     }
 end
 
@@ -761,7 +680,7 @@ module Make (D : Do_with_T) = struct
           (* let params = O.params state in 
           let n_params = O.W.P.T.numel (O.W.P.map params ~f:(fun p -> Prms.value p)) in *)
           (* avg error *)
-          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float)];
+          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float) ];
           (* save params *)
           if iter % 100 = 0
           then
@@ -796,8 +715,8 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
-        ; steps = 5
+              { default with base; learning_rate = Some 5e-4; eps = 1e-4 }
+        ; steps = 3
         }
     in
     Optimizer.Config.SOFO.

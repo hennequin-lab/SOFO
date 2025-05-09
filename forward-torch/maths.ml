@@ -887,15 +887,29 @@ let conv2d
       ?(padding = 0, 0)
       ?(dilation = 1, 1)
       ?(groups = 1)
-      ~bias:(b, db)
+      ~bias
+      (* :(b, db) *)
       ~stride
       (x, dx)
       (w, dw)
   =
   (* x has shape [bs x n_channels x w x h], w has shape [out_channels x in_channels x kerl_x x kerl_y] *)
-  let z = Tensor.conv2d ~padding ~dilation ~groups x w (Some b) ~stride in
+  let bias_p =
+    match bias with
+    | Some (b, _) -> Some b
+    | None -> None
+  in
+  let bias_t =
+    match bias with
+    | Some bias ->
+      (match tangent bias with
+       | Some db -> Some db
+       | _ -> None)
+    | _ -> None
+  in
+  let z = Tensor.conv2d ~padding ~dilation ~groups x w bias_p ~stride in
   let maybe_add_db dz =
-    match tangent (b, db) with
+    match bias_t with
     | None -> dz
     | Some db ->
       let n_dim = List.length (Tensor.shape dz) in

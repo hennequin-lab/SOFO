@@ -5,7 +5,6 @@ module PP = struct
   type 'a p =
     { init_cond : 'a
     ; w : 'a
-    ; bias : 'a
     ; b : 'a
     ; f1 : 'a
     ; f2 : 'a

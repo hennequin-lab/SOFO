@@ -8,7 +8,7 @@ module Arr = Dense.Ndarray.S
 module Mat = Dense.Matrix.S
 
 let _ =
-  Random.init 1999;
+  Random.init 1985;
   (* Random.self_init (); *)
   Owl_stats_prng.init 1985;
   Torch_core.Wrapper.manual_seed 1985
@@ -360,7 +360,7 @@ module Do_with_SOFO : Do_with_T = struct
           config =
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
-        ; steps = 3
+        ; steps = 5
         }
     in
     Optimizer.Config.SOFO.

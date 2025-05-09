@@ -45,12 +45,12 @@ let epoch_of ~full_batch_size ~batch_size t =
 
 (* calculate output heigh, width and channel *)
 let calc_out_height_width_channel
-  ~padding:(pad_x, pad_y)
-  ~dilation:(dil_x, dil_y)
-  ~in_out_channels_kernel
-  ~stride:(stride_x, stride_y)
-  ~in_height
-  ~in_width
+      ~padding:(pad_x, pad_y)
+      ~dilation:(dil_x, dil_y)
+      ~in_out_channels_kernel
+      ~stride:(stride_x, stride_y)
+      ~in_height
+      ~in_width
   =
   let _, out_channel, kerl_x, kerl_y = in_out_channels_kernel in
   let out_height =
@@ -60,3 +60,17 @@ let calc_out_height_width_channel
     Int.(((in_width + (2 * pad_y) - (dil_y * (kerl_y - 1)) - 1) / stride_y) + 1)
   in
   out_height, out_width, out_channel
+
+(* append 1s to the last dim of x *)
+let expand_dim x =
+  let x_shape = Maths.shape x in
+  let x_shape_exp_last = List.drop_last_exn x_shape in
+  let x_ = Maths.primal x in
+  Maths.concat
+    x
+    (Maths.const
+       (Tensor.ones
+          ~device:(Tensor.device x_)
+          ~kind:(Tensor.kind x_)
+          (x_shape_exp_last @ [ 1 ])))
+    ~dim:(List.length x_shape - 1)

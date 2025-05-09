@@ -542,8 +542,8 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 5e-3; eps = 1e-4 }
-        ; steps = 5
+              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
+        ; steps = 3
         }
     in
     Optimizer.Config.SOFO.
@@ -552,7 +552,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
-      ; aux = Some aux
+      ; aux = None
       }
 
   let init = O.init (RNN.init ~r ~c')

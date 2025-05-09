@@ -15,14 +15,16 @@ let _ =
 let in_dir = Cmdargs.in_dir "-d"
 let cast = Dense.Matrix.Generic.cast_d2s
 let base = Optimizer.Config.Base.default
+
+let cifar =
+  match Cmdargs.(get_string "-dataset") with
+  | Some "mnist" -> false
+  | Some "cifar" -> true
+  | _ -> failwith "-dataset [mnist | cifar ]"
+
 let output_dim = 10
 let batch_size = 256
-
-(* for cifar *)
-let input_size = Int.(32 * 32 * 3)
-
-(* for mlp *)
-(* let input_size = Int.(28 * 28) *)
+let input_size = if cifar then Int.(32 * 32 * 3) else Int.(28 * 28)
 let full_batch_size = 50_000
 let layer_sizes = [| 128; output_dim |]
 let n_layers = Array.length layer_sizes
@@ -50,14 +52,13 @@ module MLP = struct
   type input = Tensor.t
 
   let f ~(theta : P.M.t) ~(input : input) =
-    let bs = Tensor.shape input |> List.hd_exn in 
+    let bs = Tensor.shape input |> List.hd_exn in
     Array.foldi theta ~init:(Maths.const input) ~f:(fun i accu wb ->
       let open MLP_Layer in
       let accu =
         Maths.concat
           accu
-          (Maths.const
-             (Tensor.ones ~device:base.device ~kind:base.kind [ bs; 1 ]))
+          (Maths.const (Tensor.ones ~device:base.device ~kind:base.kind [ bs; 1 ]))
           ~dim:1
       in
       let pre_activation = Maths.(accu *@ wb.w) in
@@ -90,76 +91,55 @@ module FF =
        end))
 
 (* -----------------------------------------
-   -- Generate mnist data. ------
+   -- Read in data. ------
    ----------------------------------------- *)
-(* let dataset typ =
-  let suffix =
-    match typ with
-    | `train -> "train"
-    | `test -> "test"
-  in
-  let x = Owl.Arr.load_npy ("_data/x_" ^ suffix ^ ".npy") in
-  let y = Owl.Arr.load_npy ("_data/t_" ^ suffix ^ ".npy") |> Owl.Arr.one_hot output_dim in
-  let mu = 0.13062754273414612
-  and sigma = 0.30810779333114624 in
-  let x = Owl.Arr.(((x /$ 255.) -$ mu) /$ sigma) in
-  cast x, cast y
 
-let train_set = dataset `train
-let test_set = dataset `test
-
-let sample_data (set_x, set_y) =
-  let a = Mat.row_num set_x in
-  fun batch_size ->
-    if batch_size < 0
-    then (
-      (* reshape x to [batch size x 1 x input_dim x input_dim]. *)
-      let total_bs = Mat.row_num set_x in
-      let xs_tensor = Tensor.of_bigarray ~device:base.device set_x in
-      let xs = Tensor.reshape xs_tensor ~shape:[ total_bs; input_size ] in
-      xs, Tensor.of_bigarray ~device:base.device set_y)
-    else (
-      let ids = List.init batch_size ~f:(fun _ -> Random.int a) in
-      let x_tensor =
-        Tensor.of_bigarray ~device:base.device (Mat.get_fancy [ L ids ] set_x)
+let train_set, test_set =
+  if cifar
+  then (
+    (* train data has size [10000 x 32 x 32 x 3 ]*)
+    let x_train, y_train =
+      List.fold
+        (List.init 5 ~f:(fun id -> id))
+        ~init:None
+        ~f:(fun accu i ->
+          let x_train, _, y_train = Owl.Dataset.load_cifar_train_data Int.(i + 1) in
+          match accu with
+          | None -> Some (x_train, y_train)
+          | Some (x_train_accu, y_train_accu) ->
+            let new_x_train_accu = Arr.concatenate [| x_train_accu; x_train |] ~axis:0 in
+            let new_y_train_accu = Arr.concatenate [| y_train_accu; y_train |] ~axis:0 in
+            Some (new_x_train_accu, new_y_train_accu))
+      |> Option.value_exn
+    in
+    let x_test, _, y_test = Owl.Dataset.load_cifar_test_data () in
+    (* from torchvision *)
+    let mu = cast (Owl.Arr.of_array [| 0.4914; 0.4822; 0.4465 |] [| 1; 1; 1; 3 |])
+    and sigma = cast (Owl.Arr.of_array [| 0.2023; 0.1994; 0.2010 |] [| 1; 1; 1; 3 |]) in
+    (* cifar10 from Owl dataset already scaled between 0 and 1! *)
+    let x_train = Owl.Arr.((x_train - mu) / sigma) in
+    let x_test = Owl.Arr.((x_test - mu) / sigma) in
+    (x_train, y_train), (x_test, y_test))
+  else (
+    let dataset_mnist typ =
+      let suffix =
+        match typ with
+        | `train -> "train"
+        | `test -> "test"
       in
-      let xs = Tensor.reshape x_tensor ~shape:[ batch_size; input_size ] in
-      let ys = Tensor.of_bigarray ~device:base.device (Mat.get_fancy [ L ids ] set_y) in
-      xs, ys) *)
-
-(* -----------------------------------------
-  -- Generate CIFAR data. ------
-  ----------------------------------------- *)
-let dataset =
-  (* train data has size [10000 x 32 x 32 x 3 ]*)
-  let x_train, y_train =
-    List.fold
-      (List.init 5 ~f:(fun id -> id))
-      ~init:None
-      ~f:(fun accu i ->
-        let x_train, _, y_train = Owl.Dataset.load_cifar_train_data Int.(i + 1) in
-        match accu with
-        | None -> Some (x_train, y_train)
-        | Some (x_train_accu, y_train_accu) ->
-          let new_x_train_accu = Arr.concatenate [| x_train_accu; x_train |] ~axis:0 in
-          let new_y_train_accu = Arr.concatenate [| y_train_accu; y_train |] ~axis:0 in
-          Some (new_x_train_accu, new_y_train_accu))
-    |> Option.value_exn
-  in
-  let x_test, _, y_test = Owl.Dataset.load_cifar_test_data () in
-  (* from torchvision *)
-  let mu = cast (Owl.Arr.of_array [| 0.4914; 0.4822; 0.4465 |] [| 1; 1; 1; 3 |])
-  and sigma = cast (Owl.Arr.of_array [| 0.2023; 0.1994; 0.2010 |] [| 1; 1; 1; 3 |]) in
-  (* cifar10 from Owl dataset already scaled between 0 and 1! *)
-  let x_train = Owl.Arr.((x_train - mu) / sigma) in
-  let x_test = Owl.Arr.((x_test - mu) / sigma) in
-  (x_train, y_train), (x_test, y_test)
-
-let train_set, test_set = dataset
+      let x = Owl.Arr.load_npy ("_data/x_" ^ suffix ^ ".npy") in
+      let y =
+        Owl.Arr.load_npy ("_data/t_" ^ suffix ^ ".npy") |> Owl.Arr.one_hot output_dim
+      in
+      let mu = 0.13062754273414612
+      and sigma = 0.30810779333114624 in
+      let x = Owl.Arr.(((x /$ 255.) -$ mu) /$ sigma) in
+      cast x, cast y
+    in
+    dataset_mnist `train, dataset_mnist `test)
 
 let sample_data (set_x, set_y) =
   let a = (Arr.shape set_x).(0) in
-  (* let a = Mat.row_num set_x in *)
   fun batch_size ->
     if batch_size < 0
     then
@@ -190,7 +170,7 @@ let test_eval ~train_data theta =
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
 
-let n_params_w = 330
+let n_params_w = 170
 let _K = Array.length layer_sizes * n_params_w
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
@@ -225,8 +205,8 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let get_shapes id =
     match id with
     | 0 -> [ input_size + 1; layer_sizes.(0) ]
-    | 1 -> [ layer_sizes.(0)+ 1; layer_sizes.(1) ]
-    | 2 -> [ layer_sizes.(1)+ 1; layer_sizes.(2) ]
+    | 1 -> [ layer_sizes.(0) + 1; layer_sizes.(1) ]
+    | 2 -> [ layer_sizes.(1) + 1; layer_sizes.(2) ]
     | _ -> assert false
 
   (* set tangents = zero for other parameters but v for this parameter *)
@@ -355,10 +335,10 @@ module Make (D : Do_with_T) = struct
           let train_acc =
             test_eval ~train_data:(Some data) MLP.P.(const (value (O.params new_state)))
           in
-          (* let params = O.params state in
-          let n_params = O.W.P.T.numel (O.W.P.map params ~f:(fun p -> Prms.value p)) in  *)
+          let params = O.params state in
+          let n_params = O.W.P.T.numel (O.W.P.map params ~f:(fun p -> Prms.value p)) in 
           (* avg error *)
-          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float)];
+          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float) (n_params:int)];
           (* save params *)
           if iter % 100 = 0
           then
@@ -403,7 +383,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
-      ; aux = Some aux
+      ; aux = None
       }
 
   let init = O.init MLP.init

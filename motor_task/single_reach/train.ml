@@ -26,15 +26,12 @@ let _K = 256
 type param_name =
   | Init_cond
   | W
-  | Bias
   | B
   | F of int
   | C of int
 
-let n_params_init_cond, n_params_bias, n_params_b, n_params_f, n_params_c =
-  10, 10, 20, 10, 10
-
-let n_params_w = Int.(_K - (10 * n_params_init_cond))
+let n_params_init_cond, n_params_b, n_params_f, n_params_c = 10, 20, 10, 10
+let n_params_w = Int.(_K - (9 * n_params_init_cond))
 
 module P = PP.Make (Prms.P)
 
@@ -45,8 +42,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       ; init_cond_right : 'a
       ; w_left : 'a
       ; w_right : 'a
-      ; bias_left : 'a
-      ; bias_right : 'a
       ; b_left : 'a
       ; b_right : 'a
       ; f1_left : 'a
@@ -85,32 +80,29 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let init_cond = tmp_einsum lambda.init_cond_left lambda.init_cond_right v.init_cond in
     let b = tmp_einsum lambda.b_left lambda.b_right v.b in
     let w = tmp_einsum lambda.w_left lambda.w_right v.w in
-    let bias = tmp_einsum lambda.bias_left lambda.bias_right v.bias in
     let f1 = tmp_einsum lambda.f1_left lambda.f1_right v.f1 in
     let f2 = tmp_einsum lambda.f2_left lambda.f2_right v.f2 in
     let f3 = tmp_einsum lambda.f3_left lambda.f3_right v.f3 in
     let f4 = tmp_einsum lambda.f4_left lambda.f4_right v.f4 in
     let c1 = tmp_einsum lambda.c1_left lambda.c1_right v.c1 in
     let c2 = tmp_einsum lambda.c2_left lambda.c2_right v.c2 in
-    { init_cond; b; w; bias; f1; f2; f3; f4; c1; c2 }
+    { init_cond; b; w; f1; f2; f3; f4; c1; c2 }
 
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~local ~param_name ~n_per_param v =
     let sample = if local then zero_params else random_params in
     let init_cond = sample ~shape:[ 1; n ] n_per_param in
-    let w = sample ~shape:[ n; n ] n_per_param in
-    let bias = sample ~shape:[ 1; n ] n_per_param in
+    let w = sample ~shape:[ n + 1; n ] n_per_param in
     let b = sample ~shape:[ n_input_channels; n ] n_per_param in
     let _f = sample ~shape:[ 1; n ] n_per_param in
     let _c = sample ~shape:[ n; 1 ] n_per_param in
     let params_tmp =
-      PP.{ init_cond; w; bias; b; f1 = _f; f2 = _f; f3 = _f; f4 = _f; c1 = _c; c2 = _c }
+      PP.{ init_cond; w; b; f1 = _f; f2 = _f; f3 = _f; f4 = _f; c1 = _c; c2 = _c }
     in
     match param_name with
     | Init_cond -> { params_tmp with init_cond = v }
     | B -> { params_tmp with b = v }
     | W -> { params_tmp with w = v }
-    | Bias -> { params_tmp with bias = v }
     | F 1 -> { params_tmp with f1 = v }
     | F 2 -> { params_tmp with f2 = v }
     | F 3 -> { params_tmp with f3 = v }
@@ -122,8 +114,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let random_localised_vs _K : P.T.t =
     { init_cond = random_params ~shape:[ 1; n ] _K
     ; b = random_params ~shape:[ n_input_channels; n ] _K
-    ; w = random_params ~shape:[ n; n ] _K
-    ; bias = random_params ~shape:[ 1; n ] _K
+    ; w = random_params ~shape:[ n + 1; n ] _K
     ; f1 = random_params ~shape:[ 1; n ] _K
     ; f2 = random_params ~shape:[ 1; n ] _K
     ; f3 = random_params ~shape:[ 1; n ] _K
@@ -138,7 +129,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       | W -> lambda.w_left, lambda.w_right, n_params_w
       | Init_cond -> lambda.init_cond_left, lambda.init_cond_right, n_params_init_cond
       | B -> lambda.b_left, lambda.b_right, n_params_b
-      | Bias -> lambda.bias_left, lambda.bias_right, n_params_bias
       | F 1 -> lambda.f1_left, lambda.f1_right, n_params_f
       | F 2 -> lambda.f2_left, lambda.f2_right, n_params_f
       | F 3 -> lambda.f3_left, lambda.f3_right, n_params_f
@@ -190,7 +180,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     local_vs |> localise ~local ~param_name ~n_per_param
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ Init_cond; B; W; Bias; F 1; F 2; F 3; F 4; C 1; C 2 ] in
+    let param_names_list = [ Init_cond; B; W; F 1; F 2; F 3; F 4; C 1; C 2 ] in
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
         eigenvectors_for_each_params ~local:true ~lambda ~param_name)
@@ -211,10 +201,8 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     ; init_cond_right = init_eye n
     ; b_left = init_eye n_input_channels
     ; b_right = init_eye n
-    ; w_left = init_eye n
+    ; w_left = init_eye (n + 1)
     ; w_right = init_eye n
-    ; bias_left = init_eye 1
-    ; bias_right = init_eye n
     ; f1_left = init_eye 1
     ; f1_right = init_eye n
     ; f2_left = init_eye 1
@@ -292,7 +280,7 @@ struct
       let it_took = Float.(toc - tic) in
       (* guards against spikes in the loss *)
       let wallclock = Float.(wallclock + it_took) in
-      print [%message (k : int) (loss : float) ];
+      print [%message (k : int) (loss : float)];
       Owl.Mat.(
         save_txt
           ~append:true
@@ -356,7 +344,7 @@ module With_standard = struct
       ; rank_one = false
       ; n_tangents = _K
       ; damping = Some 1e-5
-      ; aux =Some aux
+      ; aux =None
       }
 
   let init = O.init (R.init ~base ~n_input_channels)
@@ -368,12 +356,11 @@ end
    ----------------------------------------- *)
 
 let _ =
-    match Cmdargs.(get_string "-method" |> force ~usage:"-method [adam|sofo]") with
-    | "adam" ->
-      let module R = Run (With_Adam) in
-      R.run ()
-    | "sofo" ->
-      let module R = Run (With_standard) in
-      R.run ()
-    | _ -> failwith "bad method option"
- 
+  match Cmdargs.(get_string "-m" |> force ~usage:"-m [adam|sofo]") with
+  | "adam" ->
+    let module R = Run (With_Adam) in
+    R.run ()
+  | "sofo" ->
+    let module R = Run (With_standard) in
+    R.run ()
+  | _ -> failwith "bad method option"
