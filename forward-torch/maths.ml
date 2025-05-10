@@ -15,6 +15,8 @@ let all_dims_but_first a = List.range 1 (List.length (Tensor.shape a))
 
 (* get primal, which is the first element *)
 let primal = fst
+
+(* get primal and detach from the tensor graph *)
 let primal_tensor_detach x = Tensor.detach (fst x)
 
 (* get tangent opt, which is instantiated if direct or not instantiated if lazy *)
@@ -53,6 +55,7 @@ let with_tangent dx ~f =
     | Direct dx -> Direct (f dx)
     | Lazy dx -> Direct (f (dx ())))
 
+(* int list of shape [k; shape] *)
 let append_batch ~tangent shape =
   let b = List.hd_exn (Tensor.shape tangent) in
   b :: shape
@@ -79,6 +82,7 @@ let reshape (x, dx) ~shape =
   in
   (y, dy) |> assert_right_shape "reshape"
 
+(* permute x according to dims *)
 let permute (x, dx) ~dims =
   let y = Tensor.permute x ~dims in
   let dy =
@@ -88,6 +92,7 @@ let permute (x, dx) ~dims =
   in
   (y, dy) |> assert_right_shape "permute"
 
+(* reshape x with a dimension of size one inserted at dim *)
 let unsqueeze (x, dx) ~dim =
   let y = Tensor.unsqueeze x ~dim in
   let dy =
@@ -97,6 +102,7 @@ let unsqueeze (x, dx) ~dim =
   in
   (y, dy) |> assert_right_shape "unsqueeze"
 
+(* reshape x with a dimension of size one removed at dim *)
 let squeeze (x, dx) ~dim =
   let y = Tensor.squeeze_dim x ~dim in
   let dy =
@@ -112,12 +118,13 @@ let neg (x, dx) =
   let dy = with_tangent dx ~f:Tensor.neg in
   (y, dy) |> assert_right_shape "neg"
 
-(* y = -x, dy = -dx *)
+(* y = |x|, dy = |dx| *)
 let abs (x, dx) =
   let y = Tensor.abs x in
   let dy = with_tangent dx ~f:Tensor.abs in
   (y, dy) |> assert_right_shape "abs"
 
+(* y = tr(x) *)
 let trace (x, dx) =
   assert (
     match Tensor.shape x with
@@ -215,6 +222,7 @@ let inv_rectangle ?(rcond = 1e-6) (x, dx) =
   in
   (y, dy) |> assert_right_shape "inv_rectangle"
 
+(* y = Relu(x) *)
 let relu (x, dx) =
   let y = Tensor.relu x in
   let dy =
@@ -224,6 +232,7 @@ let relu (x, dx) =
   in
   (y, dy) |> assert_right_shape "relu"
 
+(* y = softRelu(x) *)
 let soft_relu (x, dx) =
   let tmp = Tensor.(square x + f 4.) in
   let y =
@@ -240,17 +249,19 @@ let soft_relu (x, dx) =
   in
   (y, dy) |> assert_right_shape "relu"
 
+(* y = sigmoid(x) *)
 let sigmoid (x, dx) =
   let y = Tensor.sigmoid x in
   let dy = with_tangent dx ~f:(fun dx -> Tensor.(mul dx (mul y (ones_like y - y)))) in
   (y, dy) |> assert_right_shape "sigmoid"
 
+(* y = softplus(x) *)
 let softplus (x, dx) =
   let y = Tensor.softplus x in
   let dy = with_tangent dx ~f:(fun dx -> Tensor.(mul (sigmoid x) dx)) in
   (y, dy) |> assert_right_shape "softplus"
 
-(* like Torch's slice but not sharing data *)
+(* slice x along [dim] from [start] to [end_] with a [step] *)
 let slice ~dim ~start ~end_ ~step (x, dx) =
   let y = Tensor.slice_copy x ~dim ~start ~end_ ~step in
   let dy = with_tangent dx ~f:(Tensor.slice_copy ~dim:(dim + 1) ~start ~end_ ~step) in
@@ -269,6 +280,7 @@ let sum (x, dx) =
   in
   (y, dy) |> assert_right_shape "sum"
 
+(* y = sum of x_i along [dim] *)
 let sum_dim (x, dx) ~dim ~keepdim =
   let y = Tensor.(sum_dim_intlist x ~dim ~keepdim ~dtype:(type_ x)) in
   let dy =
@@ -283,6 +295,7 @@ let sum_dim (x, dx) ~dim ~keepdim =
   in
   (y, dy) |> assert_right_shape "sum_dim"
 
+(* y = mean(x) along all dims *)
 let mean (x, dx) =
   let y = Tensor.mean x in
   let dy =
@@ -292,6 +305,7 @@ let mean (x, dx) =
   in
   (y, dy) |> assert_right_shape "mean"
 
+(* y = mean(x) along [dim] *)
 let mean_dim (x, dx) ~dim ~keepdim =
   let y = Tensor.(mean_dim x ~dim ~keepdim ~dtype:(type_ x)) in
   let dy =
@@ -306,6 +320,7 @@ let mean_dim (x, dx) ~dim ~keepdim =
   in
   (y, dy) |> assert_right_shape "mean_dim"
 
+(* max2d along dim1 *)
 let max_2d_dim1 (x, dx) ~keepdim =
   let y, y_indices = Tensor.(max_dim x ~dim:1 ~keepdim) in
   let dy =
@@ -344,6 +359,7 @@ let transpose (x, dx) ~dim0 ~dim1 =
   let dy = with_tangent dx ~f:(Tensor.transpose_copy ~dim0:(dim0 + 1) ~dim1:(dim1 + 1)) in
   (y, dy) |> assert_right_shape "transpose"
 
+(* y = batch transpose x where the last two dims of x is transposed *)
 let btr (x, dx) =
   let n = List.length (Tensor.shape x) in
   assert (n > 1);
@@ -352,6 +368,7 @@ let btr (x, dx) =
   let dy = with_tangent dx ~f:tr in
   (y, dy) |> assert_right_shape "btr"
 
+(* y = diagonal(x) at [offset] *)
 let diagonal (x, dx) ~offset =
   let y = Tensor.diagonal x ~offset ~dim1:(-2) ~dim2:(-1) in
   let dy =
@@ -359,6 +376,7 @@ let diagonal (x, dx) ~offset =
   in
   (y, dy) |> assert_right_shape "diagonal"
 
+(* [dim1] and [dim2] of y are filled by x at [offset] *)
 let diag_embed (x, dx) ~offset ~dim1 ~dim2 =
   let y = Tensor.diag_embed x ~offset ~dim1 ~dim2 in
   let dy =
@@ -368,11 +386,13 @@ let diag_embed (x, dx) ~offset ~dim1 ~dim2 =
   in
   (y, dy) |> assert_right_shape "diag_embed"
 
+(* y = lower triangular part of x at [diagonal] *)
 let tril (x, dx) ~diagonal =
   let y = Tensor.tril x ~diagonal in
   let dy = with_tangent dx ~f:(Tensor.tril ~diagonal) in
   (y, dy) |> assert_right_shape "tril"
 
+(* x = yy^T where y is lower triangular *)
 let cholesky (x, dx) =
   let y = Tensor.linalg_cholesky ~upper:false x in
   let dy =
@@ -423,7 +443,7 @@ let logsumexp (x, dx) ~dim ~keepdim =
   in
   (y, dy) |> assert_right_shape "logsumexp"
 
-(* x are the categorical logits. *)
+(* x are the categorical logits. https://arxiv.org/abs/1611.01144 *)
 let gumbel_softmax (x, dx) ~tau ~with_noise ~discrete =
   let gumbel_noise =
     if with_noise
@@ -475,6 +495,7 @@ let gumbel_softmax (x, dx) ~tau ~with_noise ~discrete =
   in
   (y_final, dy) |> assert_right_shape "gumbel_softmax"
 
+(* maxpooling on 2d x *)
 let maxpool2d
       ?(padding = 0, 0)
       ?(dilation = 1, 1)
@@ -604,16 +625,17 @@ let ( / ) (x, dx) (y, dy) =
   in
   (z, dz) |> assert_right_shape "( / )"
 
-(* x = x + z *)
+(* x= x + z *)
 let ( $+ ) z (x, dx) = (Tensor.(add_scalar x (Scalar.f z)), dx) |> assert_right_shape "$+"
 let ( -$ ) (x, dx) z = (Tensor.(sub_scalar x (Scalar.f z)), dx) |> assert_right_shape "-$"
 
-(* x = x *z *)
+(* x = x * z *)
 let ( $* ) z (x, dx) =
   let y = Tensor.(mul_scalar x (Scalar.f z)) in
   let dy = with_tangent dx ~f:(fun dx -> Tensor.(mul_scalar dx Scalar.(f z))) in
   (y, dy) |> assert_right_shape "$*"
 
+(* y = x/y *)
 let ( $/ ) x (y, dy) =
   let z = Tensor.(mul_scalar (reciprocal y) (Scalar.f x)) in
   let dz =
@@ -623,6 +645,7 @@ let ( $/ ) x (y, dy) =
   in
   (z, dz) |> assert_right_shape "( $/ )"
 
+(* x = x / y *)
 let ( /$ ) (x, dx) y = Float.(1. / y) $* (x, dx)
 
 (* z = xy, dz = dx y + x dy *)
@@ -644,7 +667,8 @@ let __einsum_primal operands return =
   let equation = String.concat ~sep:"," (List.map ~f:snd operands) ^ "->" ^ return in
   Tensor.einsum ~equation (List.map ~f:fst operands) ~path:None
 
-(* einsum [ a, "ij"; b, "jk"; c, "ki" ] "ii" *)
+(* sum the product of the elements of the input operands along dimensions 
+  specified by Einstein summation convention *)
 let einsum (operands : (t * string) list) return =
   let tangent_id = 'x' in
   assert (not (String.contains return tangent_id));
@@ -751,6 +775,7 @@ let linsolve (a, da) (b, db) ~left =
   in
   (z, dz) |> assert_right_shape "linsolve"
 
+(* solve for ax=b (if left true) or xa = b (if left false). Note that b must be 3D (i.e. m x p x n) and a needs to be triangular. *)
 let linsolve_triangular (a, da) (b, db) ~left ~upper =
   let unitriangular = false in
   let x = Tensor.linalg_solve_triangular a ~b ~upper ~left ~unitriangular in
@@ -771,6 +796,7 @@ let linsolve_triangular (a, da) (b, db) ~left ~upper =
   in
   (x, dx) |> assert_right_shape "linsolve_triangular"
 
+(* c = x kron b *)
 let kron (a, da) (b, db) =
   let x = Tensor.kron a b in
   let dz =
@@ -783,115 +809,8 @@ let kron (a, da) (b, db) =
   in
   (x, dz) |> assert_right_shape "kron"
 
-(* solve for ax=b (if left true) or xa = b (if left false). Note that b must be 3D (i.e. m x p x n) and a needs to be triangular. *)
-(* let __linsolve_triangular (a, da) (b, db) ~left ~upper =
-  let unitriangular = false in
-  let z = Tensor.linalg_solve_triangular a ~b ~upper ~left ~unitriangular in
-  let a_shape = Tensor.shape a in
-  let b_shape = Tensor.shape b in
-  let dz =
-    with_tangents
-      da
-      db
-      ~fx:(fun da ->
-        let num_tangents_a = List.hd_exn (Tensor.shape da) in
-        let a_exp = Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true in
-        let final =
-          if left
-          then (
-            let da_z =
-              match List.length b_shape with
-              | 3 -> Tensor.einsum ~equation:"kmij,mjp->kmip" [ da; z ] ~path:None
-              | _ -> assert false
-            in
-            let dx =
-              Tensor.linalg_solve_triangular
-                a_exp
-                ~b:Tensor.(neg da_z)
-                ~upper
-                ~unitriangular
-                ~left:true
-            in
-            dx)
-          else (
-            let z_da =
-              match List.length b_shape with
-              | 3 -> Tensor.einsum ~equation:"mpi,kmij->kmpj" [ z; da ] ~path:None
-              | _ -> assert false
-            in
-            let dx =
-              Tensor.linalg_solve_triangular
-                a_exp
-                ~b:Tensor.(neg z_da)
-                ~upper
-                ~left:false
-                ~unitriangular
-            in
-            dx)
-        in
-        final)
-      ~fy:(fun db ->
-        let num_tangents_b = List.hd_exn (Tensor.shape db) in
-        let a_exp = Tensor.expand a ~size:(num_tangents_b :: a_shape) ~implicit:true in
-        if left
-        then Tensor.linalg_solve_triangular a_exp ~b:db ~upper ~unitriangular ~left:true
-        else Tensor.linalg_solve_triangular a_exp ~b:db ~upper ~unitriangular ~left:false)
-      ~fxy:(fun da db ->
-        let num_tangents_a = List.hd_exn (Tensor.shape da) in
-        let num_tangents_b = List.hd_exn (Tensor.shape db) in
-        assert (num_tangents_a = num_tangents_b);
-        let final =
-          if left
-          then (
-            let a_exp =
-              Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true
-            in
-            let da_z =
-              match List.length b_shape with
-              | 3 -> Tensor.einsum ~equation:"kmij,mjp->kmip" [ da; z ] ~path:None
-              | _ -> assert false
-            in
-            let dx =
-              Tensor.linalg_solve_triangular
-                a_exp
-                ~b:Tensor.(db - da_z)
-                ~upper
-                ~unitriangular
-                ~left:true
-            in
-            dx)
-          else (
-            let a_exp =
-              Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true
-            in
-            let z_da =
-              match List.length b_shape with
-              | 3 -> Tensor.einsum ~equation:"mpi,kmij->kmpj" [ z; da ] ~path:None
-              | _ -> assert false
-            in
-            let dx =
-              Tensor.linalg_solve_triangular
-                a_exp
-                ~b:Tensor.(db - z_da)
-                ~upper
-                ~unitriangular
-                ~left:false
-            in
-            dx)
-        in
-        final)
-  in
-  (z, dz) |> assert_right_shape "linsolve_triangular" *)
-
-let conv2d
-      ?(padding = 0, 0)
-      ?(dilation = 1, 1)
-      ?(groups = 1)
-      ~bias
-      (* :(b, db) *)
-      ~stride
-      (x, dx)
-      (w, dw)
+(* apply a 2d convolution over x with weight [w] *)
+let conv2d ?(padding = 0, 0) ?(dilation = 1, 1) ?(groups = 1) ~bias ~stride (x, dx) (w, dw)
   =
   (* x has shape [bs x n_channels x w x h], w has shape [out_channels x in_channels x kerl_x x kerl_y] *)
   let bias_p =
@@ -969,6 +888,7 @@ let conv2d
   in
   (z, dz) |> assert_right_shape "conv2d"
 
+(* concat x_i in [x_list] along [dim] *)
 let concat_list x_list ~dim =
   let z = Tensor.concat (List.map x_list ~f:fst) ~dim in
   let num_tangents =
@@ -1006,6 +926,7 @@ let concat_list x_list ~dim =
   in
   (z, dz) |> assert_right_shape "concat_list"
 
+(* concat x_i in [x_list] to form a block-diagonal matrix *)
 let block_diag x_list =
   let z = Tensor.block_diag (List.map x_list ~f:fst) in
   let num_tangents =
@@ -1039,6 +960,7 @@ let block_diag x_list =
   in
   (z, dz) |> assert_right_shape "block_diag"
 
+(* concat x and y along [dim] *)
 let concat (x, dx) (y, dy) ~dim =
   let z = Tensor.concat [ x; y ] ~dim in
   let x_shape, y_shape = Tensor.shape x, Tensor.shape y in
@@ -1071,6 +993,7 @@ let concat (x, dx) (y, dy) ~dim =
 
 let epsilon = 1e-5
 
+(* utility function to check grad of unary operation [f] against finite differences *)
 let check_grad1 f x =
   (* wrap f around a rng seed setter so that stochasticity is the same *)
   let key = Random.int Int.max_value in
@@ -1099,6 +1022,7 @@ let check_grad1 f x =
   in
   Tensor.(norm (dy_pred - dy_finite) / norm dy_finite) |> Tensor.to_float0_exn
 
+(* utility function to check grad of binary operation [f] against finite differences *)
 let check_grad2 f x y =
   (* wrap f around a rng seed setter so that stochasticity is the same *)
   let key = Random.int Int.max_value in
@@ -1135,186 +1059,3 @@ let check_grad2 f x y =
   in
   let _ = print [%message (final : float)] in
   final
-
-(*
-   let check_grad_lqr f ~state_params ~cost_params ~attach_tangents =
-  (* wrap f around a rng seed setter so that stochasticity is the same *)
-  let key = Random.int Int.max_value in
-  let f ~state_params:x ~cost_params:y =
-    Torch_core.Wrapper.manual_seed key;
-    f ~state_params:x ~cost_params:y
-  in
-  (* extract params from the original params sets *)
-  let n_steps = state_params.n_steps in
-  let x_0 = state_params.x_0 in
-  let map_const = List.map ~f:const in
-  (* draw a random direction along which to evaluate derivatives *)
-  let rand_like x =
-    let sx = Tensor.shape x in
-    Tensor.randn ~kind:(Tensor.type_ x) sx
-  in
-  let { f_x_tan; f_u_tan; f_t_tan; c_xx_tan; c_xu_tan; c_uu_tan; c_x_tan; c_u_tan } =
-    attach_tangents
-  in
-  let add_tangents ~tan lst =
-    (* sample tangents if tan is true *)
-    let tangents = if tan then Some (List.map lst ~f:rand_like) else None in
-    (* add tangents to the original primals *)
-    let lst_tan =
-      match tangents with
-      | None -> map_const lst
-      | Some tan_lst ->
-        List.map2_exn lst tan_lst ~f:(fun f_x vx ->
-          make_dual f_x ~t:(Direct (Tensor.view_copy vx ~size:(1 :: Tensor.shape f_x))))
-    in
-    tangents, lst_tan
-  in
-  let add_tangents_opt ~tan lst =
-    let tangents_lst_tan = Option.map lst ~f:(fun lst -> add_tangents ~tan lst) in
-    match tangents_lst_tan with
-    | None -> None, None
-    | Some (tangents, lst_tan) -> Some tangents, Some lst_tan
-  in
-  let vf_x_list, f_x_list_tan = add_tangents ~tan:f_x_tan state_params.f_x_list in
-  let vf_u_list, f_u_list_tan = add_tangents ~tan:f_u_tan state_params.f_u_list in
-  let vf_t_list, f_t_list_tan = add_tangents_opt ~tan:f_t_tan state_params.f_t_list in
-  let vc_xx_list, c_xx_list_tan = add_tangents ~tan:c_xx_tan cost_params.c_xx_list in
-  let vc_xu_list, c_xu_list_tan = add_tangents_opt ~tan:c_xu_tan cost_params.c_xu_list in
-  let vc_uu_list, c_uu_list_tan = add_tangents ~tan:c_uu_tan cost_params.c_uu_list in
-  let vc_x_list, c_x_list_tan = add_tangents_opt ~tan:c_x_tan cost_params.c_x_list in
-  let vc_u_list, c_u_list_tan = add_tangents_opt ~tan:c_u_tan cost_params.c_u_list in
-  (* Step 1: directional derivative as automatically computed by our maths module *)
-  let dz_pred =
-    let state_params_tan =
-      { n_steps
-      ; x_0 = const x_0
-      ; f_x_list = f_x_list_tan
-      ; f_u_list = f_u_list_tan
-      ; f_t_list = f_t_list_tan
-      }
-    in
-    let cost_params_tan =
-      { c_xx_list = c_xx_list_tan
-      ; c_xu_list = c_xu_list_tan
-      ; c_uu_list = c_uu_list_tan
-      ; c_x_list = c_x_list_tan
-      ; c_u_list = c_u_list_tan
-      }
-    in
-    let x_list, _ = f ~state_params:state_params_tan ~cost_params:cost_params_tan in
-    List.map (List.tl_exn x_list) ~f:(fun x ->
-      let s = Tensor.shape (primal x) in
-      tangent x |> Option.value_exn |> Tensor.view_copy ~size:s)
-  in
-  (* step 2: finite-differences *)
-  let dz_fd =
-    (* create plus and minus disturbed parameters *)
-    let plus_minus ~tangents lst =
-      match tangents with
-      | None -> map_const lst, map_const lst
-      | Some tangents ->
-        let plus_minus =
-          List.map2_exn lst tangents ~f:(fun f_x vx ->
-            ( const Tensor.(f_x + mul_scalar vx Scalar.(f epsilon))
-            , const Tensor.(f_x - mul_scalar vx Scalar.(f epsilon)) ))
-        in
-        List.map plus_minus ~f:fst, List.map plus_minus ~f:snd
-    in
-    let plus_minus_opt ~tangents lst =
-      match tangents, lst with
-      | None, None -> None, None
-      | Some tangents, Some lst ->
-        let plus, minus = plus_minus ~tangents lst in
-        Some plus, Some minus
-      | _ -> assert false
-    in
-    let f_x_plus_list, f_x_minus_list =
-      plus_minus ~tangents:vf_x_list state_params.f_x_list
-    in
-    let f_u_plus_list, f_u_minus_list =
-      plus_minus ~tangents:vf_u_list state_params.f_u_list
-    in
-    let f_t_plus_list, f_t_minus_list =
-      plus_minus_opt ~tangents:vf_t_list state_params.f_t_list
-    in
-    let c_xx_plus_list, c_xx_minus_list =
-      plus_minus ~tangents:vc_xx_list cost_params.c_xx_list
-    in
-    let c_xu_plus_list, c_xu_minus_list =
-      plus_minus_opt ~tangents:vc_xu_list cost_params.c_xu_list
-    in
-    let c_uu_plus_list, c_uu_minus_list =
-      plus_minus ~tangents:vc_uu_list cost_params.c_uu_list
-    in
-    let c_x_plus_list, c_x_minus_list =
-      plus_minus_opt ~tangents:vc_x_list cost_params.c_x_list
-    in
-    let c_u_plus_list, c_u_minus_list =
-      plus_minus_opt ~tangents:vc_u_list cost_params.c_u_list
-    in
-    (* forward run with x plus *)
-    let state_params_tan_plus =
-      { n_steps
-      ; x_0 = const x_0
-      ; f_x_list = f_x_plus_list
-      ; f_u_list = f_u_plus_list
-      ; f_t_list = f_t_plus_list
-      }
-    in
-    let cost_params_tan_plus =
-      { c_xx_list = c_xx_plus_list
-      ; c_xu_list = c_xu_plus_list
-      ; c_uu_list = c_uu_plus_list
-      ; c_x_list = c_x_plus_list
-      ; c_u_list = c_u_plus_list
-      }
-    in
-    let zplusplus_list =
-      let x_list, _ =
-        f ~state_params:state_params_tan_plus ~cost_params:cost_params_tan_plus
-      in
-      List.map x_list ~f:primal
-    in
-    (* forward run with x minus *)
-    let state_params_tan_minus =
-      { n_steps
-      ; x_0 = const x_0
-      ; f_x_list = f_x_minus_list
-      ; f_u_list = f_u_minus_list
-      ; f_t_list = f_t_minus_list
-      }
-    in
-    let cost_params_tan_minus =
-      { c_xx_list = c_xx_minus_list
-      ; c_xu_list = c_xu_minus_list
-      ; c_uu_list = c_uu_minus_list
-      ; c_x_list = c_x_minus_list
-      ; c_u_list = c_u_minus_list
-      }
-    in
-    let zminusminus_list =
-      let x_list, _ =
-        f ~state_params:state_params_tan_minus ~cost_params:cost_params_tan_minus
-      in
-      List.map x_list ~f:primal
-    in
-    List.map2_exn
-      (List.tl_exn zplusplus_list)
-      (List.tl_exn zminusminus_list)
-      ~f:(fun zplusplus zminusminus ->
-        Tensor.(div_scalar (zplusplus - zminusminus) Scalar.(f Float.(2. * epsilon))))
-  in
-  let final =
-    List.map2_exn dz_pred dz_fd ~f:(fun pred fd ->
-      (* let e = Tensor.(norm (pred - fd) / norm fd) in *)
-      let tmp = Tensor.(abs ((pred - fd) / fd)) in
-      Tensor.print fd;
-      let e = Tensor.(maximum tmp) in
-      let _ = print [%message (Tensor.to_float0_exn e : float)] in
-      e)
-    |> List.fold ~init:Tensor.(f 0.) ~f:Tensor.( + )
-    |> Tensor.to_float0_exn
-  in
-  let _ = print [%message (Float.(final / of_int n_steps) : float)] in
-  Float.(final / of_int n_steps)
-*)

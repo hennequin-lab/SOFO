@@ -29,7 +29,7 @@ module Settings = struct
   let pulse_refr = 10
 end
 
-let n = 5000
+let n = 1000
 
 module RNN_P = struct
   type 'a p =

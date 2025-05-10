@@ -3,7 +3,7 @@ open Forward_torch
 open Torch
 include Optimizer_typ
 
-(* update loss and ggn at each step *)
+(* given info, update loss and ggn at each step *)
 let update_each_step ((loss, ggn) as accu) info =
   match info with
   | None -> accu
@@ -16,7 +16,7 @@ let update_each_step ((loss, ggn) as accu) info =
     in
     loss, ggn
 
-(* update loss at each step *)
+(* given infor, update loss at each step *)
 let update_loss_each_step accu info =
   match info with
   | None -> accu
@@ -24,6 +24,8 @@ let update_loss_each_step accu info =
     let loss = Maths.(accu + ell) in
     loss
 
+(* given [base] configuration, draw elements of tensor of [n_tangents;shape] 
+  from standard Gaussian such that the tangent is rank-one *)
 let rank_one_tensor ~(base : ('a, 'b) Config.Base.t) ~n_tangents shape =
   let components =
     List.map shape ~f:(fun dim ->
@@ -41,7 +43,8 @@ let rank_one_tensor ~(base : ('a, 'b) Config.Base.t) ~n_tangents shape =
   in
   Tensor.einsum ~equation ~path:None components
 
-(* sample tensors from Gaussian *)
+(* given [base] configuration, draw elements of tensor of [shape] 
+from standard Gaussian; optionally [rank_one] *)
 let sample_rand_tensor ~base ~rank_one ~shape =
   let[@warning "-8"] (n_tangents :: param_shape) = shape in
   if rank_one
@@ -78,7 +81,7 @@ module Adam (W : Wrapper.T) = struct
   let params state = state.theta
   let init theta = { theta; m = None; v = None; beta1_t = 1.; beta2_t = 1. }
 
-  (* gradient descent on theta *)
+  (* given adam [config], current [state] and gradient g, gradient descent on theta *)
   let update_theta_m_v ~(config : ('a, 'b) config) ~state g =
     let c = config in
     let beta1_t = Float.(state.beta1_t * c.beta_1) in
@@ -114,6 +117,8 @@ module Adam (W : Wrapper.T) = struct
     in
     { theta; m = Some m; v = Some v; beta1_t; beta2_t }
 
+  (* given adam [config], current [state], [data] and args, take an adam step
+    and returns loss and new state *)
   let step ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     (* initialise tangents *)
@@ -145,6 +150,7 @@ module Adam (W : Wrapper.T) = struct
     loss, new_state
 end
 
+(* SOFO optimizer *)
 module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
   module W = W
   module Mom = Momentum (W.P)
@@ -152,12 +158,15 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
   type ('a, 'b) config = ('a, 'b) Config.SOFO.t
   type ('c, _, _) init_opts = W.P.tagged -> 'c
 
+  (* adam optimizer for training aux parameters *)
   module O = Adam (struct
       module P = A.A
 
       type data = W.P.T.t * Tensor.t
       type args = unit
 
+      (* given update method [update], tangent [vs] and v^TGv [true_sketch], [init] state, [args]
+        and aux parameters lambda, compute mse between v^TGv and v^T\hat{G}v  *)
       let f ~update ~data:(vs, true_sketch) ~init ~args:() lambda =
         let open Maths in
         let g12v = A.g12v ~lambda (W.P.map vs ~f:const) in
@@ -184,15 +193,17 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
     ; sampling_state : A.sampling_state
     }
 
+  (* obtain parameters from state *)
   let params state = state.theta
 
+  (* given parameters, initialise state *)
   let init theta =
     let lambda = A.init () in
     let aux = O.init lambda in
     let sampling_state = A.init_sampling_state () in
     { t = 0; theta; aux; sampling_state }
 
-  (* orthogonalise tangents *)
+  (* orthogonalise vs *)
   let orthonormalise vs =
     let vtv =
       W.P.fold vs ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
@@ -209,7 +220,8 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
       let v = Tensor.(matmul normalizer v) in
       Tensor.reshape v ~shape:s)
 
-  (* initialise tangents, where each tangent is normalised. *)
+  (* given [base] configuration, [rank_one] condition, [n_tangents],
+    initialise tangents where each tangent is normalised *)
   let init_tangents ~base ~rank_one ~n_tangents theta =
     W.P.map theta ~f:(function
       | Prms.Const x ->
@@ -222,7 +234,7 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
       | Prms.Bounded (x, _, _) ->
         sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
 
-  (* fold vs over sets of v_i s, multiply with associated weights. *)
+  (* fold vs over sets of v_i s, multiply with associated [weights]. *)
   let weighted_vs_sum vs ~weights =
     W.P.map vs ~f:(fun v ->
       let v_i = Maths.tangent' v in
@@ -232,7 +244,7 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
       let s = if n_ws = 1 then s else n_ws :: s in
       Tensor.(view (matmul weights v_i) ~size:s))
 
-  (* calculate natural gradient = V(VtGtGV)^-1 V^t g *)
+  (* calculate natural gradient = [vs] ([ggn] + damping)^-1 [vtg] with [damping] coefficient *)
   let natural_g ?damping ~vs ~ggn vtg =
     let u, s, _ = Tensor.svd ~some:true ~compute_uv:true ggn in
     (* how each V should be weighted, as a row array *)
@@ -249,7 +261,8 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
     in
     weighted_vs_sum vs ~weights
 
-  (* gradient descent on theta *)
+  (* given [learning_rate], [theta] and gradient [dtheta], gradient descent on [theta]
+    to return new theta *)
   let update_theta ?learning_rate ~theta dtheta =
     match learning_rate with
     | Some eta ->
@@ -259,6 +272,8 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
       Tensor.(theta - mul_scalar g (Scalar.f eta))
     | None -> theta
 
+  (* given sofo [config], current [state], [data] and args, take sofo step on params
+  and returns loss and new state *)
   let step ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     (* initialise tangents *)
@@ -295,15 +310,6 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
     let loss = final_losses |> Maths.primal |> Tensor.mean |> Tensor.to_float0_exn in
     (* normalise ggn by batch size *)
     let final_ggn = Tensor.div_scalar_ final_ggn (Scalar.f Float.(of_int batch_size)) in
-    (* let _ =
-      if state.t % 2 = 1
-      then
-        final_ggn
-        |> Tensor.to_bigarray ~kind:config.base.ba_kind
-        |> fun x ->
-        Owl.Dense.Matrix.D.(transpose (diag x))
-        |> Owl.Dense.Matrix.D.save_txt ~out:"sketch"
-    in *)
     let loss_tangents = final_losses |> Maths.tangent |> Option.value_exn in
     let vtg =
       Tensor.(
@@ -339,7 +345,7 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
       } )
 end
 
-(* forward gradient descent;: g = V V^T g where V^Tg is obtained with forward AD (Kozak 2021) *)
+(* forward gradient descent; g = V V^T g where V^Tg is obtained with forward AD (Kozak 2021) *)
 module FGD (W : Wrapper.T) = struct
   module W = W
 
@@ -352,12 +358,15 @@ module FGD (W : Wrapper.T) = struct
     ; beta_t : float option
     }
 
+  (* obtain parameters from state *)
   let params state = state.theta
 
+  (* given parameters, initialise state *)
   let init ~(config : ('a, 'b) config) theta =
     { theta; g_avg = None; beta_t = Option.map config.momentum ~f:(fun _ -> 1.) }
 
-  (* initialise tangents, where each tangent is normalised. *)
+  (* given [base] configuration, [rank_one] condition, [n_tangents],
+    initialise tangents where each tangent is normalised *)
   let init_tangents ~base ~rank_one ~n_tangents theta =
     let vs =
       W.P.map theta ~f:(function
@@ -393,7 +402,7 @@ module FGD (W : Wrapper.T) = struct
     in
     normalize vs
 
-  (* fold vs over sets of v_i s, multiply with associated weights. *)
+  (* fold vs over sets of v_i s, multiply with associated [weights]. *)
   let weighted_vs_sum vs ~weights =
     W.P.map vs ~f:(fun v ->
       let v_i = Maths.tangent' v in
@@ -403,7 +412,8 @@ module FGD (W : Wrapper.T) = struct
       let s = if n_ws = 1 then s else n_ws :: s in
       Tensor.(view (matmul weights v_i) ~size:s))
 
-  (* gradient descent on theta *)
+  (* given [learning_rate], [theta] and gradient [dtheta], gradient descent on [theta]
+    to return new theta *)
   let update_theta ?learning_rate ~theta dtheta =
     match learning_rate with
     | Some eta ->
@@ -413,6 +423,8 @@ module FGD (W : Wrapper.T) = struct
       Tensor.(theta - mul_scalar g (Scalar.f eta))
     | None -> theta
 
+  (* given fgd [config], current [state], [data] and args, take fgd step on params
+  and returns loss and new state *)
   let step ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     let beta_t =
@@ -468,6 +480,7 @@ module FGD (W : Wrapper.T) = struct
     loss, { theta = new_theta; g_avg = Some vanilla_g_avg; beta_t }
 end
 
+(* stochastic gradient descent; theta = theta - learning_rate * g *)
 module SGD (W : Wrapper.T) = struct
   module W = W
 
@@ -480,12 +493,15 @@ module SGD (W : Wrapper.T) = struct
     ; beta_t : float option
     }
 
+  (* obtain parameters from state *)
   let params state = state.theta
 
+  (* given parameters, initialise state *)
   let init ~(config : ('a, 'b) config) theta =
     { theta; g_avg = None; beta_t = Option.map config.momentum ~f:(fun _ -> 1.) }
 
-  (* gradient descent on theta *)
+  (* given [learning_rate], [theta] and gradient [dtheta], gradient descent on [theta]
+    to return new theta *)
   let update_theta ?learning_rate ~theta dtheta =
     match learning_rate with
     | Some eta ->
@@ -495,6 +511,8 @@ module SGD (W : Wrapper.T) = struct
       Tensor.(theta - mul_scalar g (Scalar.f eta))
     | None -> theta
 
+  (* given sgd [config], current [state], [data] and args, take sgd step on params
+  and returns loss and new state *)
   let step ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     let beta_t =

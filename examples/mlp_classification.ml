@@ -20,7 +20,7 @@ let cifar =
   match Cmdargs.(get_string "-dataset") with
   | Some "mnist" -> false
   | Some "cifar" -> true
-  | _ -> failwith "-dataset [mnist | cifar ]"
+  | _ -> failwith "-dataset [mnist | cifar]"
 
 let output_dim = 10
 let batch_size = 256
@@ -335,10 +335,10 @@ module Make (D : Do_with_T) = struct
           let train_acc =
             test_eval ~train_data:(Some data) MLP.P.(const (value (O.params new_state)))
           in
-          let params = O.params state in
-          let n_params = O.W.P.T.numel (O.W.P.map params ~f:(fun p -> Prms.value p)) in 
+          (* let params = O.params state in *)
+          (* let n_params = O.W.P.T.numel (O.W.P.map params ~f:(fun p -> Prms.value p)) in  *)
           (* avg error *)
-          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float) (n_params:int)];
+          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float) ];
           (* save params *)
           if iter % 100 = 0
           then
@@ -373,8 +373,8 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
-        ; steps = 5
+              { default with base; learning_rate = Some 1e-6; eps = 1e-4 }
+        ; steps = 1
         }
     in
     Optimizer.Config.SOFO.
@@ -383,7 +383,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
-      ; aux = None
+      ; aux = Some aux
       }
 
   let init = O.init MLP.init

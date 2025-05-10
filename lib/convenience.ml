@@ -2,13 +2,13 @@ open Base
 open Torch
 open Forward_torch
 
+(* print message s *)
 let print s = Stdio.printf "%s\n%!" (Base.Sexp.to_string_hum s)
+
+(* transpose a in dim 0 and 1. *)
 let trans_2d a = Tensor.transpose ~dim0:1 ~dim1:0 a
 
-(* extend the shape of a from [shape] to [shape; 1] *)
-let extend_one a = Maths.view a ~size:(Tensor.shape (Maths.primal a) @ [ 1 ])
-
-(* get first dimension of a tensor *)
+(* get first dimension of a *)
 let first_dim a = List.hd_exn (Tensor.shape a)
 
 (* efficient implementation of a *@ (transpose b) *)
@@ -30,16 +30,18 @@ let top_eigval x =
   let _, s, _ = Tensor.svd ~some:true ~compute_uv:false x in
   Tensor.get_float1 s 0
 
-(* random gaussian tensor; normalised on rows *)
+(* given [device] and [kind], draw elements of tensor from N(0, sigma^2) of shape 
+  [a x b] and normalised on rows *)
 let gaussian_tensor_2d_normed ~device ~kind ~a ~b ~sigma =
   let normaliser = Float.(sigma / sqrt (of_int a)) in
   Tensor.mul_scalar_ (Tensor.randn ~kind ~device [ a; b ]) (Scalar.f normaliser)
 
-(* calculate num of training loops from num of epochs desired. *)
+(* given the [full_batch_size], [batch_size] and num_epochs_to_run,
+  calculate num of training loops. *)
 let num_train_loops ~full_batch_size ~batch_size num_epochs_to_run =
   Int.(full_batch_size * num_epochs_to_run / batch_size)
 
-(* calculate current epoch number *)
+(* given the [full_batch_size], [batch_size] and current iter t, calculate current epoch *)
 let epoch_of ~full_batch_size ~batch_size t =
   Float.(of_int t * of_int batch_size / of_int full_batch_size)
 

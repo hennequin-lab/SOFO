@@ -26,9 +26,7 @@ type ('a, 'prod) momentary_params_common =
   ; _Cuu : 'a option
   }
 
-(* everything has to be optional, because
-   perhaps none of those input parameters will have tangents.
-   common refers to what is commoro both primal and tangent LQR problems. *)
+(* common refers to what is common both primal and tangent LQR problems. *)
 type ('a, 'prod) momentary_params =
   { common : ('a, 'prod) momentary_params_common
   ; _f : 'a option

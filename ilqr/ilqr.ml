@@ -45,8 +45,8 @@ let _u ~tangent ~batch_const ~_k ~_K ~x ~alpha =
   in
   maybe_scalar_mul _k alpha +? tmp
 
+(* TODO: need Guillaume to proof-read this *)
 (* calculate the new u w.r.t. the difference between x_t and x_opt_t *)
-
 let forward
       ~batch_const
       ~gamma

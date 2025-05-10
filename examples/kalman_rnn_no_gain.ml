@@ -221,6 +221,7 @@ let simulate_1d ~f_name n_trials =
       save_txt to_save ~out:(in_dir f_name ^ "_" ^ Int.to_string i ^ "_model_prediction")))
 
 let _K = 128
+
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
@@ -445,7 +446,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
-      ; aux = Some aux
+      ; aux = None
       }
 
   let init = O.init RNN.init

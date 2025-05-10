@@ -3,6 +3,7 @@ open Forward_torch
 open Torch
 include Wrapper_typ
 
+(* feedforward network *)
 module Feedforward (F : Function) (L : Loss.T with type 'a with_args = 'a) = struct
   module P = F.P
 
@@ -23,6 +24,7 @@ module Feedforward (F : Function) (L : Loss.T with type 'a with_args = 'a) = str
       u init (Some (ell, Some delta_ggn))
 end
 
+(* recurrent network *)
 module Recurrent (F : Recurrent_function) (L : Loss.T with type 'a with_args = 'a) =
 struct
   module P = F.P

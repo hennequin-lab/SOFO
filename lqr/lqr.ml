@@ -16,6 +16,7 @@ let ( *@ ) a b =
 let maybe_btr = Option.map ~f:btr
 let maybe_inv_sqr = Option.map ~f:inv_sqr
 
+(* optionally a *@ b where the first dim of a and b is the batch dim *)
 let maybe_batch_matmul a b ~batch_const =
   if batch_const
   then (
@@ -27,6 +28,7 @@ let maybe_batch_matmul a b ~batch_const =
     | Some a, Some b -> Some (einsum [ a, "mab"; b, "mbc" ] "mac")
     | _ -> None)
 
+(* optionally a + b *)
 let ( +? ) a b =
   match a, b with
   | None, None -> None
@@ -34,6 +36,7 @@ let ( +? ) a b =
   | None, Some b -> Some b
   | Some a, Some b -> Some (a + b)
 
+(* optionally a - b *)
 let ( -? ) a b =
   match a, b with
   | None, None -> None
@@ -41,22 +44,25 @@ let ( -? ) a b =
   | None, Some b -> Some b
   | Some a, Some b -> Some (a - b)
 
+(* optionally f v *)
 let ( *? ) f v =
   match f, v with
   | Some f, Some v -> Some (f v)
   | _ -> None
 
+(* optionally unsqueeze a at [dim] *)
 let maybe_unsqueeze ~dim a =
   match a with
   | None -> None
   | Some a -> Some (unsqueeze a ~dim)
 
+(* optionally squeeze a at [dim] *)
 let maybe_squeeze ~dim a =
   match a with
   | None -> None
   | Some a -> Some (squeeze a ~dim)
 
-(* a + m *@ b *)
+(* optionally a + m *@ b *)
 let maybe_force a m b =
   match a, m, b with
   | Some a, Some m, Some b -> Some (a + (m *@ b))
@@ -64,11 +70,13 @@ let maybe_force a m b =
   | _, Some m, Some b -> Some (m *@ b)
   | _ -> None
 
+(* optionally einsum a and b *)
 let maybe_einsum (a, opsA) (b, opsB) opsC =
   match a, b with
   | Some a, Some b -> Some (einsum [ a, opsA; b, opsB ] opsC)
   | _ -> None
 
+(* solves (LL^T) x = - _b *)
 let neg_inv_symm ~is_vector _b (ell, ell_T) =
   match ell, ell_T with
   | Some ell, Some ell_T ->
@@ -139,6 +147,7 @@ let backward_common ~batch_const (common : (t, t -> t) momentary_params_common l
   in
   info
 
+(* given backward_common_info, [_f] and _qu, compute _k *)
 let _k ~tangent ~batch_const ~(z : backward_common_info) ~_f _qu =
   match tangent, batch_const with
   | true, true ->
@@ -188,6 +197,7 @@ let _k ~tangent ~batch_const ~(z : backward_common_info) ~_f _qu =
      | Some _k_unsqueezed ->
        Some (reshape _k_unsqueezed ~shape:(List.take (shape _k_unsqueezed) 2)))
 
+(* compute _qu and _qx *)
 let _qu_qx ~tangent ~batch_const ~z ~_cu ~_cx ~_f ~_Fu_prod ~_Fx_prod _v =
   let tmp =
     let tmp2 =
@@ -201,6 +211,7 @@ let _qu_qx ~tangent ~batch_const ~z ~_cu ~_cx ~_f ~_Fu_prod ~_Fx_prod _v =
   in
   _cu +? (_Fu_prod *? tmp), _cx +? (_Fx_prod *? tmp)
 
+(* compute value function v *)
 let v ~tangent ~batch_const ~_K ~_qx ~_qu =
   let tmp =
     match tangent, batch_const with
@@ -258,6 +269,7 @@ let backward
   in
   info
 
+(* compute control _u *)
 let _u ~tangent ~batch_const ~_k ~_K ~x =
   let tmp =
     match tangent, batch_const with
@@ -268,8 +280,10 @@ let _u ~tangent ~batch_const ~_k ~_K ~x =
   in
   _k +? tmp
 
+(* compute state _x *)
 let _x ~_f ~_Fx_prod2 ~_Fu_prod2 ~x ~u = _f +? (_Fx_prod2 *? x) +? (_Fu_prod2 *? u)
 
+(* forward loop of lqr to compute solution (u and x) *)
 let forward ?(tangent = false) ~batch_const params (backward_info : backward_info list) =
   let open Params in
   (* u goes from 0 to T-1, x goes from 1 to T *)
@@ -297,6 +311,7 @@ let forward ?(tangent = false) ~batch_const params (backward_info : backward_inf
   List.rev solution
 
 (* when batch_const is true, _Fx_prods, _Fu_prods, _Cxx, _Cxu, _Cuu has no leading batch dimension and special care needs to be taken to deal with these *)
+(* given parameters, run backward and forward passes in LQR to compute optimal u and x *)
 let _solve ?(batch_const = false) p =
   let common_info =
     backward_common ~batch_const (List.map p.Params.params ~f:(fun x -> x.common))
@@ -313,8 +328,8 @@ let _solve ?(batch_const = false) p =
   sol, bck
 
 (* backward pass and forward pass with surrogate rhs for the tangent problem;
-   s is the solution obtained from lqr through the primals
-   and p is the full set of parameters *)
+   [s] is the solution obtained from lqr through the primals
+   and [p] is the full set of parameters *)
 let tangent_solve
       ~batch_const
       common_info
@@ -467,6 +482,8 @@ let tangent_solve
   in
   List.rev solution
 
+(* implicitly differentiate through LQR by solving the primal problem before solving the tangent
+  problem; return optimal u and x *)
 let solve ?(batch_const = false) p =
   (* solve the primal problem first *)
   let _p = Option.map ~f:(fun x -> Maths.const (Maths.primal x)) in
