@@ -1,6 +1,5 @@
 (** Learning a delayed addition task to compare SOFO with adam. *)
 
-open Printf
 open Base
 open Owl
 open Torch
@@ -10,7 +9,6 @@ module Arr = Dense.Ndarray.S
 module Mat = Dense.Matrix.S
 
 let batch_size = 256
-let max_iter = 10000
 
 let _ =
   Random.init 1999;
@@ -157,7 +155,9 @@ type param_name =
   | B
   | O
 
-let n_params_c, n_params_b, n_params_e, n_params_o = Int.(_K - 6), 2, 2, 2
+let param_names_list = [ C; B; O ]
+let n_params_c, n_params_b, n_params_o = Int.(_K - 4), 2, 2
+let n_params_list = [ n_params_c; n_params_b; n_params_o ]
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -185,6 +185,28 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let random_params ~shape _K =
     Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
 
+  let get_shapes (param_name : param_name) =
+    match param_name with
+    | C -> [ n; n ]
+    | B -> [ 3; n ]
+    | O -> [ n; 2 ]
+
+  let get_n_params (param_name : param_name) =
+    match param_name with
+    | C -> n_params_c
+    | B -> n_params_b
+    | O -> n_params_o
+
+  let get_n_params_before_after (param_name : param_name) =
+    let n_params_prefix_suffix_sums = Convenience.prefix_suffix_sums n_params_list in
+    let param_idx =
+      match param_name with
+      | C -> 0
+      | B -> 1
+      | O -> 2
+    in
+    List.nth_exn n_params_prefix_suffix_sums param_idx
+
   (* approximation defined implicitly via Gv products *)
   let g12v ~(lambda : A.M.t) (v : P.M.t) : P.M.t =
     let open Maths in
@@ -192,24 +214,33 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let c = tmp_einsum lambda.c_left lambda.c_right v.c in
     let b = tmp_einsum lambda.b_left lambda.b_right v.b in
     let o = tmp_einsum lambda.o_left lambda.o_right v.o in
-    { c; b;  o }
+    { c; b; o }
 
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~local ~param_name ~n_per_param v =
     let sample = if local then zero_params else random_params in
-    let c = sample ~shape:[ n; n ] n_per_param in
-    let b = sample ~shape:[ 3; n ] n_per_param in
-    let o = sample ~shape:[ n; 2 ] n_per_param in
-    let params_tmp = RNN_P.{ c; b;  o } in
+    let c = sample ~shape:(get_shapes C) n_per_param in
+    let b = sample ~shape:(get_shapes B) n_per_param in
+    let o = sample ~shape:(get_shapes O) n_per_param in
+    let params_tmp = RNN_P.{ c; b; o } in
     match param_name with
     | C -> { params_tmp with c = v }
     | B -> { params_tmp with b = v }
     | O -> { params_tmp with o = v }
 
   let random_localised_vs _K : P.T.t =
-    { c = random_params ~shape:[ n; n ] _K
-    ; b = random_params ~shape:[ 3; n ] _K
-    ; o = random_params ~shape:[ n; 2 ] _K
+    let random_localised_param_name param_name =
+      let w_shape = get_shapes param_name in
+      let before, after = get_n_params_before_after param_name in
+      let w = random_params ~shape:w_shape (get_n_params param_name) in
+      let zeros_before = zero_params ~shape:w_shape before in
+      let zeros_after = zero_params ~shape:w_shape after in
+      let final = Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0 in
+      final
+    in
+    { c = random_localised_param_name C
+    ; b = random_localised_param_name B
+    ; o = random_localised_param_name O
     }
 
   let eigenvectors_for_each_params ~local ~lambda ~param_name =
@@ -262,7 +293,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     local_vs |> localise ~local ~param_name ~n_per_param
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ C; B;  O ] in
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
         eigenvectors_for_each_params ~local:true ~lambda ~param_name)

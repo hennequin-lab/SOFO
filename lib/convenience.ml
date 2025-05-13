@@ -76,3 +76,14 @@ let expand_dim x =
           ~kind:(Tensor.kind x_)
           (x_shape_exp_last @ [ 1 ])))
     ~dim:(List.length x_shape - 1)
+
+(* for a list of integers, return a list of (prefix sum, suffix sum) *)
+let prefix_suffix_sums (params : int list) : (int * int) list =
+  let total = List.fold_left ~f:(fun a b -> a + b) ~init:0 params in
+  let rec aux acc before = function
+    | [] -> List.rev acc
+    | x :: xs ->
+      let after = total - before - x in
+      aux ((before, after) :: acc) (before + x) xs
+  in
+  aux [] 0 params

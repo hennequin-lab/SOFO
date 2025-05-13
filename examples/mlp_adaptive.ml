@@ -118,11 +118,11 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
 
   let init_sampling_state () = ()
 
-  let zero_params _K =
-    Tensor.zeros ~device:base.device ~kind:base.kind Int.[ _K; d + 1; d ]
+  let zero_params ~shape _K =
+    Tensor.zeros ~device:base.device ~kind:base.kind (_K :: shape)
 
-  let random_params _K =
-    Tensor.randn ~device:base.device ~kind:base.kind Int.[ _K; d + 1; d ]
+  let random_params ~shape _K =
+    Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
 
   (* approximation defined implicitly via Gv products *)
   let g12v ~(lambda : A.M.t) (v : P.M.t) : P.M.t =
@@ -133,16 +133,23 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
 
   let localise ~id:i ~_K v =
     List.init n_layers ~f:(fun id ->
-      let w = if id = i then v else zero_params _K in
+      let w = if id = i then v else zero_params ~shape:[ d + 1; d ] _K in
       { id; w })
 
-  (* let random_localised_vs _K : P.T.t =
-     localise ~id:(Random.int n_layers) ~_K (random_params _K) *)
+  let n_per_layer = _K / n_layers
+
   let random_localised_vs _K : P.T.t =
-    List.init n_layers ~f:(fun id -> { id; w = random_params _K })
+    List.init n_layers ~f:(fun id ->
+      let w_shape = [ d + 1; d ] in
+      let w = random_params ~shape:w_shape n_per_layer in
+      let zeros_before = zero_params ~shape:w_shape (n_per_layer * id) in
+      let zeros_after = zero_params ~shape:w_shape (n_per_layer * (n_layers - 1 - id)) in
+      let final =
+        if n_layers = 1 then w else Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0
+      in
+      { id; w = final })
 
   let eigenvectors ~lambda () (_K : int) =
-    let n_per_layer = _K / n_layers in
     let vs =
       (* for each layer, compute the eigenvectors of corresponding ggn and sample from it *)
       List.foldi lambda ~init:None ~f:(fun id accu lambda ->

@@ -93,8 +93,6 @@ let batch_size = 256
 let num_epochs_to_run = 2000
 let n_trials_simulation = 10
 let train_data = data 32
-let full_batch_size = Arr.(shape train_data).(1)
-let train_data_batch = get_batch train_data
 let test_horizon = 10000
 let full_batch_size = Arr.(shape train_data).(1)
 let _ = Convenience.print [%message (full_batch_size : int)]
@@ -144,6 +142,7 @@ type param_name =
   | A
 
 let n_params_w, n_params_c, n_params_a = 60, 60, Int.(_K - 120)
+let n_params_list = [ n_params_w; n_params_c; n_params_a ]
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -171,6 +170,28 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let random_params ~shape _K =
     Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
 
+  let get_shapes (param_name : param_name) =
+    match param_name with
+    | W -> [ dh; d ]
+    | C -> [ d + 1; dh ]
+    | A -> [ d; d ]
+
+  let get_n_params (param_name : param_name) =
+    match param_name with
+    | W -> n_params_w
+    | C -> n_params_c
+    | A -> n_params_a
+
+  let get_n_params_before_after (param_name : param_name) =
+    let n_params_prefix_suffix_sums = Convenience.prefix_suffix_sums n_params_list in
+    let param_idx =
+      match param_name with
+      | W -> 0
+      | C -> 1
+      | A -> 2
+    in
+    List.nth_exn n_params_prefix_suffix_sums param_idx
+
   (* approximation defined implicitly via Gv products *)
   let g12v ~(lambda : A.M.t) (v : P.M.t) : P.M.t =
     let open Maths in
@@ -183,9 +204,9 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~local ~param_name ~n_per_param v =
     let sample = if local then zero_params else random_params in
-    let w = sample ~shape:[ dh; d ] n_per_param in
-    let c = sample ~shape:[ d + 1; dh ] n_per_param in
-    let a = sample ~shape:[ d; d ] n_per_param in
+    let w = sample ~shape:(get_shapes W) n_per_param in
+    let c = sample ~shape:(get_shapes C) n_per_param in
+    let a = sample ~shape:(get_shapes A) n_per_param in
     let params_tmp = PP.{ w; c; a } in
     match param_name with
     | W -> { params_tmp with w = v }
@@ -193,9 +214,18 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     | A -> { params_tmp with a = v }
 
   let random_localised_vs _K : P.T.t =
-    { w = random_params ~shape:[ dh; d ] _K
-    ; c = random_params ~shape:[ d + 1; dh ] _K
-    ; a = random_params ~shape:[ d; d ] _K
+    let random_localised_param_name param_name =
+      let w_shape = get_shapes param_name in
+      let before, after = get_n_params_before_after param_name in
+      let w = random_params ~shape:w_shape (get_n_params param_name) in
+      let zeros_before = zero_params ~shape:w_shape before in
+      let zeros_after = zero_params ~shape:w_shape after in
+      let final = Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0 in
+      final
+    in
+    { w = random_localised_param_name W
+    ; c = random_localised_param_name C
+    ; a = random_localised_param_name A
     }
 
   let eigenvectors_for_each_params ~local ~lambda ~param_name =
@@ -391,7 +421,6 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 100000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

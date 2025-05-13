@@ -460,11 +460,15 @@ type param_name =
   | Log_obs_var
   | Scaling_factor
 
+let param_names_list = [ Q; D; C; Log_obs_var; Scaling_factor ]
 let n_params_q = 50
 let n_params_d = 10
 let n_params_c = Int.(_K - 2 - n_params_d - n_params_q)
 let n_params_log_obs_var = 1
 let n_params_scaling_factor = 1
+
+let n_params_list =
+  [ n_params_q; n_params_d; n_params_c; n_params_log_obs_var; n_params_scaling_factor ]
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -496,6 +500,34 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let random_params ~shape _K =
     Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
 
+  let get_shapes (param_name : param_name) =
+    match param_name with
+    | Q -> [ Dims.n; Dims.n ]
+    | D -> [ 1; Dims.n ]
+    | C -> [ Dims.n; Dims.o ]
+    | Log_obs_var -> [ 1 ]
+    | Scaling_factor -> [ 1 ]
+
+  let get_n_params (param_name : param_name) =
+    match param_name with
+    | Q -> n_params_q
+    | D -> n_params_d
+    | C -> n_params_c
+    | Log_obs_var -> n_params_log_obs_var
+    | Scaling_factor -> n_params_scaling_factor
+
+  let get_n_params_before_after (param_name : param_name) =
+    let n_params_prefix_suffix_sums = Convenience.prefix_suffix_sums n_params_list in
+    let param_idx =
+      match param_name with
+      | Q -> 0
+      | D -> 1
+      | C -> 2
+      | Log_obs_var -> 3
+      | Scaling_factor -> 4
+    in
+    List.nth_exn n_params_prefix_suffix_sums param_idx
+
   (* approximation defined implicitly via Gv products *)
   let g12v ~(lambda : A.M.t) (v : P.M.t) : P.M.t =
     let open Maths in
@@ -525,11 +557,11 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~local ~param_name ~n_per_param v =
     let sample = if local then zero_params else random_params in
-    let _q = sample ~shape:[ Dims.n; Dims.n ] n_per_param in
-    let _d = sample ~shape:[ 1; Dims.n ] n_per_param in
-    let _c = sample ~shape:[ Dims.n; Dims.o ] n_per_param in
-    let _log_obs_var = sample ~shape:[ 1 ] n_per_param in
-    let _scaling_factor = sample ~shape:[ 1 ] n_per_param in
+    let _q = sample ~shape:(get_shapes Q) n_per_param in
+    let _d = sample ~shape:(get_shapes D) n_per_param in
+    let _c = sample ~shape:(get_shapes C) n_per_param in
+    let _log_obs_var = sample ~shape:(get_shapes Log_obs_var) n_per_param in
+    let _scaling_factor = sample ~shape:(get_shapes Scaling_factor) n_per_param in
     let params_tmp = PP.{ _q; _d; _c; _log_obs_var; _scaling_factor } in
     match param_name with
     | Q -> { params_tmp with _q = v }
@@ -539,11 +571,20 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     | Scaling_factor -> { params_tmp with _scaling_factor = v }
 
   let random_localised_vs _K : P.T.t =
-    { _q = random_params ~shape:[ Dims.n; Dims.n ] _K
-    ; _d = random_params ~shape:[ 1; Dims.n ] _K
-    ; _c = random_params ~shape:[ Dims.n; Dims.o ] _K
-    ; _log_obs_var = random_params ~shape:[ 1 ] _K
-    ; _scaling_factor = random_params ~shape:[ 1 ] _K
+    let random_localised_param_name param_name =
+      let w_shape = get_shapes param_name in
+      let before, after = get_n_params_before_after param_name in
+      let w = random_params ~shape:w_shape (get_n_params param_name) in
+      let zeros_before = zero_params ~shape:w_shape before in
+      let zeros_after = zero_params ~shape:w_shape after in
+      let final = Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0 in
+      final
+    in
+    { _q = random_localised_param_name Q
+    ; _d = random_localised_param_name D
+    ; _c = random_localised_param_name C
+    ; _log_obs_var = random_localised_param_name Log_obs_var
+    ; _scaling_factor = random_localised_param_name Scaling_factor
     }
 
   let eigenvectors_for_each_params ~local ~lambda ~param_name =
@@ -604,7 +645,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     local_vs |> localise ~local ~param_name ~n_per_param
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ Q; D; C; Log_obs_var; Scaling_factor ] in
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
         eigenvectors_for_each_params ~local:true ~lambda ~param_name)

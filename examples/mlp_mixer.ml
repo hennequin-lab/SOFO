@@ -28,7 +28,6 @@ let output_dim = 10
 
 (* Batch configuration *)
 let full_batch_size = 60_000
-
 let batch_size = 8
 let n_epochs_to_run = 70
 let max_iter = Int.(full_batch_size * n_epochs_to_run / batch_size)
@@ -38,7 +37,7 @@ let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size t
 let n_blocks = 2
 let blocks_list = List.range 0 n_blocks
 let n_layers = (n_blocks * 4) + 2
-let in_channels = if cifar then 3 else 1 
+let in_channels = if cifar then 3 else 1
 let patch_size = if cifar then 4 else 7
 
 (* number of patches *)
@@ -127,7 +126,6 @@ module MLP_mixer = struct
       Maths.einsum [ hidden_appended, "mcq"; theta.(layer_idx2).w, "qs" ] "msc"
     in
     output
-
 
   let channel_mixer ~(theta : P.M.t) ~layer_idx1 ~layer_idx2 x =
     let hidden =
@@ -290,7 +288,7 @@ let train_set, test_set =
     let x_train = Owl.Arr.((x_train - mu) / sigma) in
     let x_test = Owl.Arr.((x_test - mu) / sigma) in
     (* transpose so dim is [bs x channels x height x width]*)
-    let transpose_ =  Owl.Dense.Ndarray.S.transpose ~axis:[|0;3;1;2|] in 
+    let transpose_ = Owl.Dense.Ndarray.S.transpose ~axis:[| 0; 3; 1; 2 |] in
     (transpose_ x_train, y_train), (transpose_ x_test, y_test))
   else (
     let dataset_mnist typ =
@@ -324,7 +322,7 @@ let sample_data (set_x, set_y) =
         let ids = List.init batch_size ~f:(fun _ -> Random.int a) in
         let xs = Tensor.of_bigarray ~device:base.device (Mat.get_fancy [ L ids ] set_x) in
         let ys = Tensor.of_bigarray ~device:base.device (Mat.get_fancy [ L ids ] set_y) in
-         xs, ys))
+        xs, ys))
   else (
     let mnist_input_dim = 28 in
     let a = Mat.row_num set_x in
@@ -499,10 +497,16 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     |> List.to_array
 
   let random_localised_vs _K : P.T.t =
-    List.map layer_list ~f:(fun layer_name ->
+    let n_per_param = _K_w in
+    List.mapi layer_list ~f:(fun i layer_name ->
       let w_shape = get_shapes layer_name in
-      let w = random_params ~shape:w_shape _K in
-      MLP_Layer.{ layer_name; w })
+      let w = random_params ~shape:w_shape n_per_param in
+      let zeros_before = zero_params ~shape:w_shape (n_per_param * i) in
+      let zeros_after = zero_params ~shape:w_shape (n_per_param * (n_layers - 1 - i)) in
+      let final =
+        if n_layers = 1 then w else Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0
+      in
+      MLP_Layer.{ layer_name; w = final })
     |> List.to_array
 
   let eigenvectors_for_each_params ~lambda ~(param_name : layer) =
@@ -680,7 +684,7 @@ module Make (D : Do_with_T) = struct
           (* let params = O.params state in 
           let n_params = O.W.P.T.numel (O.W.P.map params ~f:(fun p -> Prms.value p)) in *)
           (* avg error *)
-          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float) ];
+          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float)];
           (* save params *)
           if iter % 100 = 0
           then

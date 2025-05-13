@@ -62,7 +62,7 @@ module MLP = struct
           ~dim:1
       in
       let pre_activation = Maths.(accu *@ wb.w) in
-      if false && i = Array.length layer_sizes - 1
+      if i = Array.length layer_sizes - 1
       then pre_activation
       else Maths.relu pre_activation)
 
@@ -206,11 +206,9 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     match id with
     | 0 -> [ input_size + 1; layer_sizes.(0) ]
     | 1 -> [ layer_sizes.(0) + 1; layer_sizes.(1) ]
-    | 2 -> [ layer_sizes.(1) + 1; layer_sizes.(2) ]
     | _ -> assert false
 
   (* set tangents = zero for other parameters but v for this parameter *)
-
   let localise ~local ~id:i ~n_per_param v =
     Array.init n_layers ~f:(fun id ->
       let sample = if local then zero_params else random_params in
@@ -222,10 +220,16 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       if id = i then { params_tmp with w = v } else params_tmp)
 
   let random_localised_vs _K : P.T.t =
+    let n_per_param = n_params_w in
     Array.init n_layers ~f:(fun id ->
       let w_shape = get_shapes id in
-      let w = random_params ~shape:w_shape _K in
-      MLP_Layer.{ id; w })
+      let w = random_params ~shape:w_shape n_per_param in
+      let zeros_before = zero_params ~shape:w_shape (n_per_param * id) in
+      let zeros_after = zero_params ~shape:w_shape (n_per_param * (n_layers - 1 - id)) in
+      let final =
+        if n_layers = 1 then w else Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0
+      in
+      MLP_Layer.{ id; w = final })
 
   let eigenvectors_for_each_params ~local ~lambda ~id =
     let left, right, n_per_param = lambda.w_left, lambda.w_right, n_params_w in
@@ -338,7 +342,7 @@ module Make (D : Do_with_T) = struct
           (* let params = O.params state in *)
           (* let n_params = O.W.P.T.numel (O.W.P.map params ~f:(fun p -> Prms.value p)) in  *)
           (* avg error *)
-          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float) ];
+          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float)];
           (* save params *)
           if iter % 100 = 0
           then
@@ -373,16 +377,16 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-6; eps = 1e-4 }
+              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
         ; steps = 1
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.03
+      ; learning_rate = Some 0.01
       ; n_tangents = _K
       ; rank_one = false
-      ; damping = Some 1e-3
+      ; damping = Some 1e-5
       ; aux = Some aux
       }
 

@@ -304,8 +304,11 @@ type param_name =
   | A
   | O
 
-let n_params_a, n_params_c, n_params_w, n_params_b, n_params_o =
-  Int.(_K - 210), 100, 100, 5, 5
+let n_params_w, n_params_c, n_params_b, n_params_a, n_params_o =
+  100, 100, 5, Int.(_K - 210), 5
+
+let n_params_list = [ n_params_w; n_params_c; n_params_b; n_params_a; n_params_o ]
+
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -337,6 +340,36 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let random_params ~shape _K =
     Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
 
+  let param_names_list = [ W; C; B; A; O ]
+
+  let get_shapes (param_name : param_name) =
+    match param_name with
+    | W -> [ c'; r ]
+    | C -> [ r + 1; c' ]
+    | B -> [ Int.((2 * Settings.cl) + 2); r ]
+    | A -> [ r; r ]
+    | O -> [ r; Settings.cl ]
+
+  let get_n_params (param_name : param_name) =
+    match param_name with
+    | W -> n_params_w
+    | C -> n_params_c
+    | B -> n_params_b
+    | A -> n_params_a
+    | O -> n_params_o
+
+  let get_n_params_before_after (param_name : param_name) =
+    let n_params_prefix_suffix_sums = Convenience.prefix_suffix_sums n_params_list in
+    let param_idx =
+      match param_name with
+      | W -> 0
+      | C -> 1
+      | B -> 2
+      | A -> 3
+      | O -> 4
+    in
+    List.nth_exn n_params_prefix_suffix_sums param_idx
+
   (* approximation defined implicitly via Gv products *)
   let g12v ~(lambda : A.M.t) (v : P.M.t) : P.M.t =
     let open Maths in
@@ -351,11 +384,11 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~local ~param_name ~n_per_param v =
     let sample = if local then zero_params else random_params in
-    let w = sample ~shape:[ c'; r ] n_per_param in
-    let c = sample ~shape:[ r + 1; c' ] n_per_param in
-    let b = sample ~shape:[ Int.((2 * Settings.cl) + 2); r ] n_per_param in
-    let a = sample ~shape:[ r; r ] n_per_param in
-    let o = sample ~shape:[ r; Settings.cl ] n_per_param in
+    let w = sample ~shape:(get_shapes W) n_per_param in
+    let c = sample ~shape:(get_shapes C) n_per_param in
+    let b = sample ~shape:(get_shapes B) n_per_param in
+    let a = sample ~shape:(get_shapes A) n_per_param in
+    let o = sample ~shape:(get_shapes O) n_per_param in
     let params_tmp = RNN_P.{ w; c; b; a; o } in
     match param_name with
     | W -> { params_tmp with w = v }
@@ -365,11 +398,20 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     | O -> { params_tmp with o = v }
 
   let random_localised_vs _K : P.T.t =
-    { w = random_params ~shape:[ c'; r ] _K
-    ; c = random_params ~shape:[ r + 1; c' ] _K
-    ; b = random_params ~shape:[ Int.((2 * Settings.cl) + 2); r ] _K
-    ; a = random_params ~shape:[ r; r ] _K
-    ; o = random_params ~shape:[ r; Settings.cl ] _K
+    let random_localised_param_name param_name =
+      let w_shape = get_shapes param_name in
+      let before, after = get_n_params_before_after param_name in
+      let w = random_params ~shape:w_shape (get_n_params param_name) in
+      let zeros_before = zero_params ~shape:w_shape before in
+      let zeros_after = zero_params ~shape:w_shape after in
+      let final = Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0 in
+      final
+    in
+    { w = random_localised_param_name W
+    ; c = random_localised_param_name C
+    ; b = random_localised_param_name B
+    ; a = random_localised_param_name A
+    ; o = random_localised_param_name O
     }
 
   let eigenvectors_for_each_params ~local ~lambda ~param_name =
@@ -424,7 +466,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     local_vs |> localise ~local ~param_name ~n_per_param
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ C; B; W; A; O ] in
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
         eigenvectors_for_each_params ~local:true ~lambda ~param_name)
