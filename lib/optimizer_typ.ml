@@ -1,17 +1,20 @@
+(** Basic optimizer type. *)
 module type T = sig
+
+  (** W is the wrapper type that defines the forward computational graph. *)
   module W : Wrapper.T
 
   type ('a, 'b) config
   type state
   type ('a, 'b, 'c) init_opts
 
-  (* extract parameters from state *)
+  (** Extract parameters from state. *)
   val params : state -> W.P.tagged
 
-  (* initialise state from parameters *)
+  (** Initialise state from parameters. *)
   val init : (state, 'a, 'b) init_opts
 
-  (* given current state and data, return loss and updated state *)
+  (** Given [config], current [state], [data] and additional [args], return loss and updated state. *)
   val step
     :  config:('a, 'b) config
     -> state:state
@@ -21,6 +24,7 @@ module type T = sig
 end
 
 module Config = struct
+  (** Basic config, specifying device, kind and BigArray kind.*)
   module Base = struct
     type ('a, 'b) t =
       { device : Torch_core.Device.t
@@ -28,6 +32,7 @@ module Config = struct
       ; ba_kind : ('a, 'b) Bigarray.kind
       }
 
+    (** Default option for the base config. *)
     let default =
       { device = Torch.Device.cuda_if_available ()
       ; kind = Torch_core.Kind.(T f32)
@@ -35,6 +40,7 @@ module Config = struct
       }
   end
 
+  (** SOFO config. *)
   module SOFO = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t
@@ -55,6 +61,7 @@ module Config = struct
       }
   end
 
+  (** Forward Gradient Descent config. *)
   module FGD = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t
@@ -73,6 +80,7 @@ module Config = struct
       }
   end
 
+  (** Stochastic Gradient Descent config. *)
   module SGD = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t
@@ -83,6 +91,7 @@ module Config = struct
     let default = { base = Base.default; learning_rate = None; momentum = None }
   end
 
+  (** Adam config. *)
   module Adam = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t

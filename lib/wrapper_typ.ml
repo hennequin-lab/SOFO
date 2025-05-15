@@ -1,30 +1,38 @@
 open Forward_torch
 open Torch
 
+(** Forward function. *)
 module type Function = sig
   module P : Prms.T
 
   type input
 
-  (* forward pass where we compute output of network given parameters theta and input x. *)
+  (** Forward pass that computes output of network given parameters [theta] and [input]. *)
   val f : theta:P.M.t -> input:input -> Maths.t
 end
 
+(** Recurrent function. *)
 module type Recurrent_function = sig
   module P : Prms.T
 
   type input
 
+  (** One-step forward that computes the next state given parameters [theta] and [input]. *)
   val f : theta:P.M.t -> input:input -> Maths.t -> Maths.t
 end
 
+(** Basic wrapper type, which is the forward computational graph of the network. *)
 module type T = sig
   module P : Prms.T
 
+  (** Type of data to be passed into the network. *)
   type data
+
+  (** Type of any additional arguments. *)
   type args
 
-  (* given an update function, the data, the initial value of the losses and ggn, return the final losses and ggn. *)
+  (** Given an update function [update], [data], the initial value of the losses and ggn [init] and [args],
+   return the final losses and ggn. *)
   val f
     :  update:
          [ `loss_only of 'a -> Maths.t option -> 'a

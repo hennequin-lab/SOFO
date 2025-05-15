@@ -1,15 +1,15 @@
+(** Types used in linear quadratic regulator (LQR) function. conventions is, for each batch element:
+   x_(t+1) = x_t A + u_t B + f_t. *)
 open Base
 open Forward_torch
 
-(* conventions is, for each batch element:
-   x_(t+1) = x_t A + u_t B *)
-
+(** Type of all elements in LQR pass. This can be lazily evaluated. *)
 type 'a prod =
   { primal : 'a -> 'a
   ; tangent : ('a -> 'a) option
   }
 
-(* everything has to be optional, because
+(** Everything has to be optional, because
    perhaps none of those input parameters will have tangents *)
 type ('a, 'prod) momentary_params_common =
   { _Fx_prod : 'prod option (* Av product *)
@@ -26,9 +26,7 @@ type ('a, 'prod) momentary_params_common =
   ; _Cuu : 'a option
   }
 
-(* everything has to be optional, because
-   perhaps none of those input parameters will have tangents.
-   common refers to what is commoro both primal and tangent LQR problems. *)
+(** common refers to what is commoro both primal and tangent LQR problems. *)
 type ('a, 'prod) momentary_params =
   { common : ('a, 'prod) momentary_params_common
   ; _f : 'a option
@@ -36,7 +34,6 @@ type ('a, 'prod) momentary_params =
   ; _cu : 'a option
   }
 
-(* params starts at time idx 0 and ends at time index T. Note that at time index T only _Cxx and _cx is used *)
 module Params = struct
   type ('a, 'p) p =
     { x0 : 'a
@@ -45,6 +42,7 @@ module Params = struct
   [@@deriving prms]
 end
 
+(** In Solution u indexes from 0 to T-1 while x indexes from 1 to T. *)
 module Solution = struct
   type 'a p =
     { u : 'a

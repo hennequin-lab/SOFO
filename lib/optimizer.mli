@@ -1,3 +1,4 @@
+(** Four types of optimizers supported in this library. *)
 include module type of Optimizer_typ
 
 module SOFO (W : Wrapper.T) :
