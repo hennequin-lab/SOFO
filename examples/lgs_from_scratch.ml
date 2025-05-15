@@ -627,6 +627,16 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     ; b_0 = zero_params ~shape:[ n; n ] _K
     }
 
+  (* let random_localised_vs _K : P.T.t =
+    { q = random_params ~shape:[ n; n ] _K
+    ; d = random_params ~shape:[ 1; n ] _K
+    ; b = zero_params ~shape:[ m; n ] _K
+    ; b_0 = zero_params ~shape:[ n; n ] _K
+    ; c = random_params ~shape:[ n; o ] _K
+    ; log_obs_var = random_params ~shape:[ 1 ] _K
+    ; scaling_factor = random_params ~shape:[ 1 ] _K
+    } *)
+
   let eigenvectors_for_each_params ~local ~lambda ~param_name =
     let left, right, n_per_param =
       match param_name with
@@ -818,7 +828,7 @@ module Do_with_SOFO : Do_with_T = struct
           config =
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-2; eps = 1e-4 }
-        ; steps = 5
+        ; steps = 3
         }
     in
     Optimizer.Config.SOFO.

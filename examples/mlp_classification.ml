@@ -25,7 +25,7 @@ let cifar =
 let output_dim = 10
 let batch_size = 256
 let input_size = if cifar then Int.(32 * 32 * 3) else Int.(28 * 28)
-let full_batch_size = 50_000
+let full_batch_size = 60_000
 let layer_sizes = [| 128; output_dim |]
 let n_layers = Array.length layer_sizes
 let num_epochs_to_run = 200
@@ -219,7 +219,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       in
       if id = i then { params_tmp with w = v } else params_tmp)
 
-  let random_localised_vs _K : P.T.t =
+  (* let random_localised_vs _K : P.T.t =
     let n_per_param = n_params_w in
     Array.init n_layers ~f:(fun id ->
       let w_shape = get_shapes id in
@@ -229,7 +229,13 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       let final =
         if n_layers = 1 then w else Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0
       in
-      MLP_Layer.{ id; w = final })
+      MLP_Layer.{ id; w = final })   *)
+
+  let random_localised_vs _K : P.T.t =
+    Array.init n_layers ~f:(fun id ->
+      let w_shape = get_shapes id in
+      let w = random_params ~shape:w_shape _K in
+      MLP_Layer.{ id; w })
 
   let eigenvectors_for_each_params ~local ~lambda ~id =
     let left, right, n_per_param = lambda.w_left, lambda.w_right, n_params_w in
@@ -377,7 +383,7 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
+              { default with base; learning_rate = Some 1e-4; eps = 1e-4 }
         ; steps = 1
         }
     in
@@ -386,7 +392,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; learning_rate = Some 0.01
       ; n_tangents = _K
       ; rank_one = false
-      ; damping = Some 1e-5
+      ; damping = Some 1e-3
       ; aux = Some aux
       }
 

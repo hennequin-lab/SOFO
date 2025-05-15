@@ -390,7 +390,7 @@ module Do_with_SOFO : Do_with_T = struct
           config =
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
-        ; steps = 5
+        ; steps = 3
         }
     in
     Optimizer.Config.SOFO.

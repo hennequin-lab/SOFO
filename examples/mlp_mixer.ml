@@ -28,7 +28,7 @@ let output_dim = 10
 
 (* Batch configuration *)
 let full_batch_size = 60_000
-let batch_size = 8
+let batch_size = 64
 let n_epochs_to_run = 70
 let max_iter = Int.(full_batch_size * n_epochs_to_run / batch_size)
 let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size t
@@ -44,7 +44,7 @@ let patch_size = if cifar then 4 else 7
 let s = (input_dim / patch_size) ** 2
 
 (* hidden size *)
-let c = 64
+let c = 32
 
 (* expanded hidden size *)
 let h = c * 2
@@ -368,7 +368,7 @@ let test_eval ~train_data theta =
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
-let _K_w = 16
+let _K_w = 32
 let _K = Int.(List.length layer_list * _K_w)
 let _ = Convenience.print [%message (_K : int)]
 
@@ -719,8 +719,8 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 5e-4; eps = 1e-4 }
-        ; steps = 3
+              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
+        ; steps = 5
         }
     in
     Optimizer.Config.SOFO.
@@ -729,7 +729,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
-      ; aux = None
+      ; aux = Some aux
       }
 
   let init = O.init MLP_mixer.init

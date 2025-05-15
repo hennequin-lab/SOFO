@@ -30,8 +30,22 @@ type param_name =
   | F of int
   | C of int
 
-let n_params_init_cond, n_params_b, n_params_f, n_params_c = 10, 20, 10, 10
-let n_params_w = Int.(_K - (9 * n_params_init_cond))
+let n_params_init_cond, n_params_w, n_params_b, n_params_f, n_params_c =
+  10, Int.(_K - (9 * 10)), 20, 10, 10
+
+let n_params_list =
+  [ n_params_init_cond
+  ; n_params_w
+  ; n_params_b
+  ; n_params_f
+  ; n_params_f
+  ; n_params_f
+  ; n_params_f
+  ; n_params_c
+  ; n_params_c
+  ]
+
+let param_names_list = [ Init_cond; W; B;F 1; F 2; F 3; F 4; C 1; C 2 ]
 
 module P = PP.Make (Prms.P)
 
@@ -70,8 +84,36 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let zero_params ~shape _K =
     Tensor.zeros ~device:base.device ~kind:base.kind (_K :: shape)
 
-  let random_params ~shape _K =
+  let random_params ~shape _K () =
     Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
+
+  let get_shapes (param_name : param_name) =
+    match param_name with
+    | Init_cond -> [ 1; n ]
+    | W -> [ n + 1; n ]
+    | B -> [ n_input_channels; n ]
+    | F _ -> [ 1; n ]
+    | C _ -> [ n; 1 ]
+
+  let get_n_params (param_name : param_name) =
+    match param_name with
+    | Init_cond -> n_params_init_cond
+    | W -> n_params_w
+    | B -> n_params_b
+    | F _ -> n_params_f
+    | C _ -> n_params_c
+
+  let get_n_params_before_after (param_name : param_name) =
+    let n_params_prefix_suffix_sums = Convenience.prefix_suffix_sums n_params_list in
+    let param_idx =
+      match param_name with
+      | Init_cond -> 0
+      | W -> 1
+      | B -> 2
+      | F i -> Int.(i + 2)
+      | C i -> Int.(i + 6)
+    in
+    List.nth_exn n_params_prefix_suffix_sums param_idx
 
   (* approximation defined implicitly via Gv products *)
   let g12v ~(lambda : A.M.t) (v : P.M.t) : P.M.t =
@@ -90,19 +132,28 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
 
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~local ~param_name ~n_per_param v =
-    let sample = if local then zero_params else random_params in
-    let init_cond = sample ~shape:[ 1; n ] n_per_param in
-    let w = sample ~shape:[ n + 1; n ] n_per_param in
-    let b = sample ~shape:[ n_input_channels; n ] n_per_param in
-    let _f = sample ~shape:[ 1; n ] n_per_param in
-    let _c = sample ~shape:[ n; 1 ] n_per_param in
+    let init_cond = random_params ~shape:(get_shapes Init_cond) n_per_param () in
+    let w = random_params ~shape:(get_shapes W) n_per_param () in
+    let b = random_params ~shape:(get_shapes B) n_per_param () in
+    let _f = random_params ~shape:(get_shapes (F 0)) n_per_param in
+    let _c = random_params ~shape:(get_shapes (C 0)) n_per_param in
     let params_tmp =
-      PP.{ init_cond; w; b; f1 = _f; f2 = _f; f3 = _f; f4 = _f; c1 = _c; c2 = _c }
+      PP.
+        { init_cond
+        ; w
+        ; b
+        ; f1 = _f ()
+        ; f2 = _f ()
+        ; f3 = _f ()
+        ; f4 = _f ()
+        ; c1 = _c ()
+        ; c2 = _c ()
+        }
     in
     match param_name with
     | Init_cond -> { params_tmp with init_cond = v }
-    | B -> { params_tmp with b = v }
     | W -> { params_tmp with w = v }
+    | B -> { params_tmp with b = v }
     | F 1 -> { params_tmp with f1 = v }
     | F 2 -> { params_tmp with f2 = v }
     | F 3 -> { params_tmp with f3 = v }
@@ -112,22 +163,31 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     | _ -> assert false
 
   let random_localised_vs _K : P.T.t =
-    { init_cond = random_params ~shape:[ 1; n ] _K
-    ; b = random_params ~shape:[ n_input_channels; n ] _K
-    ; w = random_params ~shape:[ n + 1; n ] _K
-    ; f1 = random_params ~shape:[ 1; n ] _K
-    ; f2 = random_params ~shape:[ 1; n ] _K
-    ; f3 = random_params ~shape:[ 1; n ] _K
-    ; f4 = random_params ~shape:[ 1; n ] _K
-    ; c1 = random_params ~shape:[ n; 1 ] _K
-    ; c2 = random_params ~shape:[ n; 1 ] _K
+    let random_localised_param_name param_name =
+      let w_shape = get_shapes param_name in
+      let before, after = get_n_params_before_after param_name in
+      let w = random_params ~shape:w_shape (get_n_params param_name) () in
+      let zeros_before = zero_params ~shape:w_shape before in
+      let zeros_after = zero_params ~shape:w_shape after in
+      let final = Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0 in
+      final
+    in
+    { init_cond = random_localised_param_name Init_cond
+    ; w = random_localised_param_name W
+    ; b = random_localised_param_name B
+    ; f1 = random_localised_param_name (F 1)
+    ; f2 = random_localised_param_name (F 2)
+    ; f3 = random_localised_param_name (F 3)
+    ; f4 = random_localised_param_name (F 4)
+    ; c1 = random_localised_param_name (C 1)
+    ; c2 = random_localised_param_name (C 2)
     }
 
   let eigenvectors_for_each_params ~local ~lambda ~param_name =
     let left, right, n_per_param =
       match param_name with
-      | W -> lambda.w_left, lambda.w_right, n_params_w
       | Init_cond -> lambda.init_cond_left, lambda.init_cond_right, n_params_init_cond
+      | W -> lambda.w_left, lambda.w_right, n_params_w
       | B -> lambda.b_left, lambda.b_right, n_params_b
       | F 1 -> lambda.f1_left, lambda.f1_right, n_params_f
       | F 2 -> lambda.f2_left, lambda.f2_right, n_params_f
@@ -180,7 +240,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     local_vs |> localise ~local ~param_name ~n_per_param
 
   let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ Init_cond; B; W; F 1; F 2; F 3; F 4; C 1; C 2 ] in
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
         eigenvectors_for_each_params ~local:true ~lambda ~param_name)
@@ -199,10 +258,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     { init_cond_left = init_eye 1
     ; init_cond_right = init_eye n
-    ; b_left = init_eye n_input_channels
-    ; b_right = init_eye n
     ; w_left = init_eye (n + 1)
     ; w_right = init_eye n
+    ; b_left = init_eye n_input_channels
+    ; b_right = init_eye n
     ; f1_left = init_eye 1
     ; f1_right = init_eye n
     ; f2_left = init_eye 1
@@ -298,7 +357,7 @@ struct
       if k % 10 = 0
       then (
         let prms = W.P.value (O.params state) in
-        if k % 500 = 0 then save_samples (W.P.map ~f:Maths.const prms);
+        (* if k % 500 = 0 then save_samples (W.P.map ~f:Maths.const prms); *)
         (* save the parameters so they can later be loaded for analysis *)
         prms |> W.P.T.save ~kind:base.ba_kind ~out:(in_dir (sprintf "prms_%s.bin" name)));
       loop (k + 1) wallclock state)
@@ -341,8 +400,8 @@ module With_standard = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-2; eps = 1e-8 }
-        ; steps = 3
+              { default with base; learning_rate = Some 5e-3; eps = 1e-8 }
+        ; steps = 5
         }
     in
     Optimizer.Config.SOFO.
