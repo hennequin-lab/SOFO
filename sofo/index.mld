@@ -1,10 +1,11 @@
 {0 SOFO: second-order forward-mode optimization}
 
-Library description: blablabla
+Library description: This is the library for the SOFO optimizer, which is a second-order subspace method using 
+batched forward-mode differentitation. 
 
 {!modules: Sofo.Optimizer Sofo.Loss Sofo.Wrapper Sofo.Convenience}
 
-Here is a small linear regression example. First, we define the parameter module.
+Here is a small MLP example. First, we define the parameter module.
 
 {[
 open Base
@@ -32,7 +33,7 @@ Then, we can instantiate the computational graph (all layers of the same size fo
 let n_layers = 3
 let size = 100
 
-module Three_MLP = struct
+module Three_Layer_MLP = struct
   module P = MLP
 
   type input = Maths.t
@@ -49,13 +50,13 @@ end
 where [f] defines the forward computation and init defines how we initialise the parameters. 
 
 Now we need to define our wrapper, which is a feedforward net ({!Sofo.Wrapper.Feedforward}) whose computational graph is given by
-[Three_MLP] and we use the mean-squared error (with scaling=1) as the loss function ({!Sofo.Loss.MSE}). It is also possible 
+[Three_Layer_MLP] and we use the mean-squared error (with scaling=1) as the loss function ({!Sofo.Loss.MSE}). It is also possible 
 (and sometimes necessary) to define your own wrapper and loss functions, with the types {!Sofo.Wrapper.T} and 
 {!Sofo.Loss.T} respectively.
 {[
 module FF =
   Wrapper.Feedforward
-    (One_layer)
+    (Three_Layer_MLP)
     (Loss.MSE (struct
          let scaling_factor = 1.
        end))
