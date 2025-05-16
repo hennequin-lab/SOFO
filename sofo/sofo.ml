@@ -1,11 +1,11 @@
-(** Does this and that *)
+(** Contains convenience functions. *)
 module Convenience = Convenience
 
-(** Does this and that *)
+(** Loss function to be minimised. *)
 module Loss = Loss
 
-(** Does this and that *)
+(** Wrappers define the forward computational graph. *)
 module Wrapper = Wrapper
 
-(** Does this and that *)
+(** Optimizers used for training the networks. *)
 module Optimizer = Optimizer

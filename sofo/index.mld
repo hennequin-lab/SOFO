@@ -4,14 +4,94 @@ Library description: blablabla
 
 {!modules: Sofo.Optimizer Sofo.Loss Sofo.Wrapper Sofo.Convenience}
 
-Here is a small linear regression example.
+Here is a small linear regression example. First, we define the parameter module.
 
 {[
 open Base
 open Forward_torch
 open Sofo
 
+include struct
+   type 'a p = {
+      weights : 'a
+    ; biases: 'a
+    }
+end [@@deriving prms]
 
 ]}
+We then use [Make] to create a parameter module for a single MLP layer:
+{[
+module MLP_Layer = Prms.Make (Prms.P)
+]}
+and even make a list of those for a multi-layer MLP:  
+{[
+module MLP = Prms.List (MLP_Layer)
+]}
+Then, we can instantiate the computational graph (all layers of the same size for simpliticy):
+{[
+let n_layers = 3
+let size = 100
+
+module Three_MLP = struct
+  module P = MLP
+
+  type input = Maths.t
+
+  let f ~(prms:MLP.M.t) x = List.fold prms ~init:x ~f:(fun accu { weights; biases } ->
+      Maths.(relu (accu *@ weights + biases)))
+
+  let init : MLP.tagged = List.init n_layers ~f:(fun _ ->
+    let weights = Tensor.(randn [size; size] * f Float.(1. / sqrt (of_int size))) in
+    let biases = Tensor.zeros [1; size] in
+    { weights = Prms.free weights; biases = Prms.const weights })
+end
+]}
+where [f] defines the forward computation and init defines how we initialise the parameters. 
+
+Now we need to define our wrapper, which is a feedforward net ({!Sofo.Wrapper.Feedforward}) whose computational graph is given by
+[Three_MLP] and we use the mean-squared error (with scaling=1) as the loss function ({!Sofo.Loss.MSE}). It is also possible 
+(and sometimes necessary) to define your own wrapper and loss functions, with the types {!Sofo.Wrapper.T} and 
+{!Sofo.Loss.T} respectively.
+{[
+module FF =
+  Wrapper.Feedforward
+    (One_layer)
+    (Loss.MSE (struct
+         let scaling_factor = 1.
+       end))
+]}
+Next, we define SOFO as our optimizer
+{[
+module O = Optimizer.SOFO (FF)
+]}
+and configure it with
+{[
+let config =
+  Optimizer.Config.SOFO.
+    { base = Optimizer.Config.Base.default
+    ; learning_rate = Some 1.
+    ; n_tangents = 10
+    ; rank_one = false
+    ; damping = None
+    ; momentum = None
+    }
+]}
+where we have chosen a learning rate of 1. and the number of tangents to be 10.
+Finally, we can run the optimization loop 
+{[
+let max_iter = 10000
+let rec loop ~t ~state =
+  (* define your own data here, which needs to be of type Three_MLP.input * Three_MLP.input *)
+  let data = minibatch batch_size in
+  let loss, new_state = O.step ~config ~state ~data ~args:() in
+  if t % 100 = 0
+  then (
+    Convenience.print [%message (t : int) (loss : float)];
+  if t < max_iter then loop ~t:(t + 1)  ~state:new_state
+
+let _ =  loop ~t:0 ~state:(O.init ~config (One_layer.init ))
+]}
+
+
 
 

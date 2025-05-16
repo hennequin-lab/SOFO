@@ -1,6 +1,5 @@
 (** Basic optimizer type. *)
 module type T = sig
-
   (** W is the wrapper type that defines the forward computational graph. *)
   module W : Wrapper.T
 
@@ -40,7 +39,6 @@ module Config = struct
       }
   end
 
-  (** SOFO config. *)
   module SOFO = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t
@@ -61,7 +59,6 @@ module Config = struct
       }
   end
 
-  (** Forward Gradient Descent config. *)
   module FGD = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t
@@ -80,7 +77,6 @@ module Config = struct
       }
   end
 
-  (** Stochastic Gradient Descent config. *)
   module SGD = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t
@@ -91,7 +87,6 @@ module Config = struct
     let default = { base = Base.default; learning_rate = None; momentum = None }
   end
 
-  (** Adam config. *)
   module Adam = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t

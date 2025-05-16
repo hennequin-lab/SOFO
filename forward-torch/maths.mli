@@ -40,31 +40,31 @@ val permute : t -> dims:int list -> t
 (** Insert dimension of size one at [dim] in x. *)
 val unsqueeze : t -> dim:int -> t
 
-(** Returns -x. *)
+(** Element-wise -x. *)
 val neg : t -> t
 
 (** Returns trace(x). *)
 val trace : t -> t
 
-(** Returns sin(x). *)
+(** Element-wise sin(x). *)
 val sin : t -> t
 
-(** Returns cos(x). *)
+(** Element-wise cos(x). *)
 val cos : t -> t
 
-(** Returns square(x). *)
+(** Element-wise square(x). *)
 val sqr : t -> t
 
-(** Returns square_root(x). *)
+(** Element-wise square_root(x). *)
 val sqrt : t -> t
 
-(** Returns log(x). *)
+(** Element-wise log(x). *)
 val log : t -> t
 
-(** Returns exp(x). *)
+(** Element-wise exp(x). *)
 val exp : t -> t
 
-(** Returns tanh(x). *)
+(** Element-wise tanh(x). *)
 val tanh : t -> t
 
 (** Returns x^-1 where x is a square matrix. *)
@@ -74,13 +74,13 @@ val inv_sqr : t -> t
 reciprocal condition number. *)
 val inv_rectangle : ?rcond:float -> t -> t
 
-(** Returns relu(x). *)
+(** Element-wise relu(x). *)
 val relu : t -> t
 
-(** Returns sigmoid(x). *)
+(** Element-wise sigmoid(x). *)
 val sigmoid : t -> t
 
-(** Returns softplus(x). *)
+(** Element-wise softplus(x). *)
 val softplus : t -> t
 
 (** Slice x along [dim] from [start] to [end_] with a [step]. *)
@@ -134,28 +134,28 @@ val maxpool2d
   -> t
 
 (** Binary operations *)
-(** Returns z where z = x + y. *)
+(** Element-wise addition. *)
 val ( + ) : t -> t -> t
 
-(** Returns z where z = x - y. *)
+(** Element-wise subtration. *)
 val ( - ) : t -> t -> t
 
-(** Returns z where z = x * y. *)
+(** Element-wise multiplication. *)
 val ( * ) : t -> t -> t
 
-(** Returns z where z = x / y. *)
+(** Element-wise division. *)
 val ( / ) : t -> t -> t
 
-(** Returns z where z = x (scalar) + y. *)
+(** Adds a scalar to Maths.t . *)
 val ( $+ ) : float -> t -> t
 
-(** Returns z where z = x (scalar) * y. *)
+(** Multiply a scalar with Maths.t . *)
 val ( $* ) : float -> t -> t
 
-(** Returns z where z = x (scalar) / y. *)
+(** Divide a scalar by Maths.t . *)
 val ( $/ ) : float -> t -> t
 
-(** Returns z where z = x / y (scalar). *)
+(** Divide Maths.t by a scalar . *)
 val ( /$ ) : t -> float -> t
 
 (** Returns z where z = x matrix_multiply y *)
