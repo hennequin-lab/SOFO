@@ -83,14 +83,14 @@ Finally, we can run the optimization loop
 let max_iter = 10000
 let rec loop ~t ~state =
   (* define your own data here, which needs to be of type Three_MLP.input * Three_MLP.input *)
-  let data = minibatch batch_size in
+  let data = generate_data batch_size in
   let loss, new_state = O.step ~config ~state ~data ~args:() in
   if t % 100 = 0
   then (
     Convenience.print [%message (t : int) (loss : float)];
   if t < max_iter then loop ~t:(t + 1)  ~state:new_state
 
-let _ =  loop ~t:0 ~state:(O.init ~config (One_layer.init ))
+let _ =  loop ~t:0 ~state:(O.init ~config (Three_Layer_MLP.init ))
 ]}
 
 
