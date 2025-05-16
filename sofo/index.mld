@@ -1,0 +1,17 @@
+{0 SOFO: second-order forward-mode optimization}
+
+Library description: blablabla
+
+{!modules: Sofo.Optimizer Sofo.Loss Sofo.Wrapper Sofo.Convenience}
+
+Here is a small linear regression example.
+
+{[
+open Base
+open Forward_torch
+open Sofo
+
+
+]}
+
+

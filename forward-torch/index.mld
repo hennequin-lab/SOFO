@@ -1,0 +1,77 @@
+{0 Batched forward-mode differentiation}
+
+This libraries enables GPU-accelerated batched forward-mode automatic differentiation (SOFO's main workhorse).
+
+{!modules: Forward_torch.Maths Forward_torch.Prms}
+
+Here is a small example to illustrate obtain a gradient sketch for a multi-layer MLP.
+Start by defining your parameter module using the [ppx] to automate the generation of all functions enabling convenient handling of arbitrary parameter structures (don't forget to add the [(preprocess (pps ppx-forward-torch))] stanza in your [dune] file):
+
+{[
+open Base
+open Forward_torch
+
+include struct
+   type 'a p = {
+      weights : 'a
+    ; biases: 'a
+    }
+end [@@deriving prms]
+]}
+
+The [ppx] automatically generates a functor ([Make]) which accepts a module of type {!Forward_torch.Prms.T} for any independent leaf type (here, we only have ['a]).
+The most primitive of all {!Forward_torch.Prms.T} modules is the singleton {!Forward_torch.Prms.P}, describing a single parameter tensor.
+We can use [Make] as follows to create a parameter module for a single MLP layer:
+{[
+module MLP_Layer = Prms.Make (Prms.P)
+]}
+and even make a whole list of those for a multi-layer MLP:  
+{[
+module MLP = Prms.List (MLP_Layer)
+]}
+
+This module [MLP] contains loads of convenience functions to manipulate lists of weights and biases, in a type-safe way.
+It exposes two main types:
+- [MLP.M.t = Maths.t P.p] where the ['a] leaves of the parameter tree are {!Forward_torch.Maths.t} types, i.e. they may carry tangents (directional derivatives)
+- [MLP.T.t = Tensor.t P.p] where the ['a] leaves of the parameter tree are simple [Torch.Tensor.t]
+
+Then, we can express the network's forward pass using [Maths] operations:
+{[
+let forward ~(prms:MLP.M.t) x =
+  List.fold prms ~init:x ~f:(fun accu { weights; biases } ->
+      Maths.(relu (accu *@ weights + biases)))
+]}
+
+Now let's initialise our parameters (all layers of the same size for simplicity).
+{[
+let n_layers = 3
+let size = 10
+
+let prms : MLP.tagged = List.init n_layers ~f:(fun _ ->
+  let weights = Tensor.(randn [size; size] * f Float.(1. / sqrt (of_int size))) in
+  let biases = Tensor.zeros [1; size] in
+  { weights = Prms.free weights; biases = Prms.const weights })
+]}
+
+Note that parameters are “tagged” as being either free parameters, or constant parameters (in which case they will not carry directional derivatives, and SOFO won't update them).
+
+Let us now attached a bunch of 16 random tangents to those parameters, and automatically compute the corresponding directional derviatives of the output of the network:
+{[
+let n_tangents = 128
+let batch_size = 256
+
+let prms : MLP.M.t =
+  let v = MLP.gaussian_like_k ~k:n_tangents prms in
+  MLP.make_dual prms ~v
+
+(* random inputs to our MLP *)
+let x = Tensor.randn [batch_size; size] |> Maths.const
+
+let y : Maths.t = forward ~prms x
+
+(* the tangents of [y] contain all directional derivatives, from which we can e.g. extract a sketch 
+   of the Gauss-Newton matrix etc (see {!Sofo}) *)
+let yt : Tensor.t = Maths.tangent_exn y
+]}
+
+

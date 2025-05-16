@@ -4,7 +4,11 @@
  (libraries stdio base forward-torch)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))
-
+ 
+(documentation
+  (package sofo)
+  (mld_files index))
+ 
 (env
  (dev
   (flags

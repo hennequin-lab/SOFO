@@ -24,6 +24,9 @@ val tangent' : tangent -> Tensor.t
 (** Get tangent value option from the t type. *)
 val tangent : t -> Tensor.t option
 
+(** Get tangent value from the t type. May raise [!Not_a_dual_number]  *)
+val tangent_exn : t -> Tensor.t
+
 (** Unary operations *)
 (** Reshape x to [size]. *)
 val view : t -> size:int list -> t

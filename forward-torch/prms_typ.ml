@@ -18,8 +18,8 @@ type path = String.t List.t
 module type Basic = sig
   (** If you want to make your own custom parameter structure
       which for a reason or another cannot be automated using [ppx-prms]
-      (e.g. if it is not a record type), the you will need to use {!Make}
-      and provide a module of this {!Basic} type. *)
+      (e.g. if it is not a record type), the you will need to use {!Forward_torch.Prms.Make}
+      and provide a module of this type. *)
 
   type 'a p
 
@@ -33,7 +33,7 @@ module type Basic = sig
     [?path] optionally contains a record of the path (a list of strings, in reverse order) taken to
       arrive at the current value, if it is nested within a broader structure. Make sure to use this
       if you want to attach string labels to the various components of your custom ['a p] type
-      (e.g. use for saving to files, see {!Prms.T.save_txt}). *)
+      (e.g. use for saving to files, see {!Forward_torch.Prms.module-type-T.T.save_npy}). *)
   val fold : ?path:path -> 'a p -> init:'c -> f:('c -> 'a * path option -> 'c) -> 'c
 
   (** Fold x and y with [init] and function [f]. *)
@@ -77,28 +77,27 @@ module type Ops = sig
   (** Each element in x is square-rooted. *)
   val sqrt : t -> t
 
-  (** z = x * y. *)
+  (** Element-wise multiplication of two parameter sets *)
   val ( * ) : t -> t -> t
 
-  (** z = x + y. *)
+  (** Element-wise addition of two parameter sets *)
   val ( + ) : t -> t -> t
 
-  (** z = x - y. *)
+  (** Element-wise subtraction of two parameter sets *)
   val ( - ) : t -> t -> t
 
-  (** z = x/y. *)
+  (** Element-wise division of two parameter sets *)
   val ( / ) : t -> t -> t
 
-  (** z = x(float) * y. *)
+  (** Multiplication of a parameter set with a scalar *)
   val ( $* ) : float -> t -> t
 
-  (** z = x(float) + y *)
+  (** Adds a scalar to a parameter set *)
   val ( $+ ) : float -> t -> t
 end
 
+(** Main type for parameter structures. *)
 module type T = sig
-  (** Main type for parameter structures. *)
-
   include Basic
 
   type nonrec tagged = tagged p

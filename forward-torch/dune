@@ -6,6 +6,10 @@
  (preprocess
   (pps ppx_sexp_message ppx_jane)))
 
+(documentation
+  (package forward-torch)
+  (mld_files index))
+
 (env
  (dev
   (flags
