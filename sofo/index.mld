@@ -47,7 +47,7 @@ module Three_Layer_MLP = struct
     { weights = Prms.free weights; biases = Prms.const weights })
 end
 ]}
-where [f] defines the forward computation and init defines how we initialise the parameters. 
+where [f] defines the forward computation and [init] defines how we initialise the parameters. 
 
 Now we need to define our wrapper, which is a feedforward net ({!Sofo.Wrapper.Feedforward}) whose computational graph is given by
 [Three_Layer_MLP] and we use the mean-squared error (with scaling=1) as the loss function ({!Sofo.Loss.MSE}). It is also possible 
@@ -77,12 +77,12 @@ let config =
     ; momentum = None
     }
 ]}
-where we have chosen a learning rate of 1. and the number of tangents to be 10.
+where we have chosen a learning rate of 1 and the number of tangents to be 10.
 Finally, we can run the optimization loop 
 {[
 let max_iter = 10000
 let rec loop ~t ~state =
-  (* define your own data here, which needs to be of type Three_MLP.input * Three_MLP.input *)
+  (* define your own data here, which needs to be of type Three_Layer_MLP.input * Three_Layer_MLP.input *)
   let data = generate_data batch_size in
   let loss, new_state = O.step ~config ~state ~data ~args:() in
   if t % 100 = 0
