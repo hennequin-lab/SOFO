@@ -89,10 +89,25 @@ let permute (x, dx) ~dims =
   in
   (y, dy) |> assert_right_shape "permute"
 
+(* reshape x with a dimension of size one inserted at dim *)
 let unsqueeze (x, dx) ~dim =
   let y = Tensor.unsqueeze x ~dim in
-  let dy = with_tangent dx ~f:(fun dx -> Tensor.unsqueeze dx ~dim:Int.(dim + 1)) in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let new_dim = if dim < 0 then dim else Int.(dim + 1) in
+      Tensor.unsqueeze dx ~dim:new_dim)
+  in
   (y, dy) |> assert_right_shape "unsqueeze"
+
+(* reshape x with a dimension of size one removed at dim *)
+let squeeze (x, dx) ~dim =
+  let y = Tensor.squeeze_dim x ~dim in
+  let dy =
+    with_tangent dx ~f:(fun dx ->
+      let new_dim = if dim < 0 then dim else Int.(dim + 1) in
+      Tensor.squeeze_dim dx ~dim:new_dim)
+  in
+  (y, dy) |> assert_right_shape "squeeze"
 
 (* y = -x, dy = -dx *)
 let neg (x, dx) =

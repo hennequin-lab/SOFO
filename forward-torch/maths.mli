@@ -37,6 +37,9 @@ val reshape : t -> shape:int list -> t
 (** Permute x along dimensions in [dims]. *)
 val permute : t -> dims:int list -> t
 
+(** Removes dimension of size one at [dim] in x. *)
+val squeeze : t -> dim:int -> t
+ 
 (** Insert dimension of size one at [dim] in x. *)
 val unsqueeze : t -> dim:int -> t
 
