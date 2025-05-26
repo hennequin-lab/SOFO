@@ -1,78 +1,84 @@
 (** operations on the Maths.t object. Maths.t object is a dual number of (primal, tangent)
   where the primal is of type Tensor.t and the tangent is of type tangent. *)
-open Torch
-include module type of Maths_typ
+open Base
 
-(** Get shape of the primal tensor. *)
-val shape : t -> int list
+open Torch
+
+type ('a, 'b) t = ('a, 'b) Maths_typ.t
+type const
+type 'a dual
+
 
 (** Create a constant tensor by pairing the primal with None as tangent. *)
-val const : Tensor.t -> t
+val of_tensor : Tensor.t -> const
 
+val to_tensor : const -> Tensor.t
+val dual : tangent:Tensor.t -> const -> Tensor.t dual
+val lazy_dual : tangent:(unit -> Tensor.t) -> const -> (unit -> Tensor.t) dual
+val primal : (_, _) t -> const
+val tangent : 'a dual -> const
+
+(** Get shape of the primal tensor. *)
+val shape : (_, _) t -> int list
+
+(** Get the device of the primal tensor. *)
+val device : (_, _) t -> Device.t
+ 
+(** Get the kind of the primal tensor. *)
+val kind : (_, _) t -> Torch_core.Kind.packed
+ 
 (** Create a constant scalar tensor by pairing the primal with None as tangent. *)
-val f : float -> t
+val f : float -> const
 
-(** Get primal tensor , which is the first element. *)
-val primal : t -> Tensor.t
+type ('a,'b) diff1 = ('a, 'b) t -> ('a, Tensor.t) t
 
-(** Make dual number of (primal, [t] as tangent). *)
-val make_dual : Tensor.t -> t:tangent -> t
-
-(** Get tangent value from the tangent type. *)
-val tangent' : tangent -> Tensor.t
-
-(** Get tangent value option from the t type. *)
-val tangent : t -> Tensor.t option
-
-(** Get tangent value from the t type. May raise [!Not_a_dual_number]  *)
-val tangent_exn : t -> Tensor.t
-
-(** Unary operations *)
+   (** Unary operations *)
 (** Reshape x to [size]. *)
-val view : t -> size:int list -> t
+val view : size:int list -> (_, _) diff1
 
 (** Reshape x to [size]. *)
-val reshape : t -> shape:int list -> t
+val reshape : shape:int list -> ('a, 'b) diff1
 
 (** Permute x along dimensions in [dims]. *)
-val permute : t -> dims:int list -> t
+val permute : dims:int list -> ('a, 'b) diff1
 
 (** Removes dimension of size one at [dim] in x. *)
-val squeeze : t -> dim:int -> t
+val squeeze : dim:int -> ('a, 'b) diff1
  
 (** Insert dimension of size one at [dim] in x. *)
-val unsqueeze : t -> dim:int -> t
+val unsqueeze : dim:int -> ('a, 'b) diff1
 
 (** Element-wise -x. *)
-val neg : t -> t
+val neg : (_,_) diff1
 
 (** Returns trace(x). *)
-val trace : t -> t
+val trace : (_,_) diff1
 
 (** Element-wise sin(x). *)
-val sin : t -> t
+val sin : (_,_) diff1
 
 (** Element-wise cos(x). *)
-val cos : t -> t
+val cos : (_,_) diff1
 
 (** Element-wise square(x). *)
-val sqr : t -> t
+val sqr : (_,_)  diff1
 
 (** Element-wise square_root(x). *)
-val sqrt : t -> t
+val sqrt : (_,_) diff1
 
 (** Element-wise log(x). *)
-val log : t -> t
+val log : (_,_) diff1
 
 (** Element-wise exp(x). *)
-val exp : t -> t
+val exp : (_,_) diff1
 
 (** Element-wise tanh(x). *)
-val tanh : t -> t
+val tanh : (_,_) diff1
 
 (** Returns x^-1 where x is a square matrix. *)
-val inv_sqr : t -> t
+val inv_sqr : (_,_) diff1
 
+    (*
 (** Returns pseudo-inverse of x where x is a rectangular matrix, with [rcond] as the 
 reciprocal condition number. *)
 val inv_rectangle : ?rcond:float -> t -> t
@@ -200,3 +206,4 @@ val check_grad1 : (t -> t) -> Tensor.t -> float
 
 (** Check gradient against finite difference for binary operations given two tensor inputs. *)
 val check_grad2 : (t -> t -> t) -> Tensor.t -> Tensor.t -> float
+*)

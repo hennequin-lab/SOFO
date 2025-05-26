@@ -7,198 +7,189 @@ include Maths_typ
    the associated tangents have one more dimension, corresponding to tangent batch: [K; n1; n2; ... ]
 *)
 
+type ('a, 'b) t = ('a, 'b) Maths_typ.t
+
+(* useful type aliases for better legibility *)
+type const = (Maths_typ.primal_t, Nothing.t) t
+type 'a dual = (Maths_typ.dual_t, 'a) t
+
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
-let shape (x, _) = Tensor.shape x
+
+let assert_right_shape x dx =
+  let sx = Tensor.shape x
+  and sdx = Tensor.shape dx in
+  let n = List.length sx in
+  let n' = List.length sdx in
+  if n' <> n + 1 || Poly.(List.tl_exn sdx <> sx) then raise (Wrong_shape (sx, sdx))
+
+let assert_right_device x dx =
+  let dx = Tensor.device x
+  and ddx = Tensor.device dx in
+  if Poly.(dx <> ddx) then raise (Wrong_device (dx, ddx))
+
+let of_tensor x : const = Primal x
+let to_tensor (Primal x : const) = x
+
+let dual ~tangent:dx (Primal x) =
+  assert_right_shape x dx;
+  assert_right_device x dx;
+  Dual (x, dx)
+
+let lazy_dual ~tangent (Primal x) : (unit -> Tensor.t) dual =
+  let tangent_with_check () =
+    let dx = tangent () in
+    assert_right_shape x dx;
+    assert_right_device x dx;
+    dx
+  in
+  Dual_lazy (x, tangent_with_check)
+
+let primal : type a b. (a, b) t -> const = function
+  | Primal x -> Primal x
+  | Dual (x, _) -> Primal x
+  | Dual_lazy (x, _) -> Primal x
+
+let tangent : type a. a dual -> const = function
+  | Dual (_, dx) -> Primal dx
+  | Dual_lazy (_, dx) -> Primal (dx ())
+
+let shape x = x |> primal |> to_tensor |> Tensor.shape
+let device x = x |> primal |> to_tensor |> Tensor.device
+let kind x = x |> primal |> to_tensor |> Tensor.type_
 
 (* int list starting from 1 and ending at the last dim of a *)
 let all_dims_but_first a = List.range 1 (List.length (Tensor.shape a))
-
-(* get primal, which is the first element *)
-let primal = fst
-
-(* get tangent opt, which is instantiated if direct or not instantiated if lazy *)
-let tangent' = function
-  | Direct dx -> dx
-  | Lazy dx -> dx ()
-
-(* get tangent, which is the second element *)
-let tangent (_, t) = Option.map t ~f:tangent'
-
-let tangent_exn (_, t) =
-  match t with
-  | None -> raise Not_a_dual_number
-  | Some t -> tangent' t
-
-(* check that the assumption above is satisfied *)
-let assert_right_shape label t =
-  Option.iter (tangent t) ~f:(fun dx ->
-    let sx = Tensor.shape (primal t)
-    and sdx = Tensor.shape dx in
-    let n = List.length sx in
-    let n' = List.length sdx in
-    if n' <> n + 1 || Poly.(List.tl_exn sdx <> sx) then raise (Wrong_shape label));
-  t
-
-(* constant tensor, i.e. no associated tangents *)
-let const x = x, None
-
-(* constant scalar tensor *)
-let f x = Tensor.f x, None
-
-(* make dual number of (primal, tangent) *)
-let make_dual x ~t = (x, Some t) |> assert_right_shape "make_dual"
-
-(* apply f to tangents dx. *)
-let with_tangent dx ~f =
-  Option.map dx ~f:(function
-    | Direct dx -> Direct (f dx)
-    | Lazy dx -> Direct (f (dx ())))
 
 let append_batch ~tangent shape =
   let b = List.hd_exn (Tensor.shape tangent) in
   b :: shape
 
+(* constant scalar tensor *)
+let f x = Primal (Tensor.f x)
+
+type ('a, 'b) diff1 = ('a, 'b) t -> ('a, Tensor.t) t
+
+let unary
+  : type a b.
+    (Tensor.t -> Tensor.t)
+    -> (f:Tensor.t -> Tensor.t -> Tensor.t -> Tensor.t)
+    -> (a, b) diff1
+  =
+  fun f df x ->
+  match x with
+  | Primal x -> Primal (f x)
+  | Dual (x, dx) ->
+    let f = f x in
+    let df = df ~f x dx in
+    dual ~tangent:df (Primal f)
+  | Dual_lazy (x, dx) ->
+    let f = f x in
+    let df = df ~f x (dx ()) in
+    dual ~tangent:df (Primal f)
+
 (** Unary operations *)
 
 (* reshape the size of x to size, and of each batch in dx to size. *)
-let view (x, dx) ~size =
-  let y = Tensor.view x ~size in
-  let dy =
-    with_tangent dx ~f:(fun dx ->
-      let size = append_batch ~tangent:dx size in
-      Tensor.view ~size dx)
-  in
-  (y, dy) |> assert_right_shape "view"
+let view ~size =
+  unary (Tensor.view ~size) (fun ~f:_ _ dx ->
+    let size = append_batch ~tangent:dx size in
+    Tensor.view ~size dx)
 
 (* reshape the size of x to size, and of each batch in dx to size. *)
-let reshape (x, dx) ~shape =
-  let y = Tensor.reshape x ~shape in
-  let dy =
-    with_tangent dx ~f:(fun dx ->
-      let shape = append_batch ~tangent:dx shape in
-      Tensor.reshape ~shape dx)
-  in
-  (y, dy) |> assert_right_shape "reshape"
+let reshape ~shape =
+  unary (Tensor.reshape ~shape) (fun ~f:_ _ dx ->
+    let shape = append_batch ~tangent:dx shape in
+    Tensor.reshape ~shape dx)
 
-let permute (x, dx) ~dims =
-  let y = Tensor.permute x ~dims in
-  let dy =
-    with_tangent dx ~f:(fun dx ->
-      let tensor_dims = 0 :: List.map dims ~f:(fun i -> i + 1) in
-      Tensor.permute dx ~dims:tensor_dims)
-  in
-  (y, dy) |> assert_right_shape "permute"
+let permute ~dims =
+  unary (Tensor.permute ~dims) (fun ~f:_ _ dx ->
+    let tensor_dims = 0 :: List.map dims ~f:(fun i -> i + 1) in
+    Tensor.permute dx ~dims:tensor_dims)
 
 (* reshape x with a dimension of size one inserted at dim *)
-let unsqueeze (x, dx) ~dim =
-  let y = Tensor.unsqueeze x ~dim in
-  let dy =
-    with_tangent dx ~f:(fun dx ->
-      let new_dim = if dim < 0 then dim else Int.(dim + 1) in
-      Tensor.unsqueeze dx ~dim:new_dim)
-  in
-  (y, dy) |> assert_right_shape "unsqueeze"
+let unsqueeze ~dim =
+  unary (Tensor.unsqueeze ~dim) (fun ~f:_ _ dx ->
+    let new_dim = if dim < 0 then dim else Int.(dim + 1) in
+    Tensor.unsqueeze dx ~dim:new_dim)
 
 (* reshape x with a dimension of size one removed at dim *)
-let squeeze (x, dx) ~dim =
-  let y = Tensor.squeeze_dim x ~dim in
-  let dy =
-    with_tangent dx ~f:(fun dx ->
-      let new_dim = if dim < 0 then dim else Int.(dim + 1) in
-      Tensor.squeeze_dim dx ~dim:new_dim)
-  in
-  (y, dy) |> assert_right_shape "squeeze"
+let squeeze ~dim =
+  unary (Tensor.squeeze_dim ~dim) (fun ~f:_ _ dx ->
+    let new_dim = if dim < 0 then dim else Int.(dim + 1) in
+    Tensor.squeeze_dim dx ~dim:new_dim)
 
 (* y = -x, dy = -dx *)
-let neg (x, dx) =
-  let y = Tensor.neg x in
-  let dy = with_tangent dx ~f:Tensor.neg in
-  (y, dy) |> assert_right_shape "neg"
+let neg x = unary Tensor.neg (fun ~f:_ _ -> Tensor.neg) x
 
-let trace (x, dx) =
+let trace x =
   assert (
-    match Tensor.shape x with
+    match Tensor.shape (to_tensor (primal x)) with
     | [ a; b ] when a = b -> true
     | _ -> false);
-  let y = Tensor.(reshape (trace x) ~shape:[ 1 ]) in
-  let dy =
-    with_tangent dx ~f:(fun dx ->
-      Tensor.einsum [ dx ] ~equation:"qii->q" ~path:None
-      |> Tensor.reshape ~shape:[ -1; 1 ])
-  in
-  (y, dy) |> assert_right_shape "trace"
+  unary
+    (fun x -> Tensor.(reshape (trace x) ~shape:[ 1 ]))
+    (fun ~f:_ _ dx ->
+       Tensor.einsum [ dx ] ~equation:"qii->q" ~path:None
+       |> Tensor.reshape ~shape:[ -1; 1 ])
+    x
 
 (* y = sin(x), dy = cos(x) dx *)
-let sin (x, dx) =
-  let y = Tensor.sin x in
-  let dy = with_tangent dx ~f:(fun dx -> Tensor.(cos x * dx)) in
-  (y, dy) |> assert_right_shape "sin"
+let sin x = unary Tensor.sin (fun ~f:_ x dx -> Tensor.(mul_ (cos x) dx)) x
 
 (* y = cos(x), dy = -sin(x) dx *)
-let cos (x, dx) =
-  let y = Tensor.cos x in
-  let dy = with_tangent dx ~f:(fun dx -> Tensor.(neg (sin x) * dx)) in
-  (y, dy) |> assert_right_shape "cos"
+let cos x = unary Tensor.cos (fun ~f:_ x dx -> Tensor.(mul_ (neg_ (sin x)) dx)) x
 
 (* y = x^2, dy = 2 x dx *)
-let sqr (x, dx) =
-  let y = Tensor.square x in
-  let dy =
-    with_tangent dx ~f:(fun dx ->
-      let tmp = Tensor.(x * dx) in
-      Tensor.mul_scalar_ tmp (Scalar.f 2.))
-  in
-  (y, dy) |> assert_right_shape "sqr"
+let sqr x =
+  unary
+    Tensor.square
+    (fun ~f:_ x dx ->
+       let tmp = Tensor.(x * dx) in
+       Tensor.mul_scalar_ tmp (Scalar.f 2.))
+    x
 
 (* y = x^{1/2}, dy = 1/2 x^{-1/2} dx *)
-let sqrt (x, dx) =
-  let y = Tensor.sqrt x in
-  let dy =
-    with_tangent dx ~f:(fun dx ->
-      let tmp = Tensor.(dx / y) in
-      Tensor.mul_scalar_ tmp (Scalar.f 0.5))
-  in
-  (y, dy) |> assert_right_shape "sqrt"
+let sqrt x =
+  unary
+    Tensor.sqrt
+    (fun ~f:sqrt_x _ dx ->
+       let tmp = Tensor.(dx / sqrt_x) in
+       Tensor.mul_scalar_ tmp (Scalar.f 0.5))
+    x
 
 (* y = log x, dy = dx/x *)
-let log (x, dx) =
-  let y = Tensor.log x in
-  let dy = with_tangent dx ~f:(fun dx -> Tensor.(div dx x)) in
-  (y, dy) |> assert_right_shape "log"
+let log x = unary Tensor.log (fun ~f:_ x dx -> Tensor.(div dx x)) x
 
 (* y = exp(x), dy = exp(x) dx *)
-let exp (x, dx) =
-  let y = Tensor.exp x in
-  let dy = with_tangent dx ~f:(fun dx -> Tensor.(dx * y)) in
-  (y, dy) |> assert_right_shape "exp"
+let exp x = unary Tensor.exp (fun ~f:exp_x _ dx -> Tensor.(dx * exp_x)) x
 
 (* y = tanh(x), dy = (1 - tanh(x)^2) dx *)
-let tanh (x, dx) =
-  let y = Tensor.tanh x in
-  let dy =
-    with_tangent dx ~f:(fun dx ->
-      let tmp = Tensor.(square y) in
-      let tmp = Tensor.(neg_ tmp) in
-      let tmp = Tensor.(add_scalar_ tmp Scalar.(f 1.)) in
-      Tensor.mul tmp dx)
-  in
-  (y, dy) |> assert_right_shape "tanh"
+let tanh x =
+  unary
+    Tensor.tanh
+    (fun ~f:tanh_x _ dx ->
+       let tmp = Tensor.(square tanh_x) in
+       let tmp = Tensor.(neg_ tmp) in
+       let tmp = Tensor.(add_scalar_ tmp Scalar.(f 1.)) in
+       Tensor.mul_ tmp dx)
+    x
 
 (* invert a square matrix; y = x^-1, dy = - x^-1 dx x^-1 *)
-let inv_sqr (x, dx) =
-  let x_size = List.last_exn (Tensor.shape x) in
-  let x_device = Tensor.device x in
-  let x_kind = Tensor.type_ x in
-  let y =
-    Tensor.linalg_solve
-      ~a:x
-      ~b:(Tensor.eye ~n:x_size ~options:(x_kind, x_device))
-      ~left:true
-  in
-  let dy = with_tangent dx ~f:(fun dx -> Tensor.(neg (matmul y (matmul dx y)))) in
-  (y, dy) |> assert_right_shape "inv_sqr"
+let inv_sqr x =
+  let x_size = List.last_exn (shape x) in
+  let x_device = device x in
+  let x_kind = kind x in
+  unary
+    (fun x ->
+       Tensor.linalg_solve
+         ~a:x
+         ~b:(Tensor.eye ~n:x_size ~options:(x_kind, x_device))
+         ~left:true)
+    (fun ~f:y _ dx -> Tensor.(neg (matmul y (matmul dx y))))
+    x
 
-(* pseudo-inverse of a matrix of size [m x n] where m != n *)
+(*
+   (* pseudo-inverse of a matrix of size [m x n] where m != n *)
 let inv_rectangle ?(rcond = 1e-6) (x, dx) =
   assert (List.length (Tensor.shape x) = 2);
   let y = Tensor.pinverse x ~rcond in
@@ -1041,3 +1032,4 @@ let check_grad2 f x y =
   in
   let _ = print [%message (final : float)] in
   final
+*)
