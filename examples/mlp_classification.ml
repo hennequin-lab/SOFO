@@ -1,4 +1,4 @@
-open Printf
+
 open Base
 open Owl
 open Torch
@@ -185,9 +185,9 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   module P = P
   module A = Prms.Array (Make (Prms.P))
 
-  type sampling_state = unit
+  type sampling_state = int
 
-  let init_sampling_state () = ()
+  let init_sampling_state () = 0
 
   let zero_params ~shape _K =
     Tensor.zeros ~device:base.device ~kind:base.kind (_K :: shape)
@@ -208,18 +208,23 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     | 1 -> [ layer_sizes.(0) + 1; layer_sizes.(1) ]
     | _ -> assert false
 
+  let get_n_params _ = n_params_w
+
+  let get_total_n_params id =
+    let list_prod l = List.fold l ~init:1 ~f:(fun accu i -> accu * i) in
+    list_prod (get_shapes id)
+
   (* set tangents = zero for other parameters but v for this parameter *)
-  let localise ~local ~id:i ~n_per_param v =
+  let localise ~id:i ~n_per_param v =
     Array.init n_layers ~f:(fun id ->
-      let sample = if local then zero_params else random_params in
       let params_tmp =
         let w_shape = get_shapes id in
-        let w = sample ~shape:w_shape n_per_param in
+        let w = zero_params ~shape:w_shape n_per_param in
         MLP_Layer.{ id; w }
       in
       if id = i then { params_tmp with w = v } else params_tmp)
 
-  (* let random_localised_vs _K : P.T.t =
+  let random_localised_vs _K : P.T.t =
     let n_per_param = n_params_w in
     Array.init n_layers ~f:(fun id ->
       let w_shape = get_shapes id in
@@ -229,16 +234,11 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       let final =
         if n_layers = 1 then w else Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0
       in
-      MLP_Layer.{ id; w = final })   *)
+      MLP_Layer.{ id; w = final })
 
-  let random_localised_vs _K : P.T.t =
-    Array.init n_layers ~f:(fun id ->
-      let w_shape = get_shapes id in
-      let w = random_params ~shape:w_shape _K in
-      MLP_Layer.{ id; w })
-
-  let eigenvectors_for_each_params ~local ~lambda ~id =
-    let left, right, n_per_param = lambda.w_left, lambda.w_right, n_params_w in
+  (* compute sorted eigenvalues, u_left and u_right. *)
+  let eigenvectors_for_params ~lambda =
+    let left, right = lambda.w_left, lambda.w_right in
     let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
     let u_right, s_right, _ =
       Tensor.svd ~some:true ~compute_uv:true Maths.(primal right)
@@ -252,45 +252,65 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
       |> Array.of_list
     in
-    (* randomly select the indices *)
-    let n_params =
-      Convenience.first_dim (Maths.primal left)
-      * Convenience.first_dim (Maths.primal right)
-    in
-    let selection =
-      List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
-    in
-    let selection = List.map selection ~f:(fun j -> s_all.(j)) in
+    s_all, u_left, u_right
+
+  (* cache storage with a ref to memoize computed results *)
+  let s_u_cache = ref []
+
+  (* given param name, get eigenvalues and eigenvectors. *)
+  let get_s_u ~lambda id =
+    match List.Assoc.find !s_u_cache id ~equal:( = ) with
+    | Some s -> s
+    | None ->
+      let s = eigenvectors_for_params ~lambda in
+      s_u_cache := (id, s) :: !s_u_cache;
+      s
+
+  let extract_local_vs ~s_all ~id ~u_left ~u_right ~selection =
+    let n_per_param = get_n_params id in
     let local_vs =
-      List.map selection ~f:(fun (il, ir, _) ->
-        let u_left =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
+      List.map selection ~f:(fun idx ->
+        let il, ir, _ = s_all.(idx) in
+        let slice_and_squeeze t dim idx =
+          Tensor.squeeze_dim
+            ~dim
+            (Tensor.slice t ~dim ~start:(Some idx) ~end_:(Some (idx + 1)) ~step:1)
         in
-        let u_right =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_right ~dim:1 ~start:(Some ir) ~end_:(Some Int.(ir + 1)) ~step:1))
-        in
-        Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ]
-        |> Tensor.unsqueeze ~dim:0)
+        let u_l = slice_and_squeeze u_left 1 il in
+        let u_r = slice_and_squeeze u_right 1 ir in
+        let tmp = Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_l; u_r ] in
+        Tensor.unsqueeze tmp ~dim:0)
       |> Tensor.concatenate ~dim:0
     in
-    localise ~local ~id ~n_per_param local_vs
+    localise ~id ~n_per_param local_vs
 
-  let eigenvectors ~(lambda : A.M.t) () (_K : int) =
+  let eigenvectors_for_each_param ~lambda ~id ~sampling_state ~cycle =
+    let n_per_param = get_n_params id in
+    let n_params = get_total_n_params id in
+    let s_all, u_left, u_right =
+      if cycle then get_s_u ~lambda id else eigenvectors_for_params ~lambda
+    in
+    let selection =
+      if cycle
+      then
+        List.init n_per_param ~f:(fun i ->
+          ((sampling_state * n_per_param) + i) % n_params)
+      else List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
+    in
+    extract_local_vs ~s_all ~id ~u_left ~u_right ~selection
+
+  let eigenvectors ~(lambda : A.M.t) sampling_state (_K : int) =
     let concat_vs a b = P.map2 a b ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ]) in
     let vs =
       Array.foldi lambda ~init:None ~f:(fun id accu lambda ->
-        let local_vs = eigenvectors_for_each_params ~local:true ~lambda ~id in
+        let local_vs =
+          eigenvectors_for_each_param ~lambda ~id ~sampling_state ~cycle:true
+        in
         match accu with
         | None -> Some local_vs
         | Some a -> Some (concat_vs a local_vs))
     in
-    Option.value_exn vs, ()
+    Option.value_exn vs, sampling_state + 1
 
   let init () =
     let init_eye size =
@@ -371,6 +391,7 @@ end
 (* --------------------------------
        -- SOFO
        -------------------------------- *)
+let learn_first_steps = 1000
 
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (FF) (GGN)
@@ -383,8 +404,9 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-4; eps = 1e-4 }
-        ; steps = 1
+              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
+        ; steps = 5
+        ; learn_first_steps = Some learn_first_steps
         }
     in
     Optimizer.Config.SOFO.
@@ -415,7 +437,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = num_train_loops in
+  let max_iter = num_train_loops + learn_first_steps in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

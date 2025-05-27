@@ -211,7 +211,7 @@ let sample_batch ~n_steps bs =
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
 
-let n_params = _K
+let n_per_param = _K
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -225,9 +225,9 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   module P = P
   module A = Make (Prms.P)
 
-  type sampling_state = unit
+  type sampling_state = int
 
-  let init_sampling_state () = ()
+  let init_sampling_state () = 0
 
   let zero_params ~shape _K =
     Tensor.zeros ~device:base.device ~kind:base.kind (_K :: shape)
@@ -247,8 +247,9 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let random_localised_vs _K : P.T.t =
     { w = random_params ~shape:[ n; Settings.b ] _K; j; fb; b }
 
-  let eigenvectors_for_w ~lambda =
-    let left, right, n_per_param = lambda.w_left, lambda.w_right, n_params in
+  (* compute sorted eigenvalues, u_left and u_right. *)
+  let eigenvectors_for_params ~lambda =
+    let left, right = lambda.w_left, lambda.w_right in
     let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
     let u_right, s_right, _ =
       Tensor.svd ~some:true ~compute_uv:true Maths.(primal right)
@@ -262,39 +263,59 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
       |> Array.of_list
     in
-    (* randomly select the indices *)
-    let n_params =
-      Convenience.first_dim (Maths.primal left)
-      * Convenience.first_dim (Maths.primal right)
-    in
-    let selection =
-      List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
-    in
-    let selection = List.map selection ~f:(fun j -> s_all.(j)) in
+    s_all, u_left, u_right
+
+  (* cache storage with a ref to memoize computed results *)
+  let s_u_cache = ref None
+
+  (* given param name, get eigenvalues and eigenvectors. *)
+  let get_s_u ~lambda =
+    (* match List.Assoc.find !s_u_cache param_name ~equal:equal_param_name with *)
+    match !s_u_cache with
+    | Some s -> s
+    | None ->
+      let s = eigenvectors_for_params ~lambda in
+      s_u_cache := Some s;
+      s
+
+  let extract_local_vs ~s_all ~u_left ~u_right ~selection =
     let local_vs =
-      List.map selection ~f:(fun (il, ir, _) ->
-        let u_left =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
+      List.map selection ~f:(fun idx ->
+        let il, ir, _ = s_all.(idx) in
+        let slice_and_squeeze t dim idx =
+          Tensor.squeeze_dim
+            ~dim
+            (Tensor.slice t ~dim ~start:(Some idx) ~end_:(Some (idx + 1)) ~step:1)
         in
-        let u_right =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_right ~dim:1 ~start:(Some ir) ~end_:(Some Int.(ir + 1)) ~step:1))
-        in
-        let tmp = Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ] in
+        let u_l = slice_and_squeeze u_left 1 il in
+        let u_r = slice_and_squeeze u_right 1 ir in
+        let tmp = Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_l; u_r ] in
         Tensor.unsqueeze tmp ~dim:0)
       |> Tensor.concatenate ~dim:0
     in
-    local_vs |> localise
+    localise local_vs
 
-  let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let eigenvectors_w = eigenvectors_for_w ~lambda in
+  let eigenvectors_for_each_param ~lambda ~sampling_state ~cycle =
+    let n_per_param = n_per_param in
+    let n_params = n * Settings.b in
+    let s_all, u_left, u_right =
+      if cycle then get_s_u ~lambda else eigenvectors_for_params ~lambda
+    in
+    let selection =
+      if cycle
+      then
+        List.init n_per_param ~f:(fun i ->
+          ((sampling_state * n_per_param) + i) % n_params)
+      else List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
+    in
+    extract_local_vs ~s_all ~u_left ~u_right ~selection
+
+  let eigenvectors ~(lambda : A.M.t) sampling_state (_K : int) =
+    let eigenvectors_w =
+      eigenvectors_for_each_param ~lambda ~sampling_state ~cycle:true
+    in
     let vs = eigenvectors_w in
-    vs, ()
+    vs, Int.(sampling_state + 1)
 
   let init () =
     let init_eye size =
@@ -369,6 +390,7 @@ end
 (* --------------------------------
        -- SOFO
        -------------------------------- *)
+let learn_first_steps = 1000
 
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (RNN) (GGN)
@@ -383,15 +405,16 @@ module Do_with_SOFO : Do_with_T = struct
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
         ; steps = 5
+        ; learn_first_steps = Some learn_first_steps
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.1
+      ; learning_rate = Some 0.5
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-5
-      ; aux = None
+      ; aux = Some aux
       }
 
   let init = O.init (RNN.init ())
@@ -413,7 +436,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 10000 in
+  let max_iter = 10000 + learn_first_steps in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

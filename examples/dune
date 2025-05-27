@@ -22,7 +22,7 @@
   vae)
  (libraries cmdargs bos sofo owl domainslib owl-ode lqr ilqr framework)
  (preprocess
-  (pps ppx_sexp_message ppx-forward-torch)))
+  (pps ppx_sexp_message ppx-forward-torch ppx_jane)))
 
 (env
  (dev

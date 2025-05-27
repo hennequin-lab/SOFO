@@ -1,3 +1,4 @@
+(* Demonstrate the sampling from eigenvectors of the ggn helps with SOFO convergence. *)
 open Base
 open Owl
 

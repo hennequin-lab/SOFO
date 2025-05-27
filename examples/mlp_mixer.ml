@@ -1,4 +1,3 @@
-open Printf
 open Base
 open Owl
 open Torch
@@ -170,7 +169,7 @@ module MLP_mixer = struct
     in
     let final_layer = theta.(n_layers - 1) in
     let output = Maths.einsum [ mixer_blocked_mean, "mc"; final_layer.w, "cd" ] "md" in
-    Maths.(output)
+    output
 
   let init =
     let open MLP_Layer in
@@ -402,9 +401,9 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   module P = P
   module A = Make (Prms.P)
 
-  type sampling_state = unit
+  type sampling_state = int
 
-  let init_sampling_state () = ()
+  let init_sampling_state () = 0
 
   let zero_params ~shape _K =
     Tensor.zeros ~device:base.device ~kind:base.kind (_K :: shape)
@@ -485,6 +484,12 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     w_shape
 
+  let get_n_params _ = _K_w
+
+  let get_total_n_params (layer_name : layer) =
+    let list_prod l = List.fold l ~init:1 ~f:(fun accu i -> accu * i) in
+    list_prod (get_shapes layer_name)
+
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~(param_name : layer) ~n_per_param v =
     List.map layer_list ~f:(fun layer_name ->
@@ -509,92 +514,97 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       MLP_Layer.{ layer_name; w = final })
     |> List.to_array
 
-  let eigenvectors_for_each_params ~lambda ~(param_name : layer) =
-    let vs, n_per_param =
-      let left, right, n_per_param =
-        match param_name with
-        | Patchify -> lambda.patchify_w_left, lambda.patchify_w_right, _K_w
-        | TokenHidden 0 ->
-          lambda.token_hidden_0_w_left, lambda.token_hidden_0_w_right, _K_w
-        | TokenOutput 0 ->
-          lambda.token_output_0_w_left, lambda.token_output_0_w_right, _K_w
-        | ChannelHidden 0 ->
-          lambda.channel_hidden_0_w_left, lambda.channel_hidden_0_w_right, _K_w
-        | ChannelOutput 0 ->
-          lambda.channel_output_0_w_left, lambda.channel_output_0_w_right, _K_w
-        | TokenHidden 1 ->
-          lambda.token_hidden_1_w_left, lambda.token_hidden_1_w_right, _K_w
-        | TokenOutput 1 ->
-          lambda.token_output_1_w_left, lambda.token_output_1_w_right, _K_w
-        | ChannelHidden 1 ->
-          lambda.channel_hidden_1_w_left, lambda.channel_hidden_1_w_right, _K_w
-        | ChannelOutput 1 ->
-          lambda.channel_output_1_w_left, lambda.channel_output_1_w_right, _K_w
-        | Classification ->
-          lambda.classification_w_left, lambda.classification_w_right, _K_w
-        | _ -> assert false
-      in
-      let u_left, s_left, _ =
-        Tensor.svd ~some:true ~compute_uv:true Maths.(primal left)
-      in
-      let u_right, s_right, _ =
-        Tensor.svd ~some:true ~compute_uv:true Maths.(primal right)
-      in
-      let s_left = Tensor.to_float1_exn s_left |> Array.to_list in
-      let s_right = Tensor.to_float1_exn s_right |> Array.to_list in
-      let s_all =
-        List.mapi s_left ~f:(fun il sl ->
-          List.mapi s_right ~f:(fun ir sr -> il, ir, Float.(sl * sr)))
-        |> List.concat
-        |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
-        |> Array.of_list
-      in
-      (* randomly select the indices *)
-      let n_params =
-        Convenience.first_dim (Maths.primal left)
-        * Convenience.first_dim (Maths.primal right)
-      in
-      let selection =
-        List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
-      in
-      let selection = List.map selection ~f:(fun j -> s_all.(j)) in
-      let local_vs =
-        List.map selection ~f:(fun (il, ir, _) ->
-          let u_left =
-            Tensor.(
-              squeeze_dim
-                ~dim:1
-                (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
-          in
-          let u_right =
-            Tensor.(
-              squeeze_dim
-                ~dim:1
-                (slice u_right ~dim:1 ~start:(Some ir) ~end_:(Some Int.(ir + 1)) ~step:1))
-          in
-          let tmp =
-            match param_name with
-            | Patchify ->
-              let u_right_reshaped =
-                Tensor.reshape u_right ~shape:[ in_channels; patch_size; patch_size ]
-              in
-              Tensor.einsum
-                ~path:None
-                ~equation:"i,jkl->ijkl"
-                [ u_left; u_right_reshaped ]
-            | _ -> Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ]
-          in
-          Tensor.unsqueeze tmp ~dim:0)
-        |> Tensor.concatenate ~dim:0
-      in
-      local_vs, n_per_param
+  (* compute sorted eigenvalues, u_left and u_right. *)
+  let eigenvectors_for_params ~lambda ~param_name =
+    let left, right =
+      match param_name with
+      | Patchify -> lambda.patchify_w_left, lambda.patchify_w_right
+      | TokenHidden 0 -> lambda.token_hidden_0_w_left, lambda.token_hidden_0_w_right
+      | TokenOutput 0 -> lambda.token_output_0_w_left, lambda.token_output_0_w_right
+      | ChannelHidden 0 -> lambda.channel_hidden_0_w_left, lambda.channel_hidden_0_w_right
+      | ChannelOutput 0 -> lambda.channel_output_0_w_left, lambda.channel_output_0_w_right
+      | TokenHidden 1 -> lambda.token_hidden_1_w_left, lambda.token_hidden_1_w_right
+      | TokenOutput 1 -> lambda.token_output_1_w_left, lambda.token_output_1_w_right
+      | ChannelHidden 1 -> lambda.channel_hidden_1_w_left, lambda.channel_hidden_1_w_right
+      | ChannelOutput 1 -> lambda.channel_output_1_w_left, lambda.channel_output_1_w_right
+      | Classification -> lambda.classification_w_left, lambda.classification_w_right
+      | _ -> assert false
     in
-    vs |> localise ~param_name ~n_per_param
+    let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
+    let u_right, s_right, _ =
+      Tensor.svd ~some:true ~compute_uv:true Maths.(primal right)
+    in
+    let s_left = Tensor.to_float1_exn s_left |> Array.to_list in
+    let s_right = Tensor.to_float1_exn s_right |> Array.to_list in
+    let s_all =
+      List.mapi s_left ~f:(fun il sl ->
+        List.mapi s_right ~f:(fun ir sr -> il, ir, Float.(sl * sr)))
+      |> List.concat
+      |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
+      |> Array.of_list
+    in
+    s_all, u_left, u_right
 
-  let eigenvectors ~(lambda : A.M.t) () (_K : int) =
+  (* cache storage with a ref to memoize computed results *)
+  let s_u_cache = ref []
+
+  (* given param name, get eigenvalues and eigenvectors. *)
+  let get_s_u ~lambda ~param_name =
+    match List.Assoc.find !s_u_cache param_name ~equal:equal_layer with
+    | Some s -> s
+    | None ->
+      let s = eigenvectors_for_params ~lambda ~param_name in
+      s_u_cache := (param_name, s) :: !s_u_cache;
+      s
+
+  let extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection =
+    let n_per_param = get_n_params param_name in
+    let local_vs =
+      List.map selection ~f:(fun idx ->
+        let il, ir, _ = s_all.(idx) in
+        let slice_and_squeeze t dim idx =
+          Tensor.squeeze_dim
+            ~dim
+            (Tensor.slice t ~dim ~start:(Some idx) ~end_:(Some (idx + 1)) ~step:1)
+        in
+        let u_l = slice_and_squeeze u_left 1 il in
+        let u_r = slice_and_squeeze u_right 1 ir in
+        let tmp =
+          match param_name with
+          | Patchify ->
+            let u_r_reshaped =
+              Tensor.reshape u_r ~shape:[ in_channels; patch_size; patch_size ]
+            in
+            Tensor.einsum ~path:None ~equation:"i,jkl->ijkl" [ u_l; u_r_reshaped ]
+          | _ -> Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_l; u_r ]
+        in
+        (* let tmp = Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_l; u_r ] in *)
+        Tensor.unsqueeze tmp ~dim:0)
+      |> Tensor.concatenate ~dim:0
+    in
+    localise ~param_name ~n_per_param local_vs
+
+  let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state ~cycle =
+    let n_per_param = get_n_params param_name in
+    let n_params = get_total_n_params param_name in
+    let s_all, u_left, u_right =
+      if cycle
+      then get_s_u ~lambda ~param_name
+      else eigenvectors_for_params ~lambda ~param_name
+    in
+    let selection =
+      if cycle
+      then
+        List.init n_per_param ~f:(fun i ->
+          ((sampling_state * n_per_param) + i) % n_params)
+      else List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
+    in
+    extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection
+
+  let eigenvectors ~(lambda : A.M.t) t (_K : int) =
     let eigenvectors_each =
       List.map layer_list ~f:(fun param_name ->
-        eigenvectors_for_each_params ~lambda ~param_name)
+        eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:t ~cycle:true)
     in
     let vs =
       List.fold eigenvectors_each ~init:None ~f:(fun accu local_vs ->
@@ -602,7 +612,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         | None -> Some local_vs
         | Some a -> Some (P.map2 a local_vs ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ])))
     in
-    Option.value_exn vs, ()
+    Option.value_exn vs, t + 1
 
   let init () =
     let init_eye size =
@@ -707,6 +717,7 @@ end
 (* --------------------------------
      -- SOFO
      -------------------------------- *)
+let learn_first_steps = 1000
 
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (FF) (GGN)
@@ -721,11 +732,12 @@ module Do_with_SOFO : Do_with_T = struct
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
         ; steps = 5
+        ; learn_first_steps = Some learn_first_steps
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.01
+      ; learning_rate = Some 0.05
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
@@ -761,4 +773,4 @@ let _ =
       X.optimise
     | _ -> failwith "-m [sofo | fgd | adam]"
   in
-  optimise max_iter
+  optimise (max_iter + learn_first_steps)

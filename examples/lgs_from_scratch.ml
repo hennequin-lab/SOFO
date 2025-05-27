@@ -404,9 +404,7 @@ let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
 let elbo ~data:(o_list : Maths.t list) (theta : P.M.t) =
   let a = a_reparam (theta.q, theta.d) in
   let obs_precision = Maths.(precision_of_log_var theta.log_obs_var * ones_o) in
-  let ustars, backward_info =
-    lqr ~a ~b:theta.b ~b_0:theta.b_0 ~c:theta.c ~obs_precision o_list
-  in
+  let ustars, _ = lqr ~a ~b:theta.b ~b_0:theta.b_0 ~c:theta.c ~obs_precision o_list in
   let kl, u_sampled =
     let scaling_factor = theta.scaling_factor in
     sample_and_kl
@@ -489,7 +487,10 @@ type param_name =
   | C
   | Log_obs_var
   | Scaling_factor
+[@@deriving compare]
 
+let param_names_list = [ Q; D; C; Log_obs_var; Scaling_factor ]
+let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
 let n_params_q = 50
 let n_params_d = 10
 let n_params_c = Int.(_K - 2 - n_params_d - n_params_q)
@@ -519,9 +520,9 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   module P = P
   module A = Make (Prms.P)
 
-  type sampling_state = unit
+  type sampling_state = int
 
-  let init_sampling_state () = ()
+  let init_sampling_state () = 0
 
   let zero_params ~shape _K =
     Tensor.zeros ~device:base.device ~kind:base.kind (_K :: shape)
@@ -544,6 +545,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     | C -> n_params_c
     | Log_obs_var -> n_params_log_obs_var
     | Scaling_factor -> n_params_scaling_factor
+
+  let get_total_n_params (param_name : param_name) =
+    let list_prod l = List.fold l ~init:1 ~f:(fun accu i -> accu * i) in
+    list_prod (get_shapes param_name)
 
   let get_n_params_before_after (param_name : param_name) =
     let n_params_prefix_suffix_sums = Convenience.prefix_suffix_sums n_params_list in
@@ -591,15 +596,14 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     { q; d; b; b_0; c; log_obs_var; scaling_factor }
 
   (* set tangents = zero for other parameters but v for this parameter *)
-  let localise ~local ~param_name ~n_per_param v =
-    let sample = if local then zero_params else random_params in
-    let q = sample ~shape:(get_shapes Q) n_per_param in
-    let d = sample ~shape:(get_shapes D) n_per_param in
-    let c = sample ~shape:(get_shapes C) n_per_param in
-    let log_obs_var = sample ~shape:(get_shapes Log_obs_var) n_per_param in
-    let scaling_factor = sample ~shape:(get_shapes Scaling_factor) n_per_param in
-    let b = sample ~shape:[ m; n ] n_per_param in
-    let b_0 = sample ~shape:[ n; n ] n_per_param in
+  let localise ~param_name ~n_per_param v =
+    let q = zero_params ~shape:(get_shapes Q) n_per_param in
+    let d = zero_params ~shape:(get_shapes D) n_per_param in
+    let c = zero_params ~shape:(get_shapes C) n_per_param in
+    let log_obs_var = zero_params ~shape:(get_shapes Log_obs_var) n_per_param in
+    let scaling_factor = zero_params ~shape:(get_shapes Scaling_factor) n_per_param in
+    let b = zero_params ~shape:[ m; n ] n_per_param in
+    let b_0 = zero_params ~shape:[ n; n ] n_per_param in
     let params_tmp = PP.{ q; d; b; b_0; c; log_obs_var; scaling_factor } in
     match param_name with
     | Q -> { params_tmp with q = v }
@@ -627,26 +631,15 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     ; b_0 = zero_params ~shape:[ n; n ] _K
     }
 
-  (* let random_localised_vs _K : P.T.t =
-    { q = random_params ~shape:[ n; n ] _K
-    ; d = random_params ~shape:[ 1; n ] _K
-    ; b = zero_params ~shape:[ m; n ] _K
-    ; b_0 = zero_params ~shape:[ n; n ] _K
-    ; c = random_params ~shape:[ n; o ] _K
-    ; log_obs_var = random_params ~shape:[ 1 ] _K
-    ; scaling_factor = random_params ~shape:[ 1 ] _K
-    } *)
-
-  let eigenvectors_for_each_params ~local ~lambda ~param_name =
-    let left, right, n_per_param =
+  (* compute sorted eigenvalues, u_left and u_right. *)
+  let eigenvectors_for_params ~lambda ~param_name =
+    let left, right =
       match param_name with
-      | Q -> lambda.q_left, lambda.q_right, n_params_q
-      | D -> lambda.d_left, lambda.d_right, n_params_d
-      | C -> lambda.c_left, lambda.c_right, n_params_c
-      | Log_obs_var ->
-        lambda.log_obs_var_left, lambda.log_obs_var_right, n_params_log_obs_var
-      | Scaling_factor ->
-        lambda.scaling_factor_left, lambda.scaling_factor_right, n_params_scaling_factor
+      | Q -> lambda.q_left, lambda.q_right
+      | D -> lambda.d_left, lambda.d_right
+      | C -> lambda.c_left, lambda.c_right
+      | Log_obs_var -> lambda.log_obs_var_left, lambda.log_obs_var_right
+      | Scaling_factor -> lambda.scaling_factor_left, lambda.scaling_factor_right
     in
     let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
     let u_right, s_right, _ =
@@ -661,44 +654,63 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
       |> Array.of_list
     in
-    (* randomly select the indices *)
-    let n_params =
-      Convenience.first_dim (Maths.primal left)
-      * Convenience.first_dim (Maths.primal right)
-    in
-    let selection =
-      List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
-    in
-    let selection = List.map selection ~f:(fun j -> s_all.(j)) in
+    s_all, u_left, u_right
+
+  (* cache storage with a ref to memoize computed results *)
+  let s_u_cache = ref []
+
+  (* given param name, get eigenvalues and eigenvectors. *)
+  let get_s_u ~lambda ~param_name =
+    match List.Assoc.find !s_u_cache param_name ~equal:equal_param_name with
+    | Some s -> s
+    | None ->
+      let s = eigenvectors_for_params ~lambda ~param_name in
+      s_u_cache := (param_name, s) :: !s_u_cache;
+      s
+
+  let extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection =
+    let n_per_param = get_n_params param_name in
     let local_vs =
-      List.map selection ~f:(fun (il, ir, _) ->
-        let u_left =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
+      List.map selection ~f:(fun idx ->
+        let il, ir, _ = s_all.(idx) in
+        let slice_and_squeeze t dim idx =
+          Tensor.squeeze_dim
+            ~dim
+            (Tensor.slice t ~dim ~start:(Some idx) ~end_:(Some (idx + 1)) ~step:1)
         in
-        let u_right =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_right ~dim:1 ~start:(Some ir) ~end_:(Some Int.(ir + 1)) ~step:1))
-        in
+        let u_l = slice_and_squeeze u_left 1 il in
+        let u_r = slice_and_squeeze u_right 1 ir in
         let tmp =
           match param_name with
-          | Log_obs_var | Scaling_factor -> Tensor.(u_left * u_right)
-          | _ -> Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ]
+          | Log_obs_var | Scaling_factor -> Tensor.(u_l * u_r)
+          | _ -> Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_l; u_r ]
         in
         Tensor.unsqueeze tmp ~dim:0)
       |> Tensor.concatenate ~dim:0
     in
-    local_vs |> localise ~local ~param_name ~n_per_param
+    localise ~param_name ~n_per_param local_vs
 
-  let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ Q; D; C; Log_obs_var; Scaling_factor ] in
+  let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state ~cycle =
+    let n_per_param = get_n_params param_name in
+    let n_params = get_total_n_params param_name in
+    let s_all, u_left, u_right =
+      if cycle
+      then get_s_u ~lambda ~param_name
+      else eigenvectors_for_params ~lambda ~param_name
+    in
+    let selection =
+      if cycle
+      then
+        List.init n_per_param ~f:(fun i ->
+          ((sampling_state * n_per_param) + i) % n_params)
+      else List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
+    in
+    extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection
+
+  let eigenvectors ~(lambda : A.M.t) t (_K : int) =
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
-        eigenvectors_for_each_params ~local:true ~lambda ~param_name)
+        eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:t ~cycle:true)
     in
     let vs =
       List.fold eigenvectors_each ~init:None ~f:(fun accu local_vs ->
@@ -706,7 +718,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         | None -> Some local_vs
         | Some a -> Some (P.map2 a local_vs ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ])))
     in
-    Option.value_exn vs, ()
+    Option.value_exn vs, t + 1
 
   let init () =
     let init_eye size =
@@ -815,6 +827,7 @@ end
 (* --------------------------------
    -- SOFO
    -------------------------------- *)
+let learn_first_steps = 1000
 
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (M) (GGN)
@@ -827,8 +840,9 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-2; eps = 1e-4 }
+              { default with base; learning_rate = Some 5e-3; eps = 1e-4 }
         ; steps = 3
+        ; learn_first_steps = Some learn_first_steps
         }
     in
     Optimizer.Config.SOFO.
@@ -859,7 +873,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 5000 in
+  let max_iter = 5000 + learn_first_steps in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

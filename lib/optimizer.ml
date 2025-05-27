@@ -276,19 +276,27 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
   and returns loss and new state *)
   let step ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
+    (* extract aux learning flags. *)
+    let aux_learning, aux_exploit, learn_first_steps =
+      match config.aux with
+      | None -> false, false, false
+      | Some { learn_first_steps = Some t; _ } ->
+        let learn = state.t < t in
+        learn, not learn, learn
+      | Some { learn_first_steps = None; _ } ->
+        let even = state.t % 2 = 0 in
+        even, not even, false
+    in
     (* initialise tangents *)
     let theta = params state in
-    (* even trials, use random vs; odd trials, use vs sampled from eigenvectors *)
+    (* if learning or not using aux, use random vs; else use vs sampled from eigenvectors *)
     let _vs, new_sampling_state =
-      match config.aux with
-      | Some _ ->
-        if state.t % 2 = 0
-        then A.random_localised_vs config.n_tangents, state.sampling_state
-        else (
-          let lambda = O.params state.aux in
-          let lambda = A.A.map ~f:(fun x -> Maths.const (Prms.value x)) lambda in
-          A.eigenvectors ~lambda state.sampling_state config.n_tangents)
-      | None ->
+      if aux_exploit
+      then (
+        let lambda = O.params state.aux in
+        let lambda = A.A.map ~f:(fun x -> Maths.const (Prms.value x)) lambda in
+        A.eigenvectors ~lambda state.sampling_state config.n_tangents)
+      else
         ( init_tangents
             ~base:config.base
             ~rank_one:config.rank_one
@@ -321,21 +329,25 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
     in
     (* compute natural gradient and update theta *)
     let natural_g = natural_g ?damping:config.damping ~vs ~ggn:final_ggn vtg in
-    let new_theta = update_theta ?learning_rate:config.learning_rate ~theta natural_g in
+    let new_theta =
+      (* do not update when learning ggn during the first steps *)
+      let learning_rate = if learn_first_steps then None else config.learning_rate in
+      update_theta ?learning_rate ~theta natural_g
+    in
     (* update the auxiliary state by running a few iterations of Adam if using random vs (odd trial) *)
+    let update_aux (aux_config : ('a, 'b) Config.SOFO.aux) =
+      let data = _vs, final_ggn in
+      let rec aux_loop ~iter ~state =
+        let loss, new_state = O.step ~config:aux_config.config ~state ~data () in
+        Owl.Mat.(save_txt ~append:true ~out:aux_config.file (of_array [| loss |] 1 1));
+        if iter < aux_config.steps
+        then aux_loop ~iter:(iter + 1) ~state:new_state
+        else new_state
+      in
+      aux_loop ~iter:1 ~state:state.aux
+    in
     let new_aux =
-      match config.aux with
-      | Some aux_config when state.t % 2 = 0 ->
-        let rec aux_loop ~iter ~state =
-          let data = _vs, final_ggn in
-          let loss, new_state = O.step ~config:aux_config.config ~state ~data () in
-          Owl.Mat.(save_txt ~append:true ~out:aux_config.file (of_array [| loss |] 1 1));
-          if iter < aux_config.steps
-          then aux_loop ~iter:(iter + 1) ~state:new_state
-          else new_state
-        in
-        aux_loop ~iter:1 ~state:state.aux
-      | _ -> state.aux
+      if aux_learning then config.aux |> Option.value_exn |> update_aux else state.aux
     in
     ( loss
     , { t = state.t + 1

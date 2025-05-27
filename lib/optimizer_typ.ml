@@ -60,6 +60,7 @@ module Config = struct
       { steps : int
       ; file : string
       ; config : ('a, 'b) Adam.t
+      ; learn_first_steps : int option
       }
 
     type ('a, 'b) t =
@@ -71,7 +72,8 @@ module Config = struct
       ; aux : ('a, 'b) aux option
       }
 
-    let default_aux file = { steps = 10; file; config = Adam.default }
+    let default_aux file =
+      { steps = 10; file; config = Adam.default; learn_first_steps = None }
 
     let default =
       { base = Base.default
