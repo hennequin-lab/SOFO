@@ -6,15 +6,17 @@ open Torch
    the associated tangents have one more dimension, corresponding to tangent batch: [K; n1; n2; ... ]
 *)
 
-type _ tangent_kind =
-  | Explicit : Tensor.t -> Tensor.t tangent_kind
-  | On_demand : (Device.t -> Tensor.t) -> (Device.t -> Tensor.t) tangent_kind
+type tangent =
+  | Explicit of Tensor.t
+  | On_demand of (Device.t -> Tensor.t)
 
-type tangent = Tangent : 'a tangent_kind -> tangent
+type const = [ `Const ]
+type dual = [ `Dual ]
+type 'a any = [< `Const | `Dual ] as 'a
 
 type _ t =
-  | Const : Tensor.t -> [> `Const ] t
-  | Dual : Tensor.t * tangent -> [> `Dual ] t
+  | Const of Tensor.t
+  | Dual of Tensor.t * tangent
 
 exception Not_dual
 exception Wrong_shape of int list * int list
@@ -33,40 +35,46 @@ let assert_right_device x dx =
   and ddx = Tensor.device dx in
   if Poly.(dx <> ddx) then raise (Wrong_device (dx, ddx))
 
-let to_dual_exn : [ `Const | `Dual ] t -> [> `Dual ] t = function
-  | Const _ -> raise Not_dual
-  | Dual (_, _) as y -> y
-
-let const x : [> `Const ] t = Const x
-
-let dual ~dx (Const x : [ `Const ] t) : [> `Dual ] t =
-  assert_right_device x dx;
-  assert_right_shape x dx;
-  Dual (x, Tangent (Explicit dx))
-
-let dual_lazy ~dx (Const x : [ `Const ] t) : [> `Dual ] t =
-  let dx device =
-    let dx = dx device in
-    assert_right_shape x dx;
-    assert_right_device x dx;
-    dx
-  in
-  Dual (x, Tangent (On_demand dx))
-
-let tangent_tensor_of (Dual (x, Tangent dx) : [ `Dual ] t) : Tensor.t =
-  match dx with
+let tangent_tensor_of x v =
+  match v with
   | Explicit dx -> dx
   | On_demand dx -> dx (Tensor.device x)
 
-let primal : [< `Const | `Dual ] t -> Tensor.t = function
+let as_const = function
+  | Const x -> Const x
+  | Dual (x, _) -> Const x
+
+let as_dual_exn = function
+  | Dual _ as y -> y
+  | _ -> raise Not_dual
+
+let const x = Const x
+
+let dual ~dx = function
+  | Const x ->
+    assert_right_device x dx;
+    assert_right_shape x dx;
+    Dual (x, Explicit dx)
+  | _ -> assert false (* will never happen *)
+
+let dual_lazy ~dx = function
+  | Const x ->
+    let dx device =
+      let dx = dx device in
+      assert_right_shape x dx;
+      assert_right_device x dx;
+      dx
+    in
+    Dual (x, On_demand dx)
+  | _ -> assert false (* will never happen *)
+
+let primal = function
   | Const x -> x
   | Dual (x, _) -> x
 
-let tangent : [< `Dual ] t -> Tensor.t = function
-  | Dual (_, _) as z -> tangent_tensor_of z
-
-let force_lazy_tangent : [< `Dual ] t -> [ `Dual ] t = function
-  | Dual (x, _) as z -> Dual (x, Tangent (Explicit (tangent_tensor_of z)))
+let tangent = function
+  | Dual (x, dx) -> tangent_tensor_of x dx
+  | _ -> assert false (* will never happen *)
 
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
 let shape x = x |> primal |> Tensor.shape
@@ -83,29 +91,40 @@ let append_batch ~tangent shape =
 (* constant scalar tensor *)
 let f x = Const (Tensor.f x)
 
+type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
+
+let zeros ?device ?kind shape = Const (Tensor.zeros ?device ?kind shape)
+let ones ?device ?kind ?scale shape = Const (Tensor.zeros ?device ?kind ?scale shape)
+let rand ?device ?kind ?scale shape = Const (Tensor.rand ?device ?kind ?scale shape)
+let randn ?device ?kind ?scale shape = Const (Tensor.randn ?device ?kind ?scale shape)
+let zeros_like x = Const (Tensor.zeros_like (primal x))
+let ones_like x = Const (Tensor.ones_like (primal x))
+let rand_like x = Const (Tensor.rand_like (primal x))
+let randn_like x = Const (Tensor.randn_like (primal x))
+
 module Builder = struct
   type a = Tensor.t
 
   module Const = struct
-    type 'a unary_op = [ `Const ] t -> ([> `Const ] as 'a) t
-    type 'a binary_op = [ `Const ] t -> [ `Const ] t -> ([> `Const ] as 'a) t
+    type unary_op = const t -> const t
+    type binary_op = const t -> const t -> const t
     type unary_builder = a -> a
     type binary_builder = a -> a -> a
 
-    let make_unary (f : unary_builder) : 'a unary_op = function
+    let make_unary (f : unary_builder) : unary_op = function
       | Const x -> Const (f x)
+      | _ -> assert false
 
-    let make_binary (f : binary_builder) : 'a binary_op =
+    let make_binary (f : binary_builder) : binary_op =
       fun x y ->
       match x, y with
       | Const x, Const y -> Const (f x y)
+      | _ -> assert false
   end
 
   module Any = struct
-    type 'a unary_op = [ `Const | `Dual ] t -> ([> `Const | `Dual ] as 'a) t
-
-    type 'a binary_op =
-      [ `Const | `Dual ] t -> [ `Const | `Dual ] t -> ([> `Const | `Dual ] as 'a) t
+    type 'a unary_op = 'a any t -> 'a any t
+    type ('a, 'b, 'c) binary_op = 'a any t -> 'b any t -> 'c any t
 
     type unary_builder =
       { f : a -> a
@@ -119,29 +138,26 @@ module Builder = struct
       ; dfxy : f:a -> x:a -> y:a -> a -> a -> a
       }
 
-    let make_unary (b : unary_builder) : 'a unary_op = function
+    let make_unary (b : unary_builder) : 'a any t -> 'a any t = function
       | Const x -> Const (b.f x)
-      | Dual (x, _) as xx ->
+      | Dual (x, dx) ->
         let f = b.f x in
-        Dual (f, Tangent (Explicit (b.df ~f ~x (tangent_tensor_of xx))))
+        Dual (f, Explicit (b.df ~f ~x (tangent_tensor_of x dx)))
 
-    let make_binary (b : binary_builder) : 'a binary_op =
+    let make_binary (b : binary_builder) : (_, _, _) binary_op =
       fun x y ->
       match x, y with
       | Const x, Const y -> Const (b.f x y)
-      | (Dual (x, _) as xx), Const y ->
+      | Dual (x, dx), Const y ->
         let f = b.f x y in
-        Dual (f, Tangent (Explicit (b.dfx ~f ~x ~y (tangent_tensor_of xx))))
-      | Const x, (Dual (y, _) as yy) ->
+        Dual (f, Explicit (b.dfx ~f ~x ~y (tangent_tensor_of x dx)))
+      | Const x, Dual (y, dy) ->
         let f = b.f x y in
-        Dual (f, Tangent (Explicit (b.dfy ~f ~x ~y (tangent_tensor_of yy))))
-      | (Dual (x, _) as xx), (Dual (y, _) as yy) ->
+        Dual (f, Explicit (b.dfy ~f ~x ~y (tangent_tensor_of y dy)))
+      | Dual (x, dx), Dual (y, dy) ->
         let f = b.f x y in
         Dual
-          ( f
-          , Tangent
-              (Explicit (b.dfxy ~f ~x ~y (tangent_tensor_of xx) (tangent_tensor_of yy)))
-          )
+          (f, Explicit (b.dfxy ~f ~x ~y (tangent_tensor_of x dx) (tangent_tensor_of y dy)))
   end
 end
 
@@ -282,7 +298,7 @@ module Ops = struct
     Builder.Any.{ f; df }
 
   (* like Torch's slice but not sharing data *)
-  let slice ~dim ~start ~end_ ~step =
+  let[@warning "-16"] slice ?(step = 1) ?start ?end_ ~dim =
     let f = Tensor.slice_copy ~dim ~start ~end_ ~step in
     let df ~f:_ ~x:_ dx = Tensor.slice_copy ~dim:Int.(dim + 1) ~start ~end_ ~step dx in
     Builder.Any.{ f; df }
@@ -291,23 +307,17 @@ module Ops = struct
   let sum =
     let f = Tensor.sum in
     let df ~f:_ ~x dx =
-      (* if x has shape [m, n, k], dim is the int list [1, 2, 3]
-         whereas dx has shape [B, m, n, k] *)
+      (* make sure to preserve the batch dimension in dx *)
       let dim = List.mapi (Tensor.shape x) ~f:(fun i _ -> Int.(i + 1)) in
-      (* retain the batch dimension, sum over the rest *)
       Tensor.(sum_dim_intlist ~keepdim:false ~dtype:(type_ dx) ~dim:(Some dim) dx)
     in
     Builder.Any.{ f; df }
 
-  let sum_dim ~dim ~keepdim =
-    let f x = Tensor.(sum_dim_intlist x ~dim ~keepdim ~dtype:(type_ x)) in
-    let df ~f:_ ~x dx =
+  let[@warning "-16"] sum_dim ?(keepdim = false) ~dim =
+    let f x = Tensor.(sum_dim_intlist x ~dim:(Some dim) ~keepdim ~dtype:(type_ x)) in
+    let df ~f:_ ~x:_ dx =
       (* make sure to preserve the batch dimension in dx *)
-      let dim =
-        match dim with
-        | Some d -> List.map d ~f:Int.succ
-        | None -> List.mapi (Tensor.shape x) ~f:(fun i _ -> Int.(i + 1))
-      in
+      let dim = List.map dim ~f:Int.succ in
       Tensor.(sum_dim_intlist ~dim:(Some dim) ~keepdim ~dtype:(type_ dx) dx)
     in
     Builder.Any.{ f; df }
@@ -320,15 +330,11 @@ module Ops = struct
     in
     Builder.Any.{ f; df }
 
-  let mean_dim ~dim ~keepdim =
-    let f x = Tensor.(mean_dim x ~dim ~keepdim ~dtype:(type_ x)) in
-    let df ~f:_ ~x dx =
+  let[@warning "-16"] mean_dim ?(keepdim = false) ~dim =
+    let f x = Tensor.(mean_dim x ~dim:(Some dim) ~keepdim ~dtype:(type_ x)) in
+    let df ~f:_ ~x:_ dx =
       (* make sure to preserve the batch dimension in dx *)
-      let dim =
-        match dim with
-        | Some d -> List.map d ~f:Int.succ
-        | None -> List.mapi (Tensor.shape x) ~f:(fun i _ -> Int.(i + 1))
-      in
+      let dim = List.map dim ~f:Int.succ in
       Tensor.(mean_dim ~dim:(Some dim) ~keepdim ~dtype:(type_ dx) dx)
     in
     Builder.Any.{ f; df }
@@ -367,31 +373,29 @@ module Primal = struct
   let sigmoid = Builder.Const.make_unary (unary_of_any Ops.sigmoid)
   let softplus = Builder.Const.make_unary (unary_of_any Ops.softplus)
 
-  let slice ~dim ~start ~end_ ~step =
-    Builder.Const.make_unary (unary_of_any (Ops.slice ~dim ~start ~end_ ~step))
+  let slice ?start ?end_ ?step ~dim =
+    Builder.Const.make_unary (unary_of_any (Ops.slice ?start ?end_ ?step ~dim))
 
   let sum = Builder.Const.make_unary (unary_of_any Ops.sum)
 
-  let sum_dim ~dim ~keepdim =
-    Builder.Const.make_unary (unary_of_any (Ops.sum_dim ~dim ~keepdim))
+  let sum_dim ?keepdim ~dim =
+    Builder.Const.make_unary (unary_of_any (Ops.sum_dim ?keepdim ~dim))
 
   let mean = Builder.Const.make_unary (unary_of_any Ops.mean)
 
-  let mean_dim ~dim ~keepdim =
-    Builder.Const.make_unary (unary_of_any (Ops.mean_dim ~dim ~keepdim))
+  let mean_dim ?keepdim ~dim =
+    Builder.Const.make_unary (unary_of_any (Ops.mean_dim ?keepdim ~dim))
 
   let ( + ) = Builder.Const.make_binary (binary_of_any Ops.(( + )))
 
-  let einsum (operands : ([ `Const ] t * string) list) return =
+  let einsum (operands : (_ t * string) list) return =
     let tangent_id = 'x' in
     assert (not (String.contains return tangent_id));
     assert (
       List.fold operands ~init:true ~f:(fun accu (_, eq) ->
         accu && not (String.contains eq tangent_id)));
-    let result_primal =
-      Ops.einsum (List.map operands ~f:(fun (Const x, eq) -> x, eq)) return
-    in
-    Const result_primal
+    let y = Ops.einsum (List.map operands ~f:(fun (x, eq) -> primal x, eq)) return in
+    Const y
 end
 
 let view ~size = Builder.Any.make_unary (Ops.view ~size)
@@ -399,48 +403,46 @@ let reshape ~shape = Builder.Any.make_unary (Ops.reshape ~shape)
 let permute ~dims = Builder.Any.make_unary (Ops.permute ~dims)
 let squeeze ~dim = Builder.Any.make_unary (Ops.squeeze ~dim)
 let unsqueeze ~dim = Builder.Any.make_unary (Ops.unsqueeze ~dim)
-let neg = Builder.Any.make_unary Ops.neg
-let trace = Builder.Any.make_unary Ops.trace
-let sin = Builder.Any.make_unary Ops.sin
-let cos = Builder.Any.make_unary Ops.cos
-let sqr = Builder.Any.make_unary Ops.sqr
-let sqrt = Builder.Any.make_unary Ops.sqrt
-let log = Builder.Any.make_unary Ops.log
-let exp = Builder.Any.make_unary Ops.exp
-let tanh = Builder.Any.make_unary Ops.tanh
-let relu = Builder.Any.make_unary Ops.relu
-let sigmoid = Builder.Any.make_unary Ops.sigmoid
-let softplus = Builder.Any.make_unary Ops.softplus
+let neg x = Builder.Any.make_unary Ops.neg x
+let trace x = Builder.Any.make_unary Ops.trace x
+let sin x = Builder.Any.make_unary Ops.sin x
+let cos x = Builder.Any.make_unary Ops.cos x
+let sqr x = Builder.Any.make_unary Ops.sqr x
+let sqrt x = Builder.Any.make_unary Ops.sqrt x
+let log x = Builder.Any.make_unary Ops.log x
+let exp x = Builder.Any.make_unary Ops.exp x
+let tanh x = Builder.Any.make_unary Ops.tanh x
+let relu x = Builder.Any.make_unary Ops.relu x
+let sigmoid x = Builder.Any.make_unary Ops.sigmoid x
+let softplus x = Builder.Any.make_unary Ops.softplus x
 
-let slice ~dim ~start ~end_ ~step =
-  Builder.Any.make_unary (Ops.slice ~dim ~start ~end_ ~step)
+let slice ?start ?end_ ?step ~dim x =
+  Builder.Any.make_unary (Ops.slice ?start ?end_ ?step ~dim) x
 
-let sum = Builder.Any.make_unary Ops.sum
-let sum_dim ~dim ~keepdim = Builder.Any.make_unary (Ops.sum_dim ~dim ~keepdim)
-let mean = Builder.Any.make_unary Ops.mean
-let mean_dim ~dim ~keepdim = Builder.Any.make_unary (Ops.mean_dim ~dim ~keepdim)
-let ( + ) = Builder.Any.make_binary Ops.(( + ))
+let sum x = Builder.Any.make_unary Ops.sum x
+let sum_dim ?keepdim ~dim x = Builder.Any.make_unary (Ops.sum_dim ?keepdim ~dim) x
+let mean x = Builder.Any.make_unary Ops.mean x
+let mean_dim ?keepdim ~dim x = Builder.Any.make_unary (Ops.mean_dim ?keepdim ~dim) x
+let ( + ) x = Builder.Any.make_binary Ops.(( + )) x
 
 (* einsum [ a, "ij"; b, "jk"; c, "ki" ] "ii" *)
 
-let einsum (operands : ([ `Const | `Dual ] t * string) list) return =
+let einsum (operands : (_ t * string) list) return =
   let tangent_id = 'x' in
   assert (not (String.contains return tangent_id));
   assert (
     List.fold operands ~init:true ~f:(fun accu (_, eq) ->
       accu && not (String.contains eq tangent_id)));
-  let result_primal =
-    Ops.einsum (List.map operands ~f:(fun (x, eq) -> primal x, eq)) return
-  in
-  let result_tangent =
+  let y = Ops.einsum (List.map operands ~f:(fun (x, eq) -> primal x, eq)) return in
+  let dy =
     List.foldi operands ~init:None ~f:(fun i accu (op, eq) ->
       match op with
       | Const _ -> accu
-      | Dual (_, _) as opp ->
+      | Dual (x, dx) ->
         let ops =
           List.mapi operands ~f:(fun j (op', eq') ->
             if i = j
-            then tangent_tensor_of opp, String.of_char tangent_id ^ eq
+            then tangent_tensor_of x dx, String.of_char tangent_id ^ eq
             else primal op', eq')
         in
         let return = String.of_char tangent_id ^ return in
@@ -449,6 +451,6 @@ let einsum (operands : ([ `Const | `Dual ] t * string) list) return =
          | None -> Some tangent_contrib
          | Some a -> Some Tensor.(a + tangent_contrib)))
   in
-  match result_tangent with
-  | Some dr -> Dual (result_primal, Tangent (Explicit dr))
-  | None -> Const result_primal
+  match dy with
+  | None -> Const y
+  | Some dy -> Dual (y, Explicit dy)
