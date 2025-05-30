@@ -1,68 +1,135 @@
 open Base
 open Torch
 include Prms_typ
+open Maths
+
+(* ------------------------------------------------------------
+   -- Basic functions for dealing with parameters
+   ------------------------------------------------------------ *)
 
 let value = function
-  | Const x -> x
+  | Pinned x -> x
   | Free x -> x
-  | Bounded (x, _, _) -> x
+  | Bounded x -> x.v
 
-let bind x ~f = f (value x)
+let maybe_apply_bounds = function
+  | Pinned x -> Pinned x
+  | Free x -> Free x
+  | Bounded { v; lb; ub } ->
+    let x = primal v in
+    let x = Option.value_map lb ~default:x ~f:(fun lb -> Tensor.max x (primal lb)) in
+    let x = Option.value_map ub ~default:x ~f:(fun ub -> Tensor.min x (primal ub)) in
+    let v =
+      match v with
+      | Const _ -> Const x
+      | Dual (_, dx) -> Dual (x, dx)
+    in
+    Bounded { v; lb; ub }
 
-(* map enforces Const and Bounds constraints *)
-let map x ~f =
-  match x with
-  | Const x -> Const x
-  | Free x -> Free (f x)
-  | Bounded (x, lb, ub) ->
-    let y = f x in
-    let y = Option.value_map lb ~default:y ~f:(Tensor.max y) in
-    let y = Option.value_map ub ~default:y ~f:(Tensor.min y) in
-    Bounded (y, lb, ub)
+(** Path specified as a list of strings. *)
+type path = String.t List.t
 
-(* can only pair values of the same tag; if they are both Bounded,
-   bounds should be the same *)
-let pair x1 x2 = Const (value x1, value x2)
+module type Basic = sig
+  (** If you want to make your own custom parameter structure
+      which for a reason or another cannot be automated using [ppx-prms]
+      (e.g. if it is not a record type), then you will need to use
+      {!Forward_torch.Prms.Make} and provide a module of this type. *)
 
-let pair' (x1 : ('a, Tensor.t, Tensor.t) tag) (x2 : ('b, Tensor.t, Tensor.t) tag) =
-  match x1 with
-  | Const z1 -> Const z1
-  | Free z1 -> Free (z1, value x2)
-  | Bounded (z1, lb, ub) -> Bounded ((z1, value x2), lb, ub)
+  type 'a p
 
-let pair'' (x1 : ('a, Tensor.t, Tensor.t) tag) (x2 : Tensor.t) =
-  match x1 with
-  | Const z1 -> Const z1
-  | Free z1 -> Free (z1, x2)
-  | Bounded (z1, lb, ub) -> Bounded ((z1, x2), lb, ub)
+  (** Apply function [f] on all elements in x. *)
+  val map : 'a p -> f:('a -> 'b) -> 'b p
 
-module Let_syntax = struct
-  let ( let* ) x f = bind x ~f
-  let ( and* ) = pair
-  let ( let+ ) x f = map x ~f
-  let ( and+ ) = pair'
-  let ( and++ ) = pair''
+  (** Apply function [f] on all elements in x and y. *)
+  val map2 : 'a p -> 'b p -> f:('a -> 'b -> 'c) -> 'c p
+
+  (** Fold x with [init] and function [f].
+    [?path] optionally contains a record of the path (a list of strings, in reverse order) taken to
+      arrive at the current value, if it is nested within a broader structure. Make sure to use this
+      if you want to attach string labels to the various components of your custom ['a p] type
+      (e.g. use for saving to files, see {!Forward_torch.Prms.module-type-T.T.save_npy}). *)
+  val fold : ?path:path -> 'a p -> init:'c -> f:('c -> 'a * path option -> 'c) -> 'c
+
+  (** Fold x and y with [init] and function [f]. *)
+  val fold2
+    :  ?path:path
+    -> 'a p
+    -> 'b p
+    -> init:'c
+    -> f:('c -> 'a * 'b * path option -> 'c)
+    -> 'c
 end
 
-open Let_syntax
+(* ------------------------------------------------------------
+   -- Main type for parameter structures
+   ------------------------------------------------------------ *)
 
-let const x = Const x
-let free x = Free x
+module type T = sig
+  include Basic
 
-let create ?above ?below x =
-  match above, below with
-  | None, None -> Free x
-  | _ -> Bounded (x, above, below)
+  (** Apply function [f] to each element in x. *)
+  val iter : 'a p -> f:('a -> unit) -> unit
 
-let pin ?to_ x =
-  let* x = x in
-  Const (Option.value ~default:x to_)
+  (** Apply function [f] to each element in x and y. *)
+  val iter2 : 'a p -> 'b p -> f:('a -> 'b -> unit) -> unit
 
-let bound ?above ?below = function
-  | Free z -> Bounded (z, above, below)
-  | _ -> failwith "Can only bound a Free parameter"
+  type 'a elt = 'a t
+  type nonrec 'a t = 'a elt p
+  type nonrec param = param p
 
-let numel t = List.fold ~init:1 ~f:( * ) (Tensor.shape t)
+  (** Extract value as Tensor.t in all elements in x. *)
+  val value : param -> const t
+
+  val as_const : _ any t -> const t
+  val as_dual_exn : _ any t -> dual t
+  val const : Tensor.t p -> const t
+  val dual : dx:const t -> const t -> dual t
+  val dual_lazy : dx:(Device.t -> const Maths.t) p -> const t -> dual t
+  val primal : _ any t -> Tensor.t p
+  val tangent : dual t -> Tensor.t p
+  val zeros_like : _ any t -> const t
+  val ones_like : _ any t -> const t
+  val rand_like : _ any t -> const t
+  val randn_like : _ any t -> const t
+
+  (** Returns the number of parameters in x. *)
+  val numel : _ any t -> int
+
+  (** Returns the dot product between x and y. *)
+  val dot_prod : 'a any t -> 'b any t -> 'c any elt
+
+  (** Element-wise multiplication of two parameter sets *)
+  val ( * ) : 'a any t -> 'b any t -> 'c any t
+
+  (** Element-wise addition of two parameter sets *)
+  val ( + ) : 'a any t -> 'b any t -> 'c any t
+
+  (** Element-wise subtraction of two parameter sets *)
+  val ( - ) : 'a any t -> 'b any t -> 'c any t
+
+  (** Element-wise division of two parameter sets *)
+  val ( / ) : 'a any t -> 'b any t -> 'c any t
+
+  (** Multiplication of a parameter set with a scalar *)
+  val ( $* ) : float -> 'a any t -> 'a any t
+
+  (** Adds a scalar to a parameter set *)
+  val ( $+ ) : float -> 'a any t -> 'a any t
+
+  (** Save x as [kind] in [out]. *)
+  val save : const t -> kind:('a, 'b) Bigarray.kind -> out:string -> unit
+
+  (** Load params from file onto [device]. *)
+  val load : ?device:Device.t -> string -> const t
+
+  (** Save x as [kind] in [out] with [prefix] as .npy file. *)
+  val save_npz
+    :  ?prefix:string
+    -> kind:('a, 'b) Bigarray.kind
+    -> out:string
+    -> const t
+    -> unit
+end
 
 let cat label =
   if String.(label = "")
@@ -72,152 +139,98 @@ let cat label =
     | None -> Some [ label ]
     | Some p -> Some (label :: p)
 
-module Make (B : Basic) : T with type 'a p = 'a B.p = struct
-  let map_ = map
+(* ------------------------------------------------------------
+   -- Functor used by the ppx
+   ------------------------------------------------------------ *)
 
+module Make (B : Basic) : T with type 'a p = 'a B.p = struct
   include B
 
-  type nonrec tagged = tagged p
+  type 'a elt = 'a t
+  type nonrec 'a t = 'a elt p
+  type nonrec param = param p
 
   let iter x ~f = fold ?path:None x ~init:() ~f:(fun () (x, _) -> f x)
   let iter2 x y ~f = fold2 ?path:None x y ~init:() ~f:(fun () (x, y, _) -> f x y)
-
-  module T = struct
-    type t = Tensor.t p
-    type elt = Tensor.t
-
-    let zeros_like x = map x ~f:Tensor.zeros_like
-    let ones_like x = map x ~f:Tensor.ones_like
-
-    let gaussian_like ?mu ?sigma x =
-      map x ~f:(fun x ->
-        let z = Tensor.randn_like x in
-        let z =
-          match sigma with
-          | None -> z
-          | Some s -> Tensor.mul_scalar_ z (Scalar.f s)
-        in
-        match mu with
-        | None -> z
-        | Some m -> Tensor.add_scalar_ z (Scalar.f m))
-
-    let gaussian_like_k ?mu ?sigma ~(k : int) x =
-      map x ~f:(fun x ->
-        let x_shape = Tensor.shape x in
-        let z =
-          Tensor.randn ~device:(Tensor.device x) ~kind:(Tensor.kind x) (k :: x_shape)
-        in
-        let z =
-          match sigma with
-          | None -> z
-          | Some s -> Tensor.mul_scalar_ z (Scalar.f s)
-        in
-        match mu with
-        | None -> z
-        | Some m -> Tensor.add_scalar_ z (Scalar.f m))
-
-    let numel x = fold x ~init:0 ~f:(fun accu (x, _) -> accu + numel x)
-
-    let dot_prod x y =
-      fold2 x y ~init:None ~f:(fun accu (x, y, _) ->
-        let (z : Tensor.t) = Tensor.(sum (x * y)) in
-        match accu with
-        | None -> Some z
-        | Some a -> Some Tensor.(a + z))
-      |> Option.value_exn
-
-    let sqr = map ~f:Tensor.square
-    let sqrt = map ~f:Tensor.sqrt
-    let ( + ) = map2 ~f:Tensor.( + )
-    let ( - ) = map2 ~f:Tensor.( - )
-    let ( * ) = map2 ~f:Tensor.( * )
-    let ( / ) = map2 ~f:Tensor.( / )
-    let ( $+ ) x = map ~f:(fun a -> Tensor.(add_scalar a (Scalar.f x)))
-    let ( $* ) x = map ~f:(fun a -> Tensor.(mul_scalar a (Scalar.f x)))
-
-    let save m ~kind ~out:filename =
-      let m = map m ~f:(fun x -> Tensor.to_bigarray x ~kind) in
-      let output = Stdio.Out_channel.create filename in
-      Stdlib.Marshal.to_channel output m [ Stdlib.Marshal.No_sharing ];
-      Stdio.Out_channel.close output
-
-    let load ?device filename =
-      let input = Stdio.In_channel.create filename in
-      let m = Stdlib.Marshal.from_channel input in
-      Stdio.In_channel.close input;
-      map m ~f:(fun x -> Tensor.of_bigarray ?device x)
-
-    let save_npy ?prefix ~kind ~out prms =
-      let prms = map prms ~f:(fun x -> Tensor.to_bigarray x ~kind) in
-      let path = Option.map prefix ~f:(fun s -> [ s ]) in
-      let file = Npy.Npz.open_out out in
-      fold ?path prms ~init:() ~f:(fun () (prm, path) ->
-        let descr =
-          match path with
-          | None -> assert false
-          | Some p -> String.concat ~sep:"/" (List.rev p)
-        in
-        Npy.Npz.write file descr prm);
-      Npy.Npz.close_out file
-  end
-
-  let const = map ~f:Maths.const
   let value = map ~f:value
-  let primal = map ~f:Maths.primal
+  let as_const = map ~f:as_const
+  let as_dual_exn = map ~f:as_dual_exn
+  let const = map ~f:const
+  let dual ~dx x = map2 x dx ~f:(fun x dx -> dual ~dx x)
+  let dual_lazy ~dx x = map2 x dx ~f:(fun x dx -> dual_lazy ~dx x)
+  let primal = map ~f:primal
+  let tangent = map ~f:tangent
+  let zeros_like = map ~f:zeros_like
+  let ones_like = map ~f:ones_like
+  let rand_like = map ~f:rand_like
+  let randn_like = map ~f:randn_like
+  let numel x = fold x ~init:0 ~f:(fun accu (x, _) -> Int.(accu + numel x))
 
-  let tangent x =
-    try map x ~f:(fun x -> Option.value_exn (Maths.tangent x)) with
-    | _ -> raise Maths.Not_a_dual_number
+  let dot_prod x y =
+    fold2 x y ~init:None ~f:(fun accu (x, y, _) ->
+      let z = sum (x * y) in
+      match accu with
+      | None -> Some z
+      | Some a -> Some (a + z))
+    |> Option.value_exn
 
-  let make_dual x ~t =
-    map2 x t ~f:(fun x t ->
-      match x with
-      | Const x -> Maths.const x
-      | Free x -> Maths.make_dual x ~t
-      | Bounded (x, _, _) -> Maths.make_dual x ~t)
+  let ( + ) = map2 ~f:( + )
+  let ( - ) = map2 ~f:( - )
+  let ( * ) = map2 ~f:( * )
+  let ( / ) = map2 ~f:( / )
+  let ( $+ ) z = map ~f:(( $+ ) z)
+  let ( $* ) z = map ~f:(( $* ) z)
 
-  module M = struct
-    type t = Maths.t p
-    type elt = Maths.t
+  let save m ~kind ~out:filename =
+    let m = map m ~f:(fun x -> Tensor.to_bigarray (Maths.primal x) ~kind) in
+    let output = Stdio.Out_channel.create filename in
+    Stdlib.Marshal.to_channel output m [ Stdlib.Marshal.No_sharing ];
+    Stdio.Out_channel.close output
 
-    let zeros_like x = const (T.zeros_like (primal x))
-    let ones_like x = const (T.ones_like (primal x))
-    let gaussian_like ?mu ?sigma x = const (T.gaussian_like ?mu ?sigma (primal x))
+  let load ?device filename =
+    let input = Stdio.In_channel.create filename in
+    let m = Stdlib.Marshal.from_channel input in
+    Stdio.In_channel.close input;
+    map m ~f:(fun x -> Maths.const (Tensor.of_bigarray ?device x))
 
-    let gaussian_like_k ?mu ?sigma ~k x =
-      const (T.gaussian_like_k ?mu ?sigma ~k (primal x))
-
-    let numel x = T.numel (primal x)
-
-    let dot_prod x y =
-      fold2 x y ~init:None ~f:(fun accu (x, y, _) ->
-        let (z : Maths.t) = Maths.(sum (x * y)) in
-        match accu with
-        | None -> Some z
-        | Some a -> Some Maths.(a + z))
-      |> Option.value_exn
-
-    let sqr = map ~f:Maths.sqr
-    let sqrt = map ~f:Maths.sqrt
-    let ( + ) = map2 ~f:Maths.( + )
-    let ( - ) = map2 ~f:Maths.( - )
-    let ( * ) = map2 ~f:Maths.( * )
-    let ( / ) = map2 ~f:Maths.( / )
-    let ( $+ ) x = map ~f:(fun a -> Maths.(x $+ a))
-    let ( $* ) x = map ~f:(fun a -> Maths.(x $* a))
-  end
-
-  module Let_syntax = struct
-    let ( let* ) x f =
-      let x = value x in
-      f x
-
-    let ( and* ) x y = map2 x y ~f:pair
-    let ( let+ ) x f = map x ~f:(map_ ~f)
-    let ( and+ ) x y = map2 x y ~f:pair'
-    let ( and++ ) x y = map2 x y ~f:pair''
-  end
+  let save_npz ?prefix ~kind ~out prms =
+    let prms = map prms ~f:(fun x -> Tensor.to_bigarray (Maths.primal x) ~kind) in
+    let path = Option.map prefix ~f:(fun s -> [ s ]) in
+    let file = Npy.Npz.open_out out in
+    fold ?path prms ~init:() ~f:(fun () (prm, path) ->
+      let descr =
+        match path with
+        | None -> assert false
+        | Some p -> String.concat ~sep:"/" (List.rev p)
+      in
+      Npy.Npz.write file descr prm);
+    Npy.Npz.close_out file
 end
+
+(* ------------------------------------------------------------
+   -- Singleton parameter 
+   ------------------------------------------------------------ *)
+
+module Singleton_basic : Basic with type 'a p = 'a = struct
+  type 'a p = 'a
+
+  let map x ~f = f x
+  let map2 x y ~f = f x y
+  let fold ?path x ~init ~f = f init (x, path)
+  let fold2 ?path x y ~init ~f = f init (x, y, path)
+end
+
+module Singleton = struct
+  include Make (Singleton_basic)
+
+  let pinned x = Pinned x
+  let free (x : const t) = Free x
+  let bounded ?above:lb ?below:ub (x : const t) = Bounded { v = x; lb; ub }
+end
+
+(* ------------------------------------------------------------
+   -- The empty parameter
+   ------------------------------------------------------------ *)
 
 module None : T with type 'a p = unit = Make (struct
     type 'a p = unit
@@ -228,14 +241,9 @@ module None : T with type 'a p = unit = Make (struct
     let fold2 ?path:_ () () ~init ~f:_ = init
   end)
 
-module P = Make (struct
-    type 'a p = 'a
-
-    let map x ~f = f x
-    let map2 x y ~f = f x y
-    let fold ?path x ~init ~f = f init (x, path)
-    let fold2 ?path x y ~init ~f = f init (x, y, path)
-  end)
+(* ------------------------------------------------------------
+   -- Parameter pairs
+   ------------------------------------------------------------ *)
 
 module Pair (P1 : T) (P2 : T) = Make (struct
     type 'a p = 'a P1.p * 'a P2.p
@@ -251,6 +259,10 @@ module Pair (P1 : T) (P2 : T) = Make (struct
       let init = P1.fold2 ?path x1 y1 ~init ~f in
       P2.fold2 ?path x2 y2 ~init ~f
   end)
+
+(* ------------------------------------------------------------
+   -- Optional parameters
+   ------------------------------------------------------------ *)
 
 module Option (P : T) = Make (struct
     type 'a p = 'a P.p Option.t
@@ -276,6 +288,10 @@ module Option (P : T) = Make (struct
       | _ -> init
   end)
 
+(* ------------------------------------------------------------
+   -- List of parameters
+   ------------------------------------------------------------ *)
+
 module List (P : T) = Make (struct
     type 'a p = 'a P.p List.t
 
@@ -289,10 +305,14 @@ module List (P : T) = Make (struct
     let fold2 ?path x y ~init ~f =
       let _, result =
         List.fold2_exn x y ~init:(0, init) ~f:(fun (i, init) w1 w2 ->
-          i + 1, P.fold2 ?path:(cat (Int.to_string i) path) ~init ~f w1 w2)
+          Int.(i + 1), P.fold2 ?path:(cat (Int.to_string i) path) ~init ~f w1 w2)
       in
       result
   end)
+
+(* ------------------------------------------------------------
+   -- Arrays of parameters
+   ------------------------------------------------------------ *)
 
 module Array (P : T) = Make (struct
     type 'a p = 'a P.p array
@@ -307,7 +327,7 @@ module Array (P : T) = Make (struct
     let fold2 ?path x y ~init ~f =
       let _, result =
         Array.fold2_exn x y ~init:(0, init) ~f:(fun (i, init) w1 w2 ->
-          i + 1, P.fold2 ?path:(cat (Int.to_string i) path) ~init ~f w1 w2)
+          Int.(i + 1), P.fold2 ?path:(cat (Int.to_string i) path) ~init ~f w1 w2)
       in
       result
   end)

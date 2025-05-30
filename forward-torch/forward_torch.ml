@@ -2,4 +2,4 @@
 module Maths = Maths
 
 (** Deals with arbitrary (nested) parameter records. *)
-(* module Prms = Prms *)
+module Prms = Prms

@@ -5,14 +5,14 @@ open Base
 open Torch
 
 type tangent =
-  | Explicit of Tensor.t
-  | On_demand of (Device.t -> Tensor.t)
+  | Explicit of const t
+  | On_demand of (Device.t -> const t)
 
-type const = [ `Const ]
-type dual = [ `Dual ]
-type 'a any = [< const | dual ] as 'a
+and const = [ `Const ]
+and dual = [ `Dual ]
+and 'a any = [< `Const | `Dual ] as 'a
 
-type _ t =
+and _ t =
   | Const of Tensor.t
   | Dual of Tensor.t * tangent
 
@@ -24,8 +24,8 @@ exception Check_grad_failed
 val as_const : _ any t -> const t
 val as_dual_exn : _ any t -> dual t
 val const : Tensor.t -> const t
-val dual : dx:Tensor.t -> const t -> dual t
-val dual_lazy : dx:(Device.t -> Tensor.t) -> const t -> dual t
+val dual : dx:const t -> const t -> dual t
+val dual_lazy : dx:(Device.t -> const t) -> const t -> dual t
 val primal : _ any t -> Tensor.t
 val tangent : dual t -> Tensor.t
 
@@ -110,18 +110,24 @@ module Primal : sig
   val sum_dim : ?keepdim:bool -> dim:int list -> const t -> const t
   val mean_dim : ?keepdim:bool -> dim:int list -> const t -> const t
   val ( + ) : const t -> const t -> const t
+  val ( - ) : const t -> const t -> const t
+  val ( * ) : const t -> const t -> const t
+  val ( / ) : const t -> const t -> const t
+  val ( $+ ) : float -> const t -> const t
+  val ( $* ) : float -> const t -> const t
+  val ( $/ ) : float -> const t -> const t
+  val ( *@ ) : const t -> const t -> const t
+  val einsum : (const t * string) list -> string -> const t
 end
 
-(*
-   val view : size:int list -> 'a any t -> 'a any t
+val numel : 'a any t -> int
+val view : size:int list -> 'a any t -> 'a any t
 val reshape : shape:int list -> 'a any t -> 'a any t
 val permute : dims:int list -> 'a any t -> 'a any t
 val squeeze : dim:int -> 'a any t -> 'a any t
 val unsqueeze : dim:int -> 'a any t -> 'a any t
-*)
 val neg : 'a any t -> 'a any t
-(*
-   val trace : 'a any t -> 'a any t
+val trace : 'a any t -> 'a any t
 val sin : 'a any t -> 'a any t
 val cos : 'a any t -> 'a any t
 val sqr : 'a any t -> 'a any t
@@ -138,4 +144,11 @@ val mean : 'a any t -> 'a any t
 val sum_dim : ?keepdim:bool -> dim:int list -> 'a any t -> 'a any t
 val mean_dim : ?keepdim:bool -> dim:int list -> 'a any t -> 'a any t
 val ( + ) : 'a any t -> 'b any t -> 'c any t
-*)
+val ( - ) : 'a any t -> 'b any t -> 'c any t
+val ( * ) : 'a any t -> 'b any t -> 'c any t
+val ( / ) : 'a any t -> 'b any t -> 'c any t
+val ( $+ ) : float -> 'a any t -> 'a any t
+val ( $* ) : float -> 'a any t -> 'a any t
+val ( $/ ) : float -> 'a any t -> 'a any t
+val ( *@ ) : 'a any t -> 'b any t -> 'c any t
+val einsum : ('a any t * string) list -> string -> 'a any t

@@ -7,14 +7,14 @@ open Torch
 *)
 
 type tangent =
-  | Explicit of Tensor.t
-  | On_demand of (Device.t -> Tensor.t)
+  | Explicit of const t
+  | On_demand of (Device.t -> const t)
 
-type const = [ `Const ]
-type dual = [ `Dual ]
-type 'a any = [< `Const | `Dual ] as 'a
+and const = [ `Const ]
+and dual = [ `Dual ]
+and 'a any = [< `Const | `Dual ] as 'a
 
-type _ t =
+and _ t =
   | Const of Tensor.t
   | Dual of Tensor.t * tangent
 
@@ -35,11 +35,6 @@ let assert_right_device x dx =
   and ddx = Tensor.device dx in
   if Poly.(dx <> ddx) then raise (Wrong_device (dx, ddx))
 
-let tangent_tensor_of x v =
-  match v with
-  | Explicit dx -> dx
-  | On_demand dx -> dx (Tensor.device x)
-
 let as_const = function
   | Const x -> Const x
   | Dual (x, _) -> Const x
@@ -48,12 +43,25 @@ let as_dual_exn = function
   | Dual _ as y -> y
   | _ -> raise Not_dual
 
+let primal = function
+  | Const x -> x
+  | Dual (x, _) -> x
+
+let tangent_tensor_of x v =
+  match v with
+  | Explicit dx -> primal dx
+  | On_demand dx -> primal (dx (Tensor.device x))
+
+let tangent = function
+  | Dual (x, dx) -> tangent_tensor_of x dx
+  | _ -> assert false (* will never happen *)
+
 let const x = Const x
 
 let dual ~dx = function
   | Const x ->
-    assert_right_device x dx;
-    assert_right_shape x dx;
+    assert_right_device x (primal dx);
+    assert_right_shape x (primal dx);
     Dual (x, Explicit dx)
   | _ -> assert false (* will never happen *)
 
@@ -61,32 +69,21 @@ let dual_lazy ~dx = function
   | Const x ->
     let dx device =
       let dx = dx device in
-      assert_right_shape x dx;
-      assert_right_device x dx;
+      assert_right_shape x (primal dx);
+      assert_right_device x (primal dx);
       dx
     in
     Dual (x, On_demand dx)
   | _ -> assert false (* will never happen *)
 
-let primal = function
-  | Const x -> x
-  | Dual (x, _) -> x
-
-let tangent = function
-  | Dual (x, dx) -> tangent_tensor_of x dx
-  | _ -> assert false (* will never happen *)
-
-let print s = Stdio.print_endline (Sexp.to_string_hum s)
+let _print s = Stdio.print_endline (Sexp.to_string_hum s)
 let shape x = x |> primal |> Tensor.shape
 let device x = x |> primal |> Tensor.device
 let kind x = x |> primal |> Tensor.type_
 
 (* int list starting from 1 and ending at the last dim of a *)
-let all_dims_but_first a = List.range 1 (List.length (Tensor.shape a))
-
-let append_batch ~tangent shape =
-  let b = List.hd_exn (Tensor.shape tangent) in
-  b :: shape
+let _all_dims_but_first a = List.range 1 (List.length (Tensor.shape a))
+let batch_dim dx = List.hd_exn (Tensor.shape dx)
 
 (* constant scalar tensor *)
 let f x = Const (Tensor.f x)
@@ -142,7 +139,7 @@ module Builder = struct
       | Const x -> Const (b.f x)
       | Dual (x, dx) ->
         let f = b.f x in
-        Dual (f, Explicit (b.df ~f ~x (tangent_tensor_of x dx)))
+        Dual (f, Explicit (const (b.df ~f ~x (tangent_tensor_of x dx))))
 
     let make_binary (b : binary_builder) : (_, _, _) binary_op =
       fun x y ->
@@ -150,14 +147,17 @@ module Builder = struct
       | Const x, Const y -> Const (b.f x y)
       | Dual (x, dx), Const y ->
         let f = b.f x y in
-        Dual (f, Explicit (b.dfx ~f ~x ~y (tangent_tensor_of x dx)))
+        Dual (f, Explicit (const (b.dfx ~f ~x ~y (tangent_tensor_of x dx))))
       | Const x, Dual (y, dy) ->
         let f = b.f x y in
-        Dual (f, Explicit (b.dfy ~f ~x ~y (tangent_tensor_of y dy)))
+        Dual (f, Explicit (const (b.dfy ~f ~x ~y (tangent_tensor_of y dy))))
       | Dual (x, dx), Dual (y, dy) ->
         let f = b.f x y in
         Dual
-          (f, Explicit (b.dfxy ~f ~x ~y (tangent_tensor_of x dx) (tangent_tensor_of y dy)))
+          ( f
+          , Explicit
+              (const (b.dfxy ~f ~x ~y (tangent_tensor_of x dx) (tangent_tensor_of y dy)))
+          )
   end
 end
 
@@ -166,7 +166,7 @@ module Ops = struct
   let view ~size =
     let f = Tensor.view ~size in
     let df ~f:_ ~x:_ dx =
-      let size = append_batch ~tangent:dx size in
+      let size = batch_dim dx :: size in
       Tensor.view ~size dx
     in
     Builder.Any.{ f; df }
@@ -175,7 +175,7 @@ module Ops = struct
   let reshape ~shape =
     let f = Tensor.reshape ~shape in
     let df ~f:_ ~x:_ dx =
-      let shape = append_batch ~tangent:dx shape in
+      let shape = batch_dim dx :: shape in
       Tensor.reshape ~shape dx
     in
     Builder.Any.{ f; df }
@@ -346,6 +346,64 @@ module Ops = struct
     let dfxy ~f:_ ~x:_ ~y:_ dx dy = Tensor.(dx + dy) in
     Builder.Any.{ f; dfx; dfy; dfxy }
 
+  let ( - ) =
+    let f = Tensor.( - ) in
+    let dfx ~f:_ ~x:_ ~y:_ dx = dx in
+    let dfy ~f:_ ~x:_ ~y:_ dy = Tensor.neg dy in
+    let dfxy ~f:_ ~x:_ ~y:_ dx dy = Tensor.(dx - dy) in
+    Builder.Any.{ f; dfx; dfy; dfxy }
+
+  (* z = x * y, dz = y dx + x dy *)
+  let ( * ) =
+    let f = Tensor.( * ) in
+    let dfx ~f:_ ~x:_ ~y dx = Tensor.(mul dx y) in
+    let dfy ~f:_ ~x ~y:_ dy = Tensor.(mul x dy) in
+    let dfxy ~f:_ ~x ~y dx dy = Tensor.(add_ (mul x dy) (mul dx y)) in
+    Builder.Any.{ f; dfx; dfy; dfxy }
+
+  (* z = x / y, dz = 1/y dx - x/(y^2) dy *)
+  let ( / ) =
+    let f = Tensor.( / ) in
+    let dfx ~f:_ ~x:_ ~y dx = Tensor.(div dx y) in
+    let dfy ~f:z ~x:_ ~y dy = Tensor.(neg_ (div_ (dy * z) y)) in
+    let dfxy ~f:_ ~x ~y dx dy =
+      let y2 = Tensor.square y in
+      Tensor.(div_ (sub_ (dx * y) (dy * x)) y2)
+    in
+    Builder.Any.{ f; dfx; dfy; dfxy }
+
+  (* x = x + z *)
+  let ( $+ ) z =
+    let f x = Tensor.add_scalar x (Scalar.f z) in
+    let df ~f:_ ~x:_ dx = dx in
+    Builder.Any.{ f; df }
+
+  (* x = x *z *)
+  let ( $* ) z =
+    let f x = Tensor.mul_scalar x (Scalar.f z) in
+    let df ~f:_ ~x:_ dx = Tensor.(mul_scalar dx Scalar.(f z)) in
+    Builder.Any.{ f; df }
+
+  let ( $/ ) z =
+    let f x = Tensor.(mul_scalar (reciprocal x) (Scalar.f z)) in
+    let df ~f:_ ~x dx =
+      let x2 = Tensor.square x in
+      Tensor.(neg_ (div_ (mul_scalar dx (Scalar.f z)) x2))
+    in
+    Builder.Any.{ f; df }
+
+  (* z = xy, dz = dx y + x dy *)
+  let ( *@ ) =
+    let f x y =
+      if List.length (Tensor.shape x) < 2 && List.length (Tensor.shape y) < 2
+      then failwith "( *@ ) does not operate on two vectors";
+      Tensor.matmul x y
+    in
+    let dfx ~f:_ ~x:_ ~y dx = Tensor.(matmul dx y) in
+    let dfy ~f:_ ~x ~y:_ dy = Tensor.(matmul x dy) in
+    let dfxy ~f:_ ~x ~y dx dy = Tensor.(add_ (matmul dx y) (matmul x dy)) in
+    Builder.Any.{ f; dfx; dfy; dfxy }
+
   let einsum operands return =
     let equation = String.concat ~sep:"," (List.map ~f:snd operands) ^ "->" ^ return in
     Tensor.einsum ~equation (List.map ~f:fst operands) ~path:None
@@ -387,6 +445,13 @@ module Primal = struct
     Builder.Const.make_unary (unary_of_any (Ops.mean_dim ?keepdim ~dim))
 
   let ( + ) = Builder.Const.make_binary (binary_of_any Ops.(( + )))
+  let ( - ) = Builder.Const.make_binary (binary_of_any Ops.(( - )))
+  let ( * ) = Builder.Const.make_binary (binary_of_any Ops.(( * )))
+  let ( / ) = Builder.Const.make_binary (binary_of_any Ops.(( / )))
+  let ( $+ ) z = Builder.Const.make_unary (unary_of_any Ops.(( $+ ) z))
+  let ( $* ) z = Builder.Const.make_unary (unary_of_any Ops.(( $* ) z))
+  let ( $/ ) z = Builder.Const.make_unary (unary_of_any Ops.(( $/ ) z))
+  let ( *@ ) = Builder.Const.make_binary (binary_of_any Ops.(( *@ )))
 
   let einsum (operands : (_ t * string) list) return =
     let tangent_id = 'x' in
@@ -398,6 +463,7 @@ module Primal = struct
     Const y
 end
 
+let numel x = x |> primal |> Tensor.shape |> List.fold ~init:0 ~f:Int.( + ) |> Int.max 1
 let view ~size = Builder.Any.make_unary (Ops.view ~size)
 let reshape ~shape = Builder.Any.make_unary (Ops.reshape ~shape)
 let permute ~dims = Builder.Any.make_unary (Ops.permute ~dims)
@@ -424,6 +490,13 @@ let sum_dim ?keepdim ~dim x = Builder.Any.make_unary (Ops.sum_dim ?keepdim ~dim)
 let mean x = Builder.Any.make_unary Ops.mean x
 let mean_dim ?keepdim ~dim x = Builder.Any.make_unary (Ops.mean_dim ?keepdim ~dim) x
 let ( + ) x = Builder.Any.make_binary Ops.(( + )) x
+let ( - ) x = Builder.Any.make_binary Ops.(( - )) x
+let ( * ) x = Builder.Any.make_binary Ops.(( * )) x
+let ( / ) x = Builder.Any.make_binary Ops.(( / )) x
+let ( $+ ) z = Builder.Any.make_unary Ops.(( $+ ) z)
+let ( $* ) z = Builder.Any.make_unary Ops.(( $* ) z)
+let ( $/ ) z = Builder.Any.make_unary Ops.(( $/ ) z)
+let ( *@ ) x = Builder.Any.make_binary Ops.(( *@ )) x
 
 (* einsum [ a, "ij"; b, "jk"; c, "ki" ] "ii" *)
 
@@ -453,4 +526,4 @@ let einsum (operands : (_ t * string) list) return =
   in
   match dy with
   | None -> Const y
-  | Some dy -> Dual (y, Explicit dy)
+  | Some dy -> Dual (y, Explicit (const dy))
