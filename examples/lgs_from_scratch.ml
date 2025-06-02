@@ -131,6 +131,7 @@ let theta =
 let std_of_log_var log_var = Maths.(exp (f 0.5 * log_var))
 let precision_of_log_var log_var = Maths.(exp (neg log_var))
 let sqrt_precision_of_log_var log_var = Maths.(exp (f (-0.5) * log_var))
+let detach x = x |> Maths.primal_tensor_detach |> Maths.const
 
 let save_summary ~out (theta : P.M.t) =
   let a =
@@ -394,7 +395,13 @@ let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
             let u_tmp = ustar + u_sample in
             gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u_tmp
           in
-          let q_term = gaussian_llh_chol ~precision_chol u_diff_elbo in
+          (* sticking the landing idea where gradients w.r.t variational parameters removed. *)
+          let q_term =
+            gaussian_llh_chol
+              ~mu:(detach mu)
+              ~precision_chol:(detach precision_chol)
+              u_sample
+          in
           kl + q_term - prior_term
         in
         z, kl, (ustar + u_sample) :: us)
@@ -496,6 +503,7 @@ let n_params_d = 10
 let n_params_c = Int.(_K - 2 - n_params_d - n_params_q)
 let n_params_log_obs_var = 1
 let n_params_scaling_factor = 1
+let cycle = true
 
 let n_params_list =
   [ n_params_q; n_params_d; n_params_c; n_params_log_obs_var; n_params_scaling_factor ]
@@ -690,14 +698,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     localise ~param_name ~n_per_param local_vs
 
-  let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state ~cycle =
+  let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state =
     let n_per_param = get_n_params param_name in
     let n_params = get_total_n_params param_name in
-    let s_all, u_left, u_right =
-      if cycle
-      then get_s_u ~lambda ~param_name
-      else eigenvectors_for_params ~lambda ~param_name
-    in
+    let s_all, u_left, u_right = get_s_u ~lambda ~param_name in
     let selection =
       if cycle
       then
@@ -707,10 +711,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection
 
-  let eigenvectors ~(lambda : A.M.t) t (_K : int) =
+  let eigenvectors ~(lambda : A.M.t) ~switch_to_learn t (_K : int) =
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
-        eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:t ~cycle:true)
+        eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:t)
     in
     let vs =
       List.fold eigenvectors_each ~init:None ~f:(fun accu local_vs ->
@@ -718,7 +722,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         | None -> Some local_vs
         | Some a -> Some (P.map2 a local_vs ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ])))
     in
-    Option.value_exn vs, t + 1
+    (* reset s_u_cache and set sampling state to 0 if learn again *)
+    if switch_to_learn then s_u_cache := [];
+    let new_sampling_state = if switch_to_learn then 0 else t + 1 in
+    Option.value_exn vs, new_sampling_state
 
   let init () =
     let init_eye size =
@@ -827,7 +834,6 @@ end
 (* --------------------------------
    -- SOFO
    -------------------------------- *)
-let learn_first_steps = 1000
 
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (M) (GGN)
@@ -840,14 +846,15 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 5e-3; eps = 1e-4 }
-        ; steps = 3
-        ; learn_first_steps = Some learn_first_steps
+              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
+        ; steps = 50
+        ; learn_steps = 100
+        ; exploit_steps = 100
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.3
+      ; learning_rate = Some 0.1
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-5
@@ -867,13 +874,13 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (M)
 
   let config ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.02 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.01 }
 
   let init = O.init theta
 end
 
 let _ =
-  let max_iter = 5000 + learn_first_steps in
+  let max_iter = 10000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

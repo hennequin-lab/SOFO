@@ -56,11 +56,14 @@ module Config = struct
   end
 
   module SOFO = struct
+    (* alternate between learning the ggn for learn_steps then exploiting the learned ggn
+       and sample tangents from it for exploit_steps. *)
     type ('a, 'b) aux =
       { steps : int
       ; file : string
       ; config : ('a, 'b) Adam.t
-      ; learn_first_steps : int option
+      ; learn_steps : int
+      ; exploit_steps : int
       }
 
     type ('a, 'b) t =
@@ -73,7 +76,7 @@ module Config = struct
       }
 
     let default_aux file =
-      { steps = 10; file; config = Adam.default; learn_first_steps = None }
+      { steps = 10; file; config = Adam.default; learn_steps = 1; exploit_steps = 1 }
 
     let default =
       { base = Base.default

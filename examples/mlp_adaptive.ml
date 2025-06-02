@@ -12,11 +12,12 @@ let _ =
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
 let in_dir = Cmdargs.in_dir "-d"
-let d = 64
-let n_layers = 3
-let bs = 128
-let n_batches = 100
-let _K = n_layers * 20
+let d = 5
+let layer_sizes = [| 25; 3 |]
+let n_layers = Array.length layer_sizes
+let bs = 600
+let n_batches = 1
+let _K = n_layers * 5
 
 let base =
   Optimizer.Config.Base.
@@ -39,8 +40,12 @@ module P = Prms.List (Make (Prms.P))
 
 let init_theta () =
   List.init n_layers ~f:(fun id ->
-    let z = Float.(1. / sqrt (of_int d)) in
-    let w = Tensor.(f z * randn ~device:base.device ~kind:base.kind Int.[ d + 1; d ]) in
+    let n_i = if id = 0 then d else layer_sizes.(id - 1) in
+    let n_o = layer_sizes.(id) in
+    let z = Float.(1. / sqrt (of_int n_i)) in
+    let w =
+      Tensor.(f z * randn ~device:base.device ~kind:base.kind Int.[ n_i + 1; n_o ])
+    in
     { id; w = Maths.const w })
 
 let true_theta = init_theta ()
@@ -88,7 +93,7 @@ let loss_and_ggn ?(with_ggn = true) ~data:(data_x, data_y) (theta : P.M.t) =
     then (
       let y_t = Option.value_exn (tangent y) |> const in
       Some
-        (einsum [ y_t, "kmi"; y_t, "lmi" ] "kl" / f Float.(of_int d)
+        (einsum [ y_t, "kmi"; y_t, "lmi" ] "kl" / f Float.(of_int 3)
          |> primal
          |> fun x -> Tensor.(f normalising_const * x)))
     else None
@@ -101,6 +106,7 @@ let loss_and_ggn ?(with_ggn = true) ~data:(data_x, data_y) (theta : P.M.t) =
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
+let cycle = true
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -114,15 +120,25 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   module P = P
   module A = Prms.List (Make (Prms.P))
 
-  type sampling_state = unit
+  type sampling_state = int
 
-  let init_sampling_state () = ()
+  let init_sampling_state () = 0
 
   let zero_params ~shape _K =
     Tensor.zeros ~device:base.device ~kind:base.kind (_K :: shape)
 
   let random_params ~shape _K =
     Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
+
+  let get_shapes id =
+    match id with
+    | 0 -> [ d + 1; layer_sizes.(0) ]
+    | 1 -> [ layer_sizes.(0) + 1; layer_sizes.(1) ]
+    | _ -> assert false
+
+  let get_total_n_params id =
+    let list_prod l = List.fold l ~init:1 ~f:(fun accu i -> accu * i) in
+    list_prod (get_shapes id)
 
   (* approximation defined implicitly via Gv products *)
   let g12v ~(lambda : A.M.t) (v : P.M.t) : P.M.t =
@@ -131,16 +147,16 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       let w = einsum [ lambda.left, "in"; v.w, "aij"; lambda.right, "jm" ] "anm" in
       { id = 0; w })
 
-  let localise ~id:i ~_K v =
+  let localise ~id:i ~n_per_layer v =
     List.init n_layers ~f:(fun id ->
-      let w = if id = i then v else zero_params ~shape:[ d + 1; d ] _K in
+      let w = if id = i then v else zero_params ~shape:(get_shapes id) n_per_layer in
       { id; w })
 
   let n_per_layer = _K / n_layers
 
   let random_localised_vs _K : P.T.t =
     List.init n_layers ~f:(fun id ->
-      let w_shape = [ d + 1; d ] in
+      let w_shape = get_shapes id in
       let w = random_params ~shape:w_shape n_per_layer in
       let zeros_before = zero_params ~shape:w_shape (n_per_layer * id) in
       let zeros_after = zero_params ~shape:w_shape (n_per_layer * (n_layers - 1 - id)) in
@@ -149,80 +165,88 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       in
       { id; w = final })
 
-  let eigenvectors ~lambda () (_K : int) =
+  (* compute sorted eigenvalues, u_left and u_right. *)
+  let eigenvectors_for_params ~lambda =
+    let left, right = lambda.left, lambda.right in
+    let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
+    let u_right, s_right, _ =
+      Tensor.svd ~some:true ~compute_uv:true Maths.(primal right)
+    in
+    let s_left = Tensor.to_float1_exn s_left |> Array.to_list in
+    let s_right = Tensor.to_float1_exn s_right |> Array.to_list in
+    let s_all =
+      List.mapi s_left ~f:(fun il sl ->
+        List.mapi s_right ~f:(fun ir sr -> il, ir, Float.(sl * sr)))
+      |> List.concat
+      |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
+      |> Array.of_list
+    in
+    s_all, u_left, u_right
+
+  (* cache storage with a ref to memoize computed results *)
+  let s_u_cache = ref []
+
+  (* given param name, get eigenvalues and eigenvectors. *)
+  let get_s_u ~lambda id =
+    match List.Assoc.find !s_u_cache id ~equal:( = ) with
+    | Some s -> s
+    | None ->
+      let s = eigenvectors_for_params ~lambda in
+      s_u_cache := (id, s) :: !s_u_cache;
+      s
+
+  let extract_local_vs ~s_all ~id ~u_left ~u_right ~selection =
+    let local_vs =
+      List.map selection ~f:(fun idx ->
+        let il, ir, _ = s_all.(idx) in
+        let slice_and_squeeze t dim idx =
+          Tensor.squeeze_dim
+            ~dim
+            (Tensor.slice t ~dim ~start:(Some idx) ~end_:(Some (idx + 1)) ~step:1)
+        in
+        let u_l = slice_and_squeeze u_left 1 il in
+        let u_r = slice_and_squeeze u_right 1 ir in
+        let tmp = Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_l; u_r ] in
+        Tensor.unsqueeze tmp ~dim:0)
+      |> Tensor.concatenate ~dim:0
+    in
+    localise ~id ~n_per_layer local_vs
+
+  let eigenvectors_for_each_param ~lambda ~id ~sampling_state =
+    let n_params = get_total_n_params id in
+    let s_all, u_left, u_right = get_s_u ~lambda id in
+    let selection =
+      if cycle
+      then
+        List.init n_per_layer ~f:(fun i ->
+          ((sampling_state * n_per_layer) + i) % n_params)
+      else List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_layer
+    in
+    extract_local_vs ~s_all ~id ~u_left ~u_right ~selection
+
+  let eigenvectors ~(lambda : A.M.t) ~switch_to_learn sampling_state (_K : int) =
+    let concat_vs a b = P.map2 a b ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ]) in
     let vs =
-      (* for each layer, compute the eigenvectors of corresponding ggn and sample from it *)
       List.foldi lambda ~init:None ~f:(fun id accu lambda ->
-        let u_left, s_left, _ =
-          Tensor.svd ~some:true ~compute_uv:true Maths.(primal lambda.left)
-        in
-        let u_right, s_right, _ =
-          Tensor.svd ~some:true ~compute_uv:true Maths.(primal lambda.right)
-        in
-        let s_left = Tensor.to_float1_exn s_left |> Array.to_list in
-        let s_right = Tensor.to_float1_exn s_right |> Array.to_list in
-        let s_all =
-          List.mapi s_left ~f:(fun il sl ->
-            List.mapi s_right ~f:(fun ir sr -> il, ir, Float.(sl * sr)))
-          |> List.concat
-          |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
-          |> Array.of_list
-        in
-        (* randomly select the indices *)
-        let selection =
-          List.permute (List.range 0 Int.(d * (d + 1)))
-          |> List.sub ~pos:0 ~len:n_per_layer
-        in
-        let selection = List.map selection ~f:(fun j -> s_all.(j)) in
-        let local_vs =
-          List.map selection ~f:(fun (il, ir, _) ->
-            let u_left =
-              Tensor.(
-                squeeze
-                  (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
-            in
-            let u_right =
-              Tensor.(
-                squeeze
-                  (slice
-                     u_right
-                     ~dim:1
-                     ~start:(Some ir)
-                     ~end_:(Some Int.(ir + 1))
-                     ~step:1))
-            in
-            Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ]
-            |> Tensor.unsqueeze ~dim:0)
-          |> Tensor.concatenate ~dim:0
-        in
-        let local_vs = local_vs |> localise ~id ~_K:n_per_layer in
+        let local_vs = eigenvectors_for_each_param ~lambda ~id ~sampling_state in
         match accu with
         | None -> Some local_vs
-        | Some a -> Some (P.map2 a local_vs ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ])))
+        | Some a -> Some (concat_vs a local_vs))
     in
-    let vs = Option.value_exn vs in
-    (* sanity checking: the sketch should be block-diagonal *)
-    let _ =
-      let open Maths in
-      let g12v = g12v ~lambda (P.map vs ~f:const) in
-      let sketch =
-        P.fold g12v ~init:(f 0.) ~f:(fun accu (gv, _) ->
-          let n_tangents = Convenience.first_dim (primal gv) in
-          let gv = reshape gv ~shape:[ n_tangents; -1 ] in
-          accu + einsum [ gv, "ki"; gv, "ki" ] "k")
-      in
-      sketch
-      |> primal
-      |> Tensor.reshape ~shape:[ -1; 1 ]
-      |> Tensor.to_bigarray ~kind:Bigarray.float32
-      |> Owl.Dense.Matrix.S.save_txt ~out:"sketch2"
-    in
-    vs, ()
+    (* reset s_u_cache and set sampling state to 0 if learn again *)
+    if switch_to_learn then s_u_cache := [];
+    let new_sampling_state = if switch_to_learn then 0 else sampling_state + 1 in
+    Option.value_exn vs, new_sampling_state
 
   let init () =
-    let left = Mat.(0.1 $* eye Int.(d + 1)) |> Tensor.of_bigarray ~device:base.device in
-    let right = Mat.(0.1 $* eye d) |> Tensor.of_bigarray ~device:base.device in
-    List.init n_layers ~f:(fun _ -> { left = Prms.free left; right = Prms.free right })
+    let init_eye size =
+      Mat.(0.1 $* eye size) |> Tensor.of_bigarray ~device:base.device |> Prms.free
+    in
+    List.init n_layers ~f:(fun id ->
+      let w_shape = get_shapes id in
+      let left = init_eye (List.hd_exn w_shape) in
+      let right = init_eye (List.last_exn w_shape) in
+      { left; right })
 end
 
 (* ------------------------------------------------
@@ -301,23 +325,22 @@ end
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (M) (GGN)
 
-  let name = "sofo_adapt"
+  let name = "sofo"
 
   let config ~iter:k =
     let aux =
       Optimizer.Config.SOFO.
         { (default_aux (in_dir "aux")) with
           config =
-            Optimizer.Config.Adam.{ default with learning_rate = Some 1e-4; eps = 1e-4 }
-        ; steps = 5
-        ; learn_first_steps = None
+            Optimizer.Config.Adam.{ default with learning_rate = Some 1e-3; eps = 1e-4 }
+        ; steps = 25000
+        ; learn_steps = 1
+        ; exploit_steps = 500
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate =
-          (let lr = Cmdargs.(get_float "-lr" |> default 0.1) in
-           Some Float.(lr / sqrt (1. + (0. * (of_int k / 100.)))))
+      ; learning_rate = Some 0.1
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
@@ -337,21 +360,15 @@ module Do_with_Adam : Do_with_T = struct
 
   module O = Optimizer.Adam (M)
 
-  let config ~iter:k =
-    Optimizer.Config.Adam.
-      { default with
-        base
-      ; learning_rate =
-          (let lr = Cmdargs.(get_float "-lr" |> default 0.02) in
-           Some Float.(lr / sqrt (1. + (0. * (of_int k / 100.)))))
-      }
+  let config ~iter:_ =
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.001 }
 
   let init = O.init theta
   let with_ggn = false
 end
 
 let _ =
-  let max_iter = 100000 in
+  let max_iter = 20000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

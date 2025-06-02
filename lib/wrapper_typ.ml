@@ -53,8 +53,14 @@ module type Auxiliary = sig
   (* given the number of tangents, draw localised tangents randomly *)
   val random_localised_vs : int -> P.T.t
 
-  (* given aux parameters [lambda], sampling state and the number of tangetns, return eigenvectors of \hat{G} and new sampling state *)
-  val eigenvectors : lambda:A.M.t -> sampling_state -> int -> P.T.t * sampling_state
+  (* given aux parameters [lambda], whether to switch to learning, current sampling state and the number of tangents, 
+    return eigenvectors of \hat{G} and new sampling state *)
+  val eigenvectors
+    :  lambda:A.M.t
+    -> switch_to_learn:bool
+    -> sampling_state
+    -> int
+    -> P.T.t * sampling_state
 
   (* initialise aux parameters *)
   val init : unit -> A.tagged

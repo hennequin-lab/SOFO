@@ -160,6 +160,7 @@ let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
 let param_names_list = [ C; B; O ]
 let n_params_c, n_params_b, n_params_o = Int.(_K - 4), 2, 2
 let n_params_list = [ n_params_c; n_params_b; n_params_o ]
+let cycle = true
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -179,6 +180,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
 
   type sampling_state = int
 
+  (* (iter, aux_learn) where iter is the iter for sampling from ggn and aux_learn is a flag of state. *)
   let init_sampling_state () = 0
 
   let zero_params ~shape _K =
@@ -301,14 +303,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     localise ~param_name ~n_per_param local_vs
 
-  let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state ~cycle =
+  let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state =
     let n_per_param = get_n_params param_name in
     let n_params = get_total_n_params param_name in
-    let s_all, u_left, u_right =
-      if cycle
-      then get_s_u ~lambda ~param_name
-      else eigenvectors_for_params ~lambda ~param_name
-    in
+    let s_all, u_left, u_right = get_s_u ~lambda ~param_name in
     let selection =
       if cycle
       then
@@ -318,10 +316,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection
 
-  let eigenvectors ~(lambda : A.M.t) t (_K : int) =
+  let eigenvectors ~(lambda : A.M.t) ~switch_to_learn t (_K : int) =
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
-        eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:t ~cycle:true)
+        eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:t)
     in
     let vs =
       List.fold eigenvectors_each ~init:None ~f:(fun accu local_vs ->
@@ -329,7 +327,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         | None -> Some local_vs
         | Some a -> Some (P.map2 a local_vs ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ])))
     in
-    Option.value_exn vs, t + 1
+    (* reset s_u_cache and set sampling state to 0 if learn again *)
+    if switch_to_learn then s_u_cache := [];
+    let new_sampling_state = if switch_to_learn then 0 else t + 1 in
+    Option.value_exn vs, new_sampling_state
 
   let init () =
     let init_eye size =
@@ -435,7 +436,6 @@ end
 (* --------------------------------
            -- SOFO
            -------------------------------- *)
-let learn_first_steps = 1000
 
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (RNN) (GGN)
@@ -450,12 +450,13 @@ module Do_with_SOFO : Do_with_T = struct
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-2; eps = 1e-8 }
         ; steps = 3
-        ; learn_first_steps = Some learn_first_steps
+        ; learn_steps = 100
+        ; exploit_steps = 100
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 1.
+      ; learning_rate = Some 0.1
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-5
@@ -481,7 +482,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 2000 + learn_first_steps in
+  let max_iter = 2000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

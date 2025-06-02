@@ -1,4 +1,3 @@
-
 open Base
 open Owl
 open Torch
@@ -172,6 +171,7 @@ let test_eval ~train_data theta =
 
 let n_params_w = 170
 let _K = Array.length layer_sizes * n_params_w
+let cycle = true
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -284,12 +284,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     localise ~id ~n_per_param local_vs
 
-  let eigenvectors_for_each_param ~lambda ~id ~sampling_state ~cycle =
+  let eigenvectors_for_each_param ~lambda ~id ~sampling_state =
     let n_per_param = get_n_params id in
     let n_params = get_total_n_params id in
-    let s_all, u_left, u_right =
-      if cycle then get_s_u ~lambda id else eigenvectors_for_params ~lambda
-    in
+    let s_all, u_left, u_right = get_s_u ~lambda id in
     let selection =
       if cycle
       then
@@ -299,18 +297,19 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     extract_local_vs ~s_all ~id ~u_left ~u_right ~selection
 
-  let eigenvectors ~(lambda : A.M.t) sampling_state (_K : int) =
+  let eigenvectors ~(lambda : A.M.t) ~switch_to_learn sampling_state (_K : int) =
     let concat_vs a b = P.map2 a b ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ]) in
     let vs =
       Array.foldi lambda ~init:None ~f:(fun id accu lambda ->
-        let local_vs =
-          eigenvectors_for_each_param ~lambda ~id ~sampling_state ~cycle:true
-        in
+        let local_vs = eigenvectors_for_each_param ~lambda ~id ~sampling_state in
         match accu with
         | None -> Some local_vs
         | Some a -> Some (concat_vs a local_vs))
     in
-    Option.value_exn vs, sampling_state + 1
+    (* reset s_u_cache and set sampling state to 0 if learn again *)
+    if switch_to_learn then s_u_cache := [];
+    let new_sampling_state = if switch_to_learn then 0 else sampling_state + 1 in
+    Option.value_exn vs, new_sampling_state
 
   let init () =
     let init_eye size =
@@ -368,7 +367,7 @@ module Make (D : Do_with_T) = struct
           (* let params = O.params state in *)
           (* let n_params = O.W.P.T.numel (O.W.P.map params ~f:(fun p -> Prms.value p)) in  *)
           (* avg error *)
-          Convenience.print [%message (e : float) (loss_avg : float) (test_acc : float)];
+          Convenience.print [%message (e : float) (test_acc : float)];
           (* save params *)
           if iter % 100 = 0
           then
@@ -391,7 +390,6 @@ end
 (* --------------------------------
        -- SOFO
        -------------------------------- *)
-let learn_first_steps = 1000
 
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (FF) (GGN)
@@ -406,12 +404,13 @@ module Do_with_SOFO : Do_with_T = struct
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
         ; steps = 5
-        ; learn_first_steps = Some learn_first_steps
+        ; learn_steps = 100
+        ; exploit_steps = 100
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.01
+      ; learning_rate = Some 0.05
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
@@ -437,7 +436,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = num_train_loops + learn_first_steps in
+  let max_iter = num_train_loops  in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

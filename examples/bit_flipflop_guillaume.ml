@@ -212,6 +212,7 @@ let sample_batch ~n_steps bs =
    ------------------------------------------------ *)
 
 let n_per_param = _K
+let cycle = true
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -295,12 +296,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     localise local_vs
 
-  let eigenvectors_for_each_param ~lambda ~sampling_state ~cycle =
+  let eigenvectors_for_each_param ~lambda ~sampling_state =
     let n_per_param = n_per_param in
     let n_params = n * Settings.b in
-    let s_all, u_left, u_right =
-      if cycle then get_s_u ~lambda else eigenvectors_for_params ~lambda
-    in
+    let s_all, u_left, u_right = get_s_u ~lambda in
     let selection =
       if cycle
       then
@@ -310,12 +309,13 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     extract_local_vs ~s_all ~u_left ~u_right ~selection
 
-  let eigenvectors ~(lambda : A.M.t) sampling_state (_K : int) =
-    let eigenvectors_w =
-      eigenvectors_for_each_param ~lambda ~sampling_state ~cycle:true
-    in
+  let eigenvectors ~(lambda : A.M.t) ~switch_to_learn sampling_state (_K : int) =
+    let eigenvectors_w = eigenvectors_for_each_param ~lambda ~sampling_state in
     let vs = eigenvectors_w in
-    vs, Int.(sampling_state + 1)
+    (* reset s_u_cache and set sampling state to 0 if learn again *)
+    if switch_to_learn then s_u_cache := None;
+    let new_sampling_state = if switch_to_learn then 0 else sampling_state + 1 in
+    vs, new_sampling_state
 
   let init () =
     let init_eye size =
@@ -390,7 +390,6 @@ end
 (* --------------------------------
        -- SOFO
        -------------------------------- *)
-let learn_first_steps = 1000
 
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (RNN) (GGN)
@@ -405,7 +404,8 @@ module Do_with_SOFO : Do_with_T = struct
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
         ; steps = 5
-        ; learn_first_steps = Some learn_first_steps
+        ; learn_steps = 10
+        ; exploit_steps = 10
         }
     in
     Optimizer.Config.SOFO.
@@ -436,7 +436,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 10000 + learn_first_steps in
+  let max_iter = 10000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

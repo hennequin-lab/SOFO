@@ -276,16 +276,14 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
   and returns loss and new state *)
   let step ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
-    (* extract aux learning flags. *)
-    let aux_learning, aux_exploit, learn_first_steps =
+    (* extract aux learning flags. if switch to learn, switch to learning the ggn at the NEXT iteration *)
+    let aux_learn, aux_exploit, switch_to_learn =
       match config.aux with
       | None -> false, false, false
-      | Some { learn_first_steps = Some t; _ } ->
-        let learn = state.t < t in
-        learn, not learn, learn
-      | Some { learn_first_steps = None; _ } ->
-        let even = state.t % 2 = 0 in
-        even, not even, false
+      | Some { learn_steps; exploit_steps; _ } ->
+        let rem = state.t % (learn_steps + exploit_steps) in
+        let learn = rem < learn_steps in
+        learn, not learn, rem = learn_steps + exploit_steps - 1
     in
     (* initialise tangents *)
     let theta = params state in
@@ -295,7 +293,7 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
       then (
         let lambda = O.params state.aux in
         let lambda = A.A.map ~f:(fun x -> Maths.const (Prms.value x)) lambda in
-        A.eigenvectors ~lambda state.sampling_state config.n_tangents)
+        A.eigenvectors ~lambda ~switch_to_learn state.sampling_state config.n_tangents)
       else
         ( init_tangents
             ~base:config.base
@@ -330,8 +328,8 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
     (* compute natural gradient and update theta *)
     let natural_g = natural_g ?damping:config.damping ~vs ~ggn:final_ggn vtg in
     let new_theta =
-      (* do not update when learning ggn during the first steps *)
-      let learning_rate = if learn_first_steps then None else config.learning_rate in
+      (* do not update params when learning ggn. *)
+      let learning_rate = if aux_learn then None else config.learning_rate in
       update_theta ?learning_rate ~theta natural_g
     in
     (* update the auxiliary state by running a few iterations of Adam if using random vs (odd trial) *)
@@ -347,7 +345,7 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
       aux_loop ~iter:1 ~state:state.aux
     in
     let new_aux =
-      if aux_learning then config.aux |> Option.value_exn |> update_aux else state.aux
+      if aux_learn then config.aux |> Option.value_exn |> update_aux else state.aux
     in
     ( loss
     , { t = state.t + 1

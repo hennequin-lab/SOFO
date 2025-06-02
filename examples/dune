@@ -5,6 +5,7 @@
   bit_flipflop_small_net
   kalman_rnn_no_gain
   delayed_addition
+  hvs
   random_class
   mlp_classification
   lqr_eg

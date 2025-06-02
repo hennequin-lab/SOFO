@@ -563,7 +563,7 @@ module Make (D : Do_with_T) = struct
       let data = sample_data () in
       let t0 = Unix.gettimeofday () in
       let config = config_f ~iter in
-      let loss, new_state = O.step ~config ~state ~data ~args:() in
+      let loss, new_state = O.step ~config ~state ~data () in
       let t1 = Unix.gettimeofday () in
       let time_elapsed = Float.(time_elapsed + t1 - t0) in
       let running_avg =
@@ -614,11 +614,11 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = 60
       ; rank_one = false
       ; damping = Some 1e-5
-      ; aux  = None
+      ; aux = None
       }
 
   let name = "sofo"
-  let init = O.init  GRU.init
+  let init = O.init GRU.init
 end
 
 (* --------------------------------

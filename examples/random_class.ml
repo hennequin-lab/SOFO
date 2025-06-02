@@ -1,5 +1,6 @@
 (** Meta learning a Settings.classification with randomised labels across different sessions with a vanilla rnn *)
 open Base
+
 open Owl
 open Torch
 open Forward_torch
@@ -309,6 +310,7 @@ let n_params_w, n_params_c, n_params_b, n_params_a, n_params_o =
   100, 100, 5, Int.(_K - 210), 5
 
 let n_params_list = [ n_params_w; n_params_c; n_params_b; n_params_a; n_params_o ]
+let cycle = true
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -417,73 +419,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     ; o = random_localised_param_name O
     }
 
-  (* let eigenvectors_for_each_params ~local ~lambda ~param_name ~sampling_state =
-    let left, right, n_per_param =
-      match param_name with
-      | W -> lambda.w_left, lambda.w_right, n_params_w
-      | A -> lambda.a_left, lambda.a_right, n_params_a
-      | C -> lambda.c_left, lambda.c_right, n_params_c
-      | B -> lambda.b_left, lambda.b_right, n_params_b
-      | O -> lambda.o_left, lambda.o_right, n_params_o
-    in
-    let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
-    let u_right, s_right, _ =
-      Tensor.svd ~some:true ~compute_uv:true Maths.(primal right)
-    in
-    let s_left = Tensor.to_float1_exn s_left |> Array.to_list in
-    let s_right = Tensor.to_float1_exn s_right |> Array.to_list in
-    let s_all =
-      List.mapi s_left ~f:(fun il sl ->
-        List.mapi s_right ~f:(fun ir sr -> il, ir, Float.(sl * sr)))
-      |> List.concat
-      |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
-      |> Array.of_list
-    in
-    (* randomly select the indices *)
-    let n_params =
-      Convenience.first_dim (Maths.primal left)
-      * Convenience.first_dim (Maths.primal right)
-    in
-    (* let selection =
-      List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
-    in *)
-    let selection =
-      List.init n_per_param ~f:(fun i -> ((sampling_state * n_per_param) + i) % n_params)
-    in
-    let selection = List.map selection ~f:(fun j -> s_all.(j)) in
-    let local_vs =
-      List.map selection ~f:(fun (il, ir, _) ->
-        let u_left =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
-        in
-        let u_right =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_right ~dim:1 ~start:(Some ir) ~end_:(Some Int.(ir + 1)) ~step:1))
-        in
-        let tmp = Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ] in
-        Tensor.unsqueeze tmp ~dim:0)
-      |> Tensor.concatenate ~dim:0
-    in
-    local_vs |> localise ~local ~param_name ~n_per_param
-
-  let eigenvectors ~(lambda : A.M.t) sampling_state (_K : int) =
-    let eigenvectors_each =
-      List.map param_names_list ~f:(fun param_name ->
-        eigenvectors_for_each_params ~local:true ~lambda ~param_name ~sampling_state)
-    in
-    let vs =
-      List.fold eigenvectors_each ~init:None ~f:(fun accu local_vs ->
-        match accu with
-        | None -> Some local_vs
-        | Some a -> Some (P.map2 a local_vs ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ])))
-    in
-    Option.value_exn vs, sampling_state + 1 *)
-
   (* compute sorted eigenvalues, u_left and u_right. *)
   let eigenvectors_for_params ~lambda ~param_name =
     let left, right =
@@ -539,14 +474,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     localise ~param_name ~n_per_param local_vs
 
-  let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state ~cycle =
+  let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state =
     let n_per_param = get_n_params param_name in
     let n_params = get_total_n_params param_name in
-    let s_all, u_left, u_right =
-      if cycle
-      then get_s_u ~lambda ~param_name
-      else eigenvectors_for_params ~lambda ~param_name
-    in
+    let s_all, u_left, u_right = get_s_u ~lambda ~param_name in
     let selection =
       if cycle
       then
@@ -556,10 +487,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection
 
-  let eigenvectors ~(lambda : A.M.t) t (_K : int) =
+  let eigenvectors ~(lambda : A.M.t) ~switch_to_learn t (_K : int) =
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
-        eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:t ~cycle:true)
+        eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:t)
     in
     let vs =
       List.fold eigenvectors_each ~init:None ~f:(fun accu local_vs ->
@@ -567,7 +498,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         | None -> Some local_vs
         | Some a -> Some (P.map2 a local_vs ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ])))
     in
-    Option.value_exn vs, t + 1
+    (* reset s_u_cache and set sampling state to 0 if learn again *)
+    if switch_to_learn then s_u_cache := [];
+    let new_sampling_state = if switch_to_learn then 0 else t + 1 in
+    Option.value_exn vs, new_sampling_state
 
   let init () =
     let init_eye size =
@@ -663,8 +597,6 @@ end
          -- SOFO
          -------------------------------- *)
 
-let learn_first_steps = 1000
-
 module Do_with_SOFO : Do_with_T = struct
   module O = Optimizer.SOFO (RNN) (GGN)
 
@@ -678,7 +610,8 @@ module Do_with_SOFO : Do_with_T = struct
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
         ; steps = 3
-        ; learn_first_steps = Some learn_first_steps
+        ; learn_steps = 50
+        ; exploit_steps = 10
         }
     in
     Optimizer.Config.SOFO.
@@ -709,7 +642,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 100000 + learn_first_steps in
+  let max_iter = 100000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->
