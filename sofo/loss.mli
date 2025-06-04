@@ -1,21 +1,13 @@
-(** Loss modules. *)
-open Torch
-include module type of Loss_typ
+open Forward_torch
+open Maths
 
-(** Mean squared loss. *)
-module MSE (_ : sig
-    val scaling_factor : float
-  end) : T with type labels = Tensor.t and type 'a with_args = 'a
+val mse : dim:int list -> ([< `const | `dual ] as 'a) t -> 'a t
+val mse_hv_prod : dim:int list -> [ `const ] t -> [ `const ] t
 
-(** Cross-entropy loss. *)
-module CE (_ : sig
-    val scaling_factor : float
-  end) : T with type labels = Tensor.t and type 'a with_args = 'a
+val cross_entropy
+  :  dim:int list
+  -> labels:[ `const ] t
+  -> [< `const | `dual ] t
+  -> [ `const | `dual ] t
 
-(** Weighted mean squared loss, with the loss and sketched GGN multiplied by the [scaling_factor]. *)
-module Weighted_MSE (_ : sig
-    val scaling_factor : float
-  end) : T with type labels = Tensor.t and type 'a with_args = weights:Tensor.t -> 'a
-
-(** Negative of utility/reward. *)
-module RL_loss : Reward with type 'a with_args = 'a
+val cross_entropy_hv_prod : dim:int list -> [ `const ] t -> v:[ `const ] t -> [ `const ] t

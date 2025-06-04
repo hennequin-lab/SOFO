@@ -1,6 +1,7 @@
 (library
  (name sofo)
  (public_name sofo)
+ (modules sofo loss loss_typ optimizer_typ optimizer)
  (libraries stdio base forward-torch)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))

@@ -4,151 +4,150 @@
 open Base
 open Torch
 
-type tangent =
-  | Explicit of const t
-  | On_demand of (Device.t -> const t)
+type +'a t
 
-and const = [ `Const ]
-and dual = [ `Dual ]
-and 'a any = [< `Const | `Dual ] as 'a
-
-and _ t =
-  | Const of Tensor.t
-  | Dual of Tensor.t * tangent
-
-exception Not_dual
 exception Wrong_shape of int list * int list
 exception Wrong_device of Device.t * Device.t
 exception Check_grad_failed
 
-val as_const : _ any t -> const t
-val as_dual_exn : _ any t -> dual t
-val const : Tensor.t -> const t
-val dual : dx:const t -> const t -> dual t
-val dual_lazy : dx:(Device.t -> const t) -> const t -> dual t
-val primal : _ any t -> Tensor.t
-val tangent : dual t -> Tensor.t
-
-(** Get shape of the primal tensor. *)
-val shape : _ any t -> int list
-
-(** Get the device of the primal tensor. *)
-val device : _ any t -> Device.t
-
-(** Get the kind of the primal tensor. *)
-val kind : _ any t -> Torch_core.Kind.packed
+val any : [< `const | `dual ] t -> [ `const | `dual ] t
+val of_tensor : Tensor.t -> [ `const ] t
+val to_tensor : [< `const | `dual ] t -> Tensor.t
+val const : [< `const | `dual ] t -> [ `const ] t
+val shape : [< `const | `dual ] t -> int list
+val device : [< `const | `dual ] t -> Device.t
+val kind : [< `const | `dual ] t -> Torch_core.Kind.packed
+val numel : [< `const | `dual ] t -> int
+val tangent_exn : [< `const | `dual ] t -> [ `const ] t
+val dual : tangent:[ `const ] t -> [ `const ] t -> [ `dual ] t
+val dual_on_demand : tangent:(Device.t -> [ `const ] t) -> [ `const ] t -> [ `dual ] t
+val first_dim : [< `const | `dual ] t -> int
 
 (** Create a constant scalar tensor by pairing the primal with None as tangent. *)
-val f : float -> const t
+val f : float -> [ `const ] t
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
 
-val zeros : (int list -> const t) with_tensor_params
-val ones : (?scale:float -> int list -> const t) with_tensor_params
-val rand : (?scale:float -> int list -> const t) with_tensor_params
-val randn : (?scale:float -> int list -> const t) with_tensor_params
-val zeros_like : _ any t -> const t
-val ones_like : _ any t -> const t
-val rand_like : _ any t -> const t
-val randn_like : _ any t -> const t
+val zeros : (int list -> [ `const ] t) with_tensor_params
+val ones : (?scale:float -> int list -> [ `const ] t) with_tensor_params
+val rand : (?scale:float -> int list -> [ `const ] t) with_tensor_params
+val randn : (?scale:float -> int list -> [ `const ] t) with_tensor_params
+val zeros_like : [< `const | `dual ] t -> [ `const ] t
+val zeros_like_k : k:int -> [< `const | `dual ] t -> [ `const ] t
+val ones_like : [< `const | `dual ] t -> [ `const ] t
+val rand_like : [< `const | `dual ] t -> [ `const ] t
+val randn_like : [< `const | `dual ] t -> [ `const ] t
+val randn_like_k : k:int -> [< `const | `dual ] t -> [ `const ] t
 
-module Builder : sig
-  type a = Tensor.t
+type unary_info =
+  { f : Tensor.t -> Tensor.t
+  ; df : f:Tensor.t -> x:Tensor.t -> dx:Tensor.t -> Tensor.t
+  }
 
-  module Const : sig
-    type unary_op = const t -> const t
-    type binary_op = const t -> const t -> const t
-    type unary_builder = a -> a
-    type binary_builder = a -> a -> a
+type binary_info =
+  { f : Tensor.t -> Tensor.t -> Tensor.t
+  ; dfx : f:Tensor.t -> x:Tensor.t -> y:Tensor.t -> dx:Tensor.t -> Tensor.t
+  ; dfy : f:Tensor.t -> x:Tensor.t -> y:Tensor.t -> dy:Tensor.t -> Tensor.t
+  ; dfxy :
+      f:Tensor.t -> x:Tensor.t -> y:Tensor.t -> dx:Tensor.t -> dy:Tensor.t -> Tensor.t
+  }
 
-    val make_unary : unary_builder -> unary_op
-    val make_binary : binary_builder -> binary_op
-  end
+val make_unary : unary_info -> ([< `const | `dual ] as 'a) t -> 'a t
 
-  module Any : sig
-    type 'a unary_op = 'a any t -> 'a any t
-    type ('a, 'b, 'c) binary_op = 'a any t -> 'b any t -> 'c any t
+val make_binary
+  :  binary_info
+  -> [< `const | `dual ] t
+  -> [< `const | `dual ] t
+  -> [ `const | `dual ] t
 
-    type unary_builder =
-      { f : a -> a
-      ; df : f:a -> x:a -> a -> a
-      }
+val view : size:int list -> ([< `const | `dual ] as 'a) t -> 'a t
+val reshape : shape:int list -> ([< `const | `dual ] as 'a) t -> 'a t
+val permute : dims:int list -> ([< `const | `dual ] as 'a) t -> 'a t
+val squeeze : dim:int -> ([< `const | `dual ] as 'a) t -> 'a t
+val unsqueeze : dim:int -> ([< `const | `dual ] as 'a) t -> 'a t
+val transpose : ?dims:int list -> ([< `const | `dual ] as 'a) t -> 'a t
+val neg : ([< `const | `dual ] as 'a) t -> 'a t
+val trace : ([< `const | `dual ] as 'a) t -> 'a t
+val sin : ([< `const | `dual ] as 'a) t -> 'a t
+val cos : ([< `const | `dual ] as 'a) t -> 'a t
+val sqr : ([< `const | `dual ] as 'a) t -> 'a t
+val sqrt : ([< `const | `dual ] as 'a) t -> 'a t
+val log : ([< `const | `dual ] as 'a) t -> 'a t
+val exp : ([< `const | `dual ] as 'a) t -> 'a t
+val tanh : ([< `const | `dual ] as 'a) t -> 'a t
+val relu : ([< `const | `dual ] as 'a) t -> 'a t
+val sigmoid : ([< `const | `dual ] as 'a) t -> 'a t
+val softplus : ([< `const | `dual ] as 'a) t -> 'a t
 
-    type binary_builder =
-      { f : a -> a -> a
-      ; dfx : f:a -> x:a -> y:a -> a -> a
-      ; dfy : f:a -> x:a -> y:a -> a -> a
-      ; dfxy : f:a -> x:a -> y:a -> a -> a -> a
-      }
+val slice
+  :  ?start:int
+  -> ?end_:int
+  -> ?step:int
+  -> dim:int
+  -> ([< `const | `dual ] as 'a) t
+  -> 'a t
 
-    val make_unary : unary_builder -> _ unary_op
-    val make_binary : binary_builder -> (_, _, _) binary_op
-  end
+val sum : ([< `const | `dual ] as 'a) t -> 'a t
+val mean : ([< `const | `dual ] as 'a) t -> 'a t
+val sum_dim : ?keepdim:bool -> dim:int list -> ([< `const | `dual ] as 'a) t -> 'a t
+val mean_dim : ?keepdim:bool -> dim:int list -> ([< `const | `dual ] as 'a) t -> 'a t
+val logsumexp : ?keepdim:bool -> dim:int list -> ([< `const | `dual ] as 'a) t -> 'a t
+val ( + ) : [< `const | `dual ] t -> [< `const | `dual ] t -> [ `const | `dual ] t
+val ( - ) : [< `const | `dual ] t -> [< `const | `dual ] t -> [ `const | `dual ] t
+val ( * ) : [< `const | `dual ] t -> [< `const | `dual ] t -> [ `const | `dual ] t
+val ( / ) : [< `const | `dual ] t -> [< `const | `dual ] t -> [ `const | `dual ] t
+val ( $+ ) : float -> ([< `const | `dual ] as 'a) t -> 'a t
+val ( $* ) : float -> ([< `const | `dual ] as 'a) t -> 'a t
+val ( $/ ) : float -> ([< `const | `dual ] as 'a) t -> 'a t
+val ( *@ ) : [< `const | `dual ] t -> [< `const | `dual ] t -> [ `const | `dual ] t
+val einsum : ([< `const | `dual ] t * string) list -> string -> [ `const | `dual ] t
+
+(* ---------------------------------------------------
+   -- Type-preserving ops on constants
+   --------------------------------------------------- *)
+module C : sig
+  val make_unary : unary_info -> [ `const ] t -> [ `const ] t
+  val make_binary : binary_info -> [ `const ] t -> [ `const ] t -> [ `const ] t
+  val view : size:int list -> [ `const ] t -> [ `const ] t
+  val reshape : shape:int list -> [ `const ] t -> [ `const ] t
+  val permute : dims:int list -> [ `const ] t -> [ `const ] t
+  val squeeze : dim:int -> [ `const ] t -> [ `const ] t
+  val unsqueeze : dim:int -> [ `const ] t -> [ `const ] t
+  val transpose : ?dims:int list -> [ `const ] t -> [ `const ] t
+  val neg : [ `const ] t -> [ `const ] t
+  val trace : [ `const ] t -> [ `const ] t
+  val sin : [ `const ] t -> [ `const ] t
+  val cos : [ `const ] t -> [ `const ] t
+  val sqr : [ `const ] t -> [ `const ] t
+  val sqrt : [ `const ] t -> [ `const ] t
+  val log : [ `const ] t -> [ `const ] t
+  val exp : [ `const ] t -> [ `const ] t
+  val tanh : [ `const ] t -> [ `const ] t
+  val relu : [ `const ] t -> [ `const ] t
+  val sigmoid : [ `const ] t -> [ `const ] t
+  val softplus : [ `const ] t -> [ `const ] t
+
+  val slice
+    :  ?start:int
+    -> ?end_:int
+    -> ?step:int
+    -> dim:int
+    -> [ `const ] t
+    -> [ `const ] t
+
+  val sum : [ `const ] t -> [ `const ] t
+  val mean : [ `const ] t -> [ `const ] t
+  val sum_dim : ?keepdim:bool -> dim:int list -> [ `const ] t -> [ `const ] t
+  val mean_dim : ?keepdim:bool -> dim:int list -> [ `const ] t -> [ `const ] t
+  val logsumexp : ?keepdim:bool -> dim:int list -> [ `const ] t -> [ `const ] t
+  val ( + ) : [ `const ] t -> [ `const ] t -> [ `const ] t
+  val ( - ) : [ `const ] t -> [ `const ] t -> [ `const ] t
+  val ( * ) : [ `const ] t -> [ `const ] t -> [ `const ] t
+  val ( / ) : [ `const ] t -> [ `const ] t -> [ `const ] t
+  val ( $+ ) : float -> [ `const ] t -> [ `const ] t
+  val ( $* ) : float -> [ `const ] t -> [ `const ] t
+  val ( $/ ) : float -> [ `const ] t -> [ `const ] t
+  val ( *@ ) : [ `const ] t -> [ `const ] t -> [ `const ] t
+  val einsum : ([ `const ] t * string) list -> string -> [ `const ] t
+  val svd : [ `const ] t -> [ `const ] t * [ `const ] t * [ `const ] t
 end
-
-module Primal : sig
-  val view : size:int list -> const t -> const t
-  val reshape : shape:int list -> const t -> const t
-  val permute : dims:int list -> const t -> const t
-  val squeeze : dim:int -> const t -> const t
-  val unsqueeze : dim:int -> const t -> const t
-  val neg : const t -> const t
-  val trace : const t -> const t
-  val sin : const t -> const t
-  val cos : const t -> const t
-  val sqr : const t -> const t
-  val sqrt : const t -> const t
-  val log : const t -> const t
-  val exp : const t -> const t
-  val tanh : const t -> const t
-  val relu : const t -> const t
-  val sigmoid : const t -> const t
-  val softplus : const t -> const t
-  val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> const t -> const t
-  val sum : const t -> const t
-  val mean : const t -> const t
-  val sum_dim : ?keepdim:bool -> dim:int list -> const t -> const t
-  val mean_dim : ?keepdim:bool -> dim:int list -> const t -> const t
-  val ( + ) : const t -> const t -> const t
-  val ( - ) : const t -> const t -> const t
-  val ( * ) : const t -> const t -> const t
-  val ( / ) : const t -> const t -> const t
-  val ( $+ ) : float -> const t -> const t
-  val ( $* ) : float -> const t -> const t
-  val ( $/ ) : float -> const t -> const t
-  val ( *@ ) : const t -> const t -> const t
-  val einsum : (const t * string) list -> string -> const t
-end
-
-val numel : 'a any t -> int
-val view : size:int list -> 'a any t -> 'a any t
-val reshape : shape:int list -> 'a any t -> 'a any t
-val permute : dims:int list -> 'a any t -> 'a any t
-val squeeze : dim:int -> 'a any t -> 'a any t
-val unsqueeze : dim:int -> 'a any t -> 'a any t
-val neg : 'a any t -> 'a any t
-val trace : 'a any t -> 'a any t
-val sin : 'a any t -> 'a any t
-val cos : 'a any t -> 'a any t
-val sqr : 'a any t -> 'a any t
-val sqrt : 'a any t -> 'a any t
-val log : 'a any t -> 'a any t
-val exp : 'a any t -> 'a any t
-val tanh : 'a any t -> 'a any t
-val relu : 'a any t -> 'a any t
-val sigmoid : 'a any t -> 'a any t
-val softplus : 'a any t -> 'a any t
-val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> 'a any t -> 'a any t
-val sum : 'a any t -> 'a any t
-val mean : 'a any t -> 'a any t
-val sum_dim : ?keepdim:bool -> dim:int list -> 'a any t -> 'a any t
-val mean_dim : ?keepdim:bool -> dim:int list -> 'a any t -> 'a any t
-val ( + ) : 'a any t -> 'b any t -> 'c any t
-val ( - ) : 'a any t -> 'b any t -> 'c any t
-val ( * ) : 'a any t -> 'b any t -> 'c any t
-val ( / ) : 'a any t -> 'b any t -> 'c any t
-val ( $+ ) : float -> 'a any t -> 'a any t
-val ( $* ) : float -> 'a any t -> 'a any t
-val ( $/ ) : float -> 'a any t -> 'a any t
-val ( *@ ) : 'a any t -> 'b any t -> 'c any t
-val einsum : ('a any t * string) list -> string -> 'a any t

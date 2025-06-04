@@ -1,26 +1,25 @@
+open Forward_torch
+
 (** Basic optimizer type. *)
 module type T = sig
-  (** W is the wrapper type that defines the forward computational graph. *)
-  module W : Wrapper.T
+  (* type of parameter set we're optimising *)
+  module P : Prms.T
 
-  type ('a, 'b) config
   type state
+  type info
+  type ('a, 'b) config
   type ('a, 'b, 'c) init_opts
 
-  (** Extract parameters from state. *)
-  val params : state -> W.P.tagged
-
-  (** Initialise state from parameters. *)
-  val init : (state, 'a, 'b) init_opts
-
-  (** Given [config], current [state], [data] and additional [args], return loss and updated state. *)
-  val step
-    :  config:('a, 'b) config
-    -> state:state
-    -> data:W.data
-    -> args:W.args
-    -> float * state
+  val params : state -> P.param
+  val init : ('a, 'b, state) init_opts
+  val step : config:('a, 'b) config -> info:info -> state -> state
 end
+
+type 'v sofo_info =
+  { loss : [ `const | `dual ] Maths.t
+  ; ggn : [ `const ] Maths.t
+  ; tangents : 'v
+  }
 
 module Config = struct
   (** Basic config, specifying device, kind and BigArray kind.*)
@@ -44,19 +43,11 @@ module Config = struct
       { base : ('a, 'b) Base.t
       ; learning_rate : float option
       ; n_tangents : int
-      ; rank_one : bool
       ; damping : float option
-      ; momentum : float option
       }
 
     let default =
-      { base = Base.default
-      ; learning_rate = None
-      ; n_tangents = 10
-      ; rank_one = false
-      ; damping = None
-      ; momentum = None
-      }
+      { base = Base.default; learning_rate = None; n_tangents = 10; damping = None }
   end
 
   module FGD = struct
@@ -77,14 +68,14 @@ module Config = struct
       }
   end
 
-  module SGD = struct
+  module SGDm = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t
       ; learning_rate : float option
-      ; momentum : float option
+      ; momentum : float
       }
 
-    let default = { base = Base.default; learning_rate = None; momentum = None }
+    let default = { base = Base.default; learning_rate = None; momentum = 0.9 }
   end
 
   module Adam = struct

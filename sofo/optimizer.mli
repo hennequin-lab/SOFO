@@ -1,31 +1,33 @@
+open Forward_torch
+
 (** Four types of optimizers supported in this library. *)
 include module type of Optimizer_typ
 
 (** SOFO optimizer *)
-module SOFO (W : Wrapper.T) :
-  T
-  with module W = W
-   and type ('a, 'b) config = ('a, 'b) Config.SOFO.t
-   and type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SOFO.t -> W.P.tagged -> 'c
+module SOFO (P : Prms.T) : sig
+  include
+    T
+    with module P = P
+     and type ('a, 'b) config = ('a, 'b) Config.SOFO.t
+     and type ('a, 'b, 'c) init_opts = P.param -> 'c
+     and type info = [ `const ] P.t sofo_info
 
-(** Forward Gradient Descent
-  @see <https://arxiv.org/abs/2202.08587> original paper. *)
-module FGD (W : Wrapper.T) :
-  T
-  with module W = W
-   and type ('a, 'b) config = ('a, 'b) Config.FGD.t
-   and type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.FGD.t -> W.P.tagged -> 'c
+  (* initialise parameters with random tangents, ready to go into forward pass *)
+  val prepare : config:(_, _) config -> state -> [ `dual ] P.t
+end
 
 (** Stochastic gradient descent *)
-module SGD (W : Wrapper.T) :
+module SGDm (P : Prms.T) :
   T
-  with module W = W
-   and type ('a, 'b) config = ('a, 'b) Config.SGD.t
-   and type ('c, 'a, 'b) init_opts = config:('a, 'b) Config.SGD.t -> W.P.tagged -> 'c
+  with module P = P
+   and type ('a, 'b) config = ('a, 'b) Config.SGDm.t
+   and type ('a, 'b, 'c) init_opts = P.param -> 'c
+   and type info = [ `const ] P.t
 
 (** Adam optimizer *)
-module Adam (W : Wrapper.T) :
+module Adam (P : Prms.T) :
   T
-  with module W = W
+  with module P = P
    and type ('a, 'b) config = ('a, 'b) Config.Adam.t
-   and type ('c, _, _) init_opts = W.P.tagged -> 'c
+   and type (_, _, 'c) init_opts = P.param -> 'c
+   and type info = [ `const ] P.t

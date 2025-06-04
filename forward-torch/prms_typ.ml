@@ -6,14 +6,16 @@ open Maths
    -- Basic types for parameters
    ------------------------------------------------------------ *)
 
+type bounded =
+  { v : Tensor.t
+  ; lb : Tensor.t option
+  ; ub : Tensor.t option
+  }
+
 type param =
-  | Pinned of const t
-  | Free of const t
-  | Bounded of
-      { v : const t
-      ; lb : const t Option.t
-      ; ub : const t Option.t
-      }
+  | Pinned of Tensor.t
+  | Free of Tensor.t
+  | Bounded of bounded
 
 (** Path specified as a list of strings. *)
 type path = String.t List.t
@@ -24,7 +26,7 @@ module type Basic = sig
       (e.g. if it is not a record type), then you will need to use
       {!Forward_torch.Prms.Make} and provide a module of this type. *)
 
-  type 'a p
+  type +'a p
 
   (** Apply function [f] on all elements in x. *)
   val map : 'a p -> f:('a -> 'b) -> 'b p
@@ -67,55 +69,69 @@ module type T = sig
   type nonrec param = param p
 
   (** Extract value as Tensor.t in all elements in x. *)
-  val value : param -> const t
+  val value : param -> [ `const ] t
 
-  val as_const : _ any t -> const t
-  val as_dual_exn : _ any t -> dual t
-  val const : Tensor.t p -> const t
-  val dual : dx:const t -> const t -> dual t
-  val dual_lazy : dx:(Device.t -> const Maths.t) p -> const t -> dual t
-  val primal : _ any t -> Tensor.t p
-  val tangent : dual t -> Tensor.t p
-  val zeros_like : _ any t -> const t
-  val ones_like : _ any t -> const t
-  val rand_like : _ any t -> const t
-  val randn_like : _ any t -> const t
+  val of_tensor : Tensor.t p -> [ `const ] t
+  val to_tensor : [< `const | `dual ] t -> Tensor.t p
+  val const : [< `const | `dual ] t -> [ `const ] t
+  val numel : [< `const | `dual ] t -> int
+  val tangent_exn : [< `const | `dual ] t -> [ `const ] t
+  val dual : tangent:[ `const ] t -> [ `const ] t -> [ `dual ] t
 
-  (** Returns the number of parameters in x. *)
-  val numel : _ any t -> int
+  val dual_on_demand
+    :  tangent:(Device.t -> [ `const ] elt) p
+    -> [ `const ] t
+    -> [ `dual ] t
+
+  val zeros_like : [< `const | `dual ] t -> [ `const ] t
+  val zeros_like_k : k:int -> [< `const | `dual ] t -> [ `const ] t
+  val ones_like : [< `const | `dual ] t -> [ `const ] t
+  val rand_like : [< `const | `dual ] t -> [ `const ] t
+  val randn_like : [< `const | `dual ] t -> [ `const ] t
+  val randn_like_k : k:int -> [< `const | `dual ] t -> [ `const ] t
 
   (** Returns the dot product between x and y. *)
-  val dot_prod : 'a any t -> 'b any t -> 'c any elt
+  val dot_prod : [< `const | `dual ] t -> [< `const | `dual ] t -> [ `const | `dual ] elt
 
   (** Element-wise multiplication of two parameter sets *)
-  val ( * ) : 'a any t -> 'b any t -> 'c any t
+  val ( * ) : [< `const | `dual ] t -> [< `const | `dual ] t -> [ `const | `dual ] t
 
   (** Element-wise addition of two parameter sets *)
-  val ( + ) : 'a any t -> 'b any t -> 'c any t
+  val ( + ) : [< `const | `dual ] t -> [< `const | `dual ] t -> [ `const | `dual ] t
 
   (** Element-wise subtraction of two parameter sets *)
-  val ( - ) : 'a any t -> 'b any t -> 'c any t
+  val ( - ) : [< `const | `dual ] t -> [< `const | `dual ] t -> [ `const | `dual ] t
 
   (** Element-wise division of two parameter sets *)
-  val ( / ) : 'a any t -> 'b any t -> 'c any t
+  val ( / ) : [< `const | `dual ] t -> [< `const | `dual ] t -> [ `const | `dual ] t
 
   (** Multiplication of a parameter set with a scalar *)
-  val ( $* ) : float -> 'a any t -> 'a any t
+  val ( $* ) : float -> ([< `const | `dual ] as 'a) t -> 'a t
 
   (** Adds a scalar to a parameter set *)
-  val ( $+ ) : float -> 'a any t -> 'a any t
+  val ( $+ ) : float -> ([< `const | `dual ] as 'a) t -> 'a t
 
-  (** Save x as [kind] in [out]. *)
-  val save : const t -> kind:('a, 'b) Bigarray.kind -> out:string -> unit
+  module C : sig
+    val dot_prod : [ `const ] t -> [ `const ] t -> [ `const ] elt
+    val ( * ) : [ `const ] t -> [ `const ] t -> [ `const ] t
+    val ( + ) : [ `const ] t -> [ `const ] t -> [ `const ] t
+    val ( - ) : [ `const ] t -> [ `const ] t -> [ `const ] t
+    val ( / ) : [ `const ] t -> [ `const ] t -> [ `const ] t
+    val ( $* ) : float -> [ `const ] t -> [ `const ] t
+    val ( $+ ) : float -> [ `const ] t -> [ `const ] t
 
-  (** Load params from file onto [device]. *)
-  val load : ?device:Device.t -> string -> const t
+    (** Save x as [kind] in [out]. *)
+    val save : [ `const ] t -> kind:('a, 'b) Bigarray.kind -> out:string -> unit
 
-  (** Save x as [kind] in [out] with [prefix] as .npy file. *)
-  val save_npz
-    :  ?prefix:string
-    -> kind:('a, 'b) Bigarray.kind
-    -> out:string
-    -> const t
-    -> unit
+    (** Load params from file onto [device]. *)
+    val load : ?device:Device.t -> string -> [ `const ] t
+
+    (** Save x as [kind] in [out] with [prefix] as .npy file. *)
+    val save_npz
+      :  ?prefix:string
+      -> kind:('a, 'b) Bigarray.kind
+      -> out:string
+      -> [ `const ] t
+      -> unit
+  end
 end
