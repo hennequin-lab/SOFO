@@ -12,7 +12,15 @@ module SOFO (P : Prms.T) : sig
      and type ('a, 'b, 'c) init_opts = P.param -> 'c
      and type info = [ `const ] P.t sofo_info
 
-  (* initialise parameters with random tangents (also returned), ready to go into forward pass *)
+  (** Initialise parameters with random tangents (also returned), ready to go into forward pass;
+      in your optimization loop, just do
+      {[
+      let theta, tangents = prepare ~config state in
+      let loss, ggn = _ (*.... some function of theta using the Maths module for fwd-mode AD *) in
+      let state = step ~config ~info:{ loss; ggn; tangents } state in
+      (* carry on with the new optimizer state *)
+      ]}
+     *)
   val prepare : config:(_, _) config -> state -> [ `dual ] P.t * [ `const ] P.t
 end
 

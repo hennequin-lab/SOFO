@@ -3,3 +3,5 @@ module Loss = Loss
 
 (** Optimizers used for training the networks. *)
 module Optimizer = Optimizer
+
+include Convenience

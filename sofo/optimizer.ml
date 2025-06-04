@@ -4,8 +4,7 @@ open Maths
 open Torch
 include Optimizer_typ
 
-let print s = Stdio.print_endline (Sexp.to_string_hum s)
-
+(* update parameters, respecting any specified bounds *)
 module Update_params (P : Prms.T) = struct
   let update ~learning_rate:eta ~theta delta =
     let open Prms in
@@ -18,7 +17,7 @@ module Update_params (P : Prms.T) = struct
         Bounded { v = Prms.enforce_bounds ?lb ?ub (update x delta); lb; ub })
 end
 
-(* apply momentum to gradient *)
+(* apply momentum to anything *)
 module Momentum (P : Prms.T) = struct
   let apply ?momentum ~avg g =
     match momentum with

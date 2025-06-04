@@ -6,7 +6,7 @@ include module type of Prms_typ
 val value : param -> [ `const ] t
 val enforce_bounds : ?lb:Tensor.t -> ?ub:Tensor.t -> Tensor.t -> Tensor.t
 
-module Singleton : sig
+module Single : sig
   include T with type +'a p = 'a
 
   val pinned : [ `const ] t -> param

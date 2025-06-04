@@ -123,20 +123,18 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
 end
 
 (* ------------------------------------------------------------
-   -- Singleton parameter 
+   -- Single parameter 
    ------------------------------------------------------------ *)
 
-module Singleton_basic : Basic with type 'a p = 'a = struct
-  type 'a p = 'a
+module Single = struct
+  include Make (struct
+      type 'a p = 'a
 
-  let map x ~f = f x
-  let map2 x y ~f = f x y
-  let fold ?path x ~init ~f = f init (x, path)
-  let fold2 ?path x y ~init ~f = f init (x, y, path)
-end
-
-module Singleton = struct
-  include Make (Singleton_basic)
+      let map x ~f = f x
+      let map2 x y ~f = f x y
+      let fold ?path x ~init ~f = f init (x, path)
+      let fold2 ?path x y ~init ~f = f init (x, y, path)
+    end)
 
   let pinned (x : [ `const ] t) : param = Pinned (to_tensor x)
   let free (x : [ `const ] t) : param = Free (to_tensor x)

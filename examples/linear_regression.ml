@@ -1,6 +1,5 @@
 (* Example a simple linear regression task to learn W where y = W x. *)
 open Base
-open Torch
 open Forward_torch
 open Maths
 open Sofo
@@ -14,13 +13,13 @@ let base = Optimizer.Config.Base.default
    ----------------------------------------- *)
 
 module Model = struct
-  module P = Prms.Singleton
+  module P = Prms.Single
 
-  let f ~theta input = theta *@ input
+  let f ~theta:w input = input *@ w
 
-  let init ~n ~d : P.param =
-    let sigma = Float.(1. / sqrt (of_int n)) in
-    let theta = sigma $* randn ~kind:base.kind ~device:base.device [ d; n ] in
+  let init ~d_in ~d_out : P.param =
+    let sigma = Float.(1. / sqrt (of_int d_in)) in
+    let theta = sigma $* randn ~kind:base.kind ~device:base.device [ d_in; d_out ] in
     P.free theta
 end
 
@@ -34,31 +33,23 @@ let config =
    -- Generate linear regression data.
    ----------------------------------------- *)
 
-(* Dimension of x. *)
-let n = 100
+let d_in, d_out = 100, 3
 
-(* Dimension of y. *)
-let d = 3
-
-(* Input covariance ( = Fisher information matrix in this case). *)
-let input_cov12 =
-  let lambda =
-    Array.init n ~f:(fun i -> Float.(1. / (1. + square (of_int Int.(i + 1)))))
-    |> Tensor.of_float1 ~device:base.device
-    |> of_tensor
+let data_minibatch =
+  let teacher = Model.init ~d_in ~d_out |> Model.P.value in
+  let input_cov_sqrt =
+    let u, _ = C.qr (randn ~device:base.device [ d_in; d_in ]) in
+    let lambda =
+      Array.init d_in ~f:(fun i -> Float.(1. / (1. + square (of_int Int.(i + 1)))))
+      |> of_array ~device:base.device ~shape:[ d_in; 1 ]
+      |> fun x -> C.(x / mean x)
+    in
+    C.(sqrt lambda * u)
   in
-  let lambda = C.(lambda / mean lambda) in
-  let u, _ = C.qr (randn ~device:base.device [ n; n ]) in
-  C.(u * sqrt lambda)
-
-(* True weights. *)
-let teacher = Model.init ~n ~d |> Model.P.value
-
-(* Generate data for mini batch. *)
-let minibatch bs =
-  let x = C.(input_cov12 *@ randn ~device:base.device [ n; bs ]) in
-  let y = Model.f ~theta:teacher x in
-  x, y
+  fun bs ->
+    let x = C.(randn ~device:base.device [ bs; d_in ] *@ input_cov_sqrt) in
+    let y = Model.f ~theta:teacher x in
+    x, y
 
 (* -----------------------------------------
    -- Optimization loop       ------
@@ -69,10 +60,8 @@ let max_iter = 10_000
 
 let rec loop ~t ~out ~state =
   Stdlib.Gc.major ();
-  (* Generate data. *)
-  let x, y = minibatch batch_size in
+  let x, y = data_minibatch batch_size in
   let theta, vs = O.prepare ~config state in
-  (* we need to compute the loss tangents, and the ggn *)
   let y_pred = Model.f ~theta x in
   let loss = Loss.mse ~average_over:[ 0; 1 ] (sqr (y - y_pred)) in
   let ggn =
@@ -92,4 +81,4 @@ let rec loop ~t ~out ~state =
 let _ =
   let out = in_dir "loss" in
   Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out ~state:(O.init (Model.init ~n ~d))
+  loop ~t:0 ~out ~state:(O.init (Model.init ~d_in ~d_out))

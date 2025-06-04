@@ -1,15 +1,15 @@
 {0 SOFO: second-order forward-mode optimization}
 
-Library description: This is the library for the SOFO optimizer, which is a second-order subspace method using 
-batched forward-mode differentitation. 
+This is a library implementation of the SOFO optimizer, a second-order subspace method that uses batched forward-mode differentiation. 
 
-{!modules: Sofo.Optimizer Sofo.Loss Sofo.Wrapper Sofo.Convenience}
+{!modules: Sofo.Optimizer Sofo.Loss}
 
 Here is a small MLP example. First, we define the parameter module.
 
 {[
 open Base
 open Forward_torch
+open Maths
 open Sofo
 
 include struct
@@ -22,7 +22,7 @@ end [@@deriving prms]
 ]}
 We then use [Make] to create a parameter module for a single MLP layer:
 {[
-module MLP_Layer = Prms.Make (Prms.P)
+module MLP_Layer = Prms.Make (Prms.Single)
 ]}
 and even make a list of those for a multi-layer MLP:  
 {[
