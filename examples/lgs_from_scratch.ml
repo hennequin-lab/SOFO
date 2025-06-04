@@ -25,7 +25,7 @@ let m = 5
 let n = 10
 let o = 40
 let true_noise_std = 0.1
-let tmax = 50
+let tmax = 10
 let bs = 32
 let _K = 120
 let eye_m = Maths.(const (Tensor.of_bigarray ~device:base.device Mat.(eye m)))
@@ -355,13 +355,13 @@ let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
   let precision_chol =
     (eye_m + einsum [ btrinv, "io"; c, "jo"; b, "kj" ] "ik" |> cholesky) * scaling_factor
   in
-  let _, kl, us =
+  let _, kl_list, us =
     let u_star_y_list = List.map2_exn ustars o_list ~f:(fun u o -> u, o) in
     List.fold2_exn
       (List.range 0 tmax)
       u_star_y_list
-      ~init:(z0, f 0., [])
-      ~f:(fun (z, kl, us) i (ustar, ostar) ->
+      ~init:(z0, [], [])
+      ~f:(fun (z, kl_list, us) i (ustar, ostar) ->
         Stdlib.Gc.major ();
         let b = if i = 0 then b_0 else b in
         let precision_chol = if i = 0 then precision_chol_0 else precision_chol in
@@ -396,23 +396,18 @@ let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
             gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u_tmp
           in
           (* sticking the landing idea where gradients w.r.t variational parameters removed. *)
-          let q_term =
-            gaussian_llh_chol
-              ~mu:(detach mu)
-              ~precision_chol:(detach precision_chol)
-              u_sample
-          in
-          kl + q_term - prior_term
+          let q_term = gaussian_llh_chol ~mu ~precision_chol u_sample in
+          q_term - prior_term
         in
-        z, kl, (ustar + u_sample) :: us)
+        z, kl :: kl_list, (ustar + u_sample) :: us)
   in
-  kl, List.rev us
+  List.rev kl_list, List.rev us
 
 let elbo ~data:(o_list : Maths.t list) (theta : P.M.t) =
   let a = a_reparam (theta.q, theta.d) in
   let obs_precision = Maths.(precision_of_log_var theta.log_obs_var * ones_o) in
   let ustars, _ = lqr ~a ~b:theta.b ~b_0:theta.b_0 ~c:theta.c ~obs_precision o_list in
-  let kl, u_sampled =
+  let kl_list, u_sampled =
     let scaling_factor = theta.scaling_factor in
     sample_and_kl
       ~a
@@ -423,28 +418,32 @@ let elbo ~data:(o_list : Maths.t list) (theta : P.M.t) =
       ~scaling_factor
       ustars
       o_list
-    (* sample_and_kl ~a ~b:theta.b ~b_0:theta.b_0 backward_info  *)
   in
   let y_pred = rollout ~a ~b:theta.b ~b_0:theta.b_0 ~c:theta.c u_sampled in
-  let lik_term =
+  let lik_list =
     let inv_sigma_o_expanded =
       Maths.(sqrt_precision_of_log_var theta.log_obs_var * ones_o)
     in
-    List.fold2_exn
-      o_list
-      y_pred
-      ~init:Maths.(f 0.)
-      ~f:(fun accu y y_pred ->
-        Stdlib.Gc.major ();
-        Maths.(accu + gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded y))
+    List.map2_exn o_list y_pred ~f:(fun o y_pred ->
+      Maths.(gaussian_llh ~mu:y_pred ~inv_std:inv_sigma_o_expanded o))
   in
-  Maths.(neg (lik_term - kl) / f Float.(of_int tmax * of_int o)), y_pred
+  let elbo_list =
+    List.map2_exn lik_list kl_list ~f:(fun lik kl ->
+      Maths.(neg (lik - kl) / f Float.(of_int tmax * of_int o)))
+  in
+  elbo_list, y_pred
 
 module M = struct
   module P = P
 
   type data = Maths.t list
   type args = unit
+
+  let empirical_ggn ~loss =
+    List.fold loss ~init:(Maths.f 0.) ~f:(fun accu loss ->
+      let loss_t = Maths.(tangent loss) |> Option.value_exn |> Maths.const in
+      Maths.(accu + einsum [ loss_t, "km"; loss_t, "lm" ] "kl"))
+    |> Maths.primal
 
   let ggn ~y_pred (theta : P.M.t) =
     let obs_precision = precision_of_log_var theta.log_obs_var in
@@ -471,11 +470,15 @@ module M = struct
     |> Maths.primal
 
   let f_elbo ~update ~data:y ~init ~args:() (theta : P.M.t) =
-    let neg_elbo, y_pred_ggn = elbo ~data:y theta in
+    let neg_elbo_list, y_pred_ggn = elbo ~data:y theta in
+    let neg_elbo =
+      List.fold neg_elbo_list ~init:(Maths.f 0.) ~f:(fun accu elbo -> Maths.(accu + elbo))
+    in
     match update with
     | `loss_only u -> u init (Some neg_elbo)
     | `loss_and_ggn u ->
-      let ggn = ggn ~y_pred:y_pred_ggn theta in
+      (* let ggn = ggn ~y_pred:y_pred_ggn theta in *)
+      let ggn = empirical_ggn ~loss:neg_elbo_list in
       let _ =
         let _, s, _ = Owl.Linalg.D.svd (Tensor.to_bigarray ~kind:base.ba_kind ggn) in
         Mat.(save_txt ~out:(in_dir "svals") (transpose s))
@@ -503,7 +506,7 @@ let n_params_d = 10
 let n_params_c = Int.(_K - 2 - n_params_d - n_params_q)
 let n_params_log_obs_var = 1
 let n_params_scaling_factor = 1
-let cycle = true
+let cycle = false
 
 let n_params_list =
   [ n_params_q; n_params_d; n_params_c; n_params_log_obs_var; n_params_scaling_factor ]
@@ -790,7 +793,11 @@ module Make (D : Do_with_T) = struct
             theta_curr.log_obs_var |> Prms.value |> Tensor.exp |> Tensor.to_float0_exn
           in
           let ground_truth_loss =
-            let ground_truth_elbo, _ = elbo ~data:o_list true_theta in
+            let ground_truth_elbo_list, _ = elbo ~data:o_list true_theta in
+            let ground_truth_elbo =
+              List.fold ground_truth_elbo_list ~init:(Maths.f 0.) ~f:(fun accu elbo ->
+                Maths.(accu + elbo))
+            in
             Maths.primal ground_truth_elbo |> Tensor.mean |> Tensor.to_float0_exn
           in
           let ground_truth_std_o_loss =
@@ -805,7 +812,13 @@ module Make (D : Do_with_T) = struct
                 ; scaling_factor = true_theta.scaling_factor
                 }
             in
-            let ground_truth_std_o_elbo, _ = elbo ~data:o_list theta_std_o in
+            let ground_truth_std_o_elbo_list, _ = elbo ~data:o_list theta_std_o in
+            let ground_truth_std_o_elbo =
+              List.fold
+                ground_truth_std_o_elbo_list
+                ~init:(Maths.f 0.)
+                ~f:(fun accu elbo -> Maths.(accu + elbo))
+            in
             Maths.primal ground_truth_std_o_elbo |> Tensor.mean |> Tensor.to_float0_exn
           in
           Owl.Mat.(
@@ -846,18 +859,18 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
-        ; steps = 50
-        ; learn_steps = 100
-        ; exploit_steps = 100
+              { default with base; learning_rate = Some 1e-2; eps = 1e-4 }
+        ; steps = 5
+        ; learn_steps = 1
+        ; exploit_steps = 1
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.1
+      ; learning_rate = Some 0.01
       ; n_tangents = _K
       ; rank_one = false
-      ; damping = Some 1e-5
+      ; damping = Some 1e-3
       ; aux = Some aux
       }
 

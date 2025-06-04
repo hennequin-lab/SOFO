@@ -299,8 +299,8 @@ end
 (* -----------------------------------------
    --- Training for single reaches
    ----------------------------------------- *)
-let 
-let max_iter = 1000 
+
+let max_iter = 2000 
 
 module Run (X : sig
     module O :
@@ -415,14 +415,14 @@ module With_standard = struct
           config =
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-2; eps = 1e-8 }
-        ; steps = 5
-        ; learn_steps = 50
+        ; steps = 500
+        ; learn_steps = 10
         ; exploit_steps = 10
         }
     in
     Optimizer.Config.SOFO.
       { base = Arm.base
-      ; learning_rate = Some 0.1
+      ; learning_rate = Some 0.3
       ; rank_one = false
       ; n_tangents = _K
       ; damping = Some 1e-5

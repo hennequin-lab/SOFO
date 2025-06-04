@@ -495,7 +495,7 @@ module Do_with_SOFO : Do_with_T = struct
           config =
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
-        ; steps = 3
+        ; steps = 500
         ; learn_steps = 10
         ; exploit_steps = 10
         }
@@ -528,7 +528,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 2000 in
+  let max_iter = 4000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->
