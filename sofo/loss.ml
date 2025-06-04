@@ -3,31 +3,20 @@ open Forward_torch
 open Maths
 include Loss_typ
 
-let mse ~dim err = mean_dim ~keepdim:false ~dim (sqr err)
-let mse_hv_prod ~dim:_ v = C.(2. $* v)
+let n_reduction dim y =
+  let s = Array.of_list (shape y) in
+  List.fold dim ~init:1 ~f:(fun accu i -> Int.(accu * s.(i)))
 
-let cross_entropy ~dim ~(labels : [ `const ] t) y =
-  let lse = logsumexp ~keepdim:true ~dim y in
+let mse ~average_over err = mean_dim ~keepdim:false ~dim:average_over (sqr err)
+
+let mse_hv_prod ~average_over y ~v =
+  let m = n_reduction average_over y in
+  C.(Float.(2. / of_int m) $* v)
+
+let cross_entropy ~average_over ~logit_dim ~(labels : [ `const ] t) y =
+  let lse = logsumexp ~keepdim:true ~dim:[ logit_dim ] y in
   let diff = y - lse in
   let tmp = labels * diff in
-  neg (sum_dim ~keepdim:false ~dim tmp)
+  neg (sum_dim ~keepdim:false ~dim:average_over tmp)
 
-let cross_entropy_hv_prod ~dim y ~v =
-  let open C in
-  let s = shape v in
-  let n_samples = first_dim v in
-  let v_mat = reshape v ~shape:[ n_samples; -1 ] in
-  let softmaxed_probs =
-    let y' = to_tensor y in
-    Torch.Tensor.(exp_ (y' - logsumexp ~keepdim:true ~dim y')) |> of_tensor
-  in
-  let y_bar_row = reshape softmaxed_probs ~shape:[ 1; -1 ] in
-  let diag_part = v_mat * y_bar_row in
-  let rank_1_part =
-    let vtgt_ybar = v * softmaxed_probs in
-    let z = sum_dim vtgt_ybar ~dim:[ 2 ] ~keepdim:false in
-    let vtgt_h = einsum [ z, "ij"; softmaxed_probs, "jk" ] "ijk" in
-    reshape vtgt_h ~shape:[ n_samples; -1 ]
-  in
-  let vtgt_h = diag_part - rank_1_part in
-  einsum [ vtgt_h, "ik"; v_mat, "jk" ] "ij" |> reshape ~shape:s
+let cross_entropy_hv_prod ~average_over:_ ~logit_dim:_ _y ~v:_ = assert false

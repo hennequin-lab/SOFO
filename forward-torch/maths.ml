@@ -53,6 +53,11 @@ let to_tensor : [< `const | `dual ] t -> Tensor.t = function
   | E (C x) -> x
   | E (D (x, _)) -> x
 
+let of_array ?device ~shape x =
+  x |> Tensor.of_float1 ?device |> Tensor.reshape ~shape |> of_tensor
+
+let to_float_exn x = x |> to_tensor |> Tensor.to_float0_exn
+
 let const : [< `const | `dual ] t -> [ `const ] t = function
   | E (C x) -> E (C x)
   | E (D (x, _)) -> E (C x)
@@ -578,7 +583,7 @@ module C = struct
   let permute ~dims = make_unary (Ops.permute ~dims)
   let squeeze ~dim = make_unary (Ops.squeeze ~dim)
   let unsqueeze ~dim = make_unary (Ops.unsqueeze ~dim)
-  let transpose ?dims x = make_unary Ops.(transpose ?dims) x
+  let transpose ?dims = make_unary Ops.(transpose ?dims)
   let neg = make_unary Ops.neg
   let trace = make_unary Ops.trace
   let sin = make_unary Ops.sin
@@ -627,5 +632,12 @@ module C = struct
     | C x ->
       let u, s, vt = Tensor.svd ~some:true ~compute_uv:true x in
       of_tensor u, of_tensor s, of_tensor vt
+    | _ -> raise Not_const
+
+  let qr (E x) =
+    match x with
+    | C x ->
+      let q, r = Tensor.linalg_qr ~a:x ~mode:"complete" in
+      of_tensor q, of_tensor r
     | _ -> raise Not_const
 end

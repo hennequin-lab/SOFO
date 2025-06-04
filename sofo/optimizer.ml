@@ -4,6 +4,8 @@ open Maths
 open Torch
 include Optimizer_typ
 
+let print s = Stdio.print_endline (Sexp.to_string_hum s)
+
 module Update_params (P : Prms.T) = struct
   let update ~learning_rate:eta ~theta delta =
     let open Prms in
@@ -66,15 +68,13 @@ module SOFO (P : Prms.T) = struct
   let prepare ~(config : (_, _) config) state =
     let theta = params state in
     let vs = random_tangents ~n_tangents:config.n_tangents theta in
-    P.dual ~tangent:vs (P.value theta)
+    P.dual ~tangent:vs (P.value theta), vs
 
   (* fold vs over sets of v_i s, multiply with associated weights. *)
   let weighted_vs_sum ~vs weights =
     P.map vs ~f:(fun v_i ->
       let[@warning "-8"] (n_samples :: s) = shape v_i in
-      let n_ws = first_dim weights in
       let v_i = C.view v_i ~size:[ n_samples; -1 ] in
-      let s = if n_ws = 1 then s else n_ws :: s in
       C.(view (weights *@ v_i) ~size:s))
 
   (* calculate natural gradient = V(VtGtGV)^-1 V^t g *)
@@ -82,7 +82,7 @@ module SOFO (P : Prms.T) = struct
     let u, s, _ = C.svd ggn in
     (* how each V should be weighted, as a row array *)
     let weights =
-      let tmp = C.einsum [ u, "ij"; vtg, "kj" ] "ik" in
+      let tmp = C.(transpose u *@ vtg) in
       let s =
         match damping with
         | None -> s
@@ -90,7 +90,7 @@ module SOFO (P : Prms.T) = struct
           let offset = Float.(gamma * Tensor.(maximum (to_tensor s) |> to_float0_exn)) in
           C.(offset $+ s)
       in
-      C.(transpose (u / s) *@ tmp)
+      C.(u / s *@ tmp)
     in
     weighted_vs_sum ~vs weights
 

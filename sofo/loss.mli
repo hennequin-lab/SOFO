@@ -1,13 +1,20 @@
 open Forward_torch
 open Maths
 
-val mse : dim:int list -> ([< `const | `dual ] as 'a) t -> 'a t
-val mse_hv_prod : dim:int list -> [ `const ] t -> [ `const ] t
+val mse : average_over:int list -> ([< `const | `dual ] as 'a) t -> 'a t
+val mse_hv_prod : average_over:int list -> [ `const ] t -> v:[ `const ] t -> [ `const ] t
 
 val cross_entropy
-  :  dim:int list
+  :  average_over:int list
+  -> logit_dim:int
   -> labels:[ `const ] t
   -> [< `const | `dual ] t
   -> [ `const | `dual ] t
 
-val cross_entropy_hv_prod : dim:int list -> [ `const ] t -> v:[ `const ] t -> [ `const ] t
+val
+  [@deprecated] cross_entropy_hv_prod
+  :  average_over:int list
+  -> logit_dim:int
+  -> [ `const ] t
+  -> v:[ `const ] t
+  -> [ `const ] t

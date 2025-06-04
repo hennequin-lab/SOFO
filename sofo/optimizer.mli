@@ -12,8 +12,8 @@ module SOFO (P : Prms.T) : sig
      and type ('a, 'b, 'c) init_opts = P.param -> 'c
      and type info = [ `const ] P.t sofo_info
 
-  (* initialise parameters with random tangents, ready to go into forward pass *)
-  val prepare : config:(_, _) config -> state -> [ `dual ] P.t
+  (* initialise parameters with random tangents (also returned), ready to go into forward pass *)
+  val prepare : config:(_, _) config -> state -> [ `dual ] P.t * [ `const ] P.t
 end
 
 (** Stochastic gradient descent *)

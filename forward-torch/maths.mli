@@ -13,6 +13,8 @@ exception Check_grad_failed
 val any : [< `const | `dual ] t -> [ `const | `dual ] t
 val of_tensor : Tensor.t -> [ `const ] t
 val to_tensor : [< `const | `dual ] t -> Tensor.t
+val of_array : ?device:Device.t -> shape:int list -> float array -> [ `const ] t
+val to_float_exn : [ `const ] t -> float
 val const : [< `const | `dual ] t -> [ `const ] t
 val shape : [< `const | `dual ] t -> int list
 val device : [< `const | `dual ] t -> Device.t
@@ -150,4 +152,5 @@ module C : sig
   val ( *@ ) : [ `const ] t -> [ `const ] t -> [ `const ] t
   val einsum : ([ `const ] t * string) list -> string -> [ `const ] t
   val svd : [ `const ] t -> [ `const ] t * [ `const ] t * [ `const ] t
+  val qr : [ `const ] t -> [ `const ] t * [ `const ] t
 end
