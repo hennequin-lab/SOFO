@@ -8,10 +8,12 @@ open Torch
 
 type explicit
 type on_demand
+type const = [ `const ]
+type dual = [ `dual ]
 
 type 'a num =
-  | C : Tensor.t -> [ `const ] num
-  | D : Tensor.t * _ tangent -> [ `dual ] num
+  | C : Tensor.t -> const num
+  | D : Tensor.t * _ tangent -> dual num
 
 and _ tangent =
   | Explicit : Tensor.t -> explicit tangent
@@ -19,6 +21,12 @@ and _ tangent =
 
 (* existential wrapper *)
 type +_ t = E : 'a num -> _ t [@@unboxed]
+type 'a some = [< const | dual ] as 'a
+
+type any =
+  [ const
+  | dual
+  ]
 
 exception Wrong_shape of int list * int list
 exception Wrong_device of Device.t * Device.t
@@ -46,10 +54,10 @@ let assert_right_device x dx =
   and ddx = Tensor.device dx in
   if Poly.(dx <> ddx) then raise (Wrong_device (dx, ddx))
 
-let any x = (x :> [ `const | `dual ] t)
-let of_tensor x : [ `const ] t = E (C x)
+let any x = (x :> any t)
+let of_tensor x : const t = E (C x)
 
-let to_tensor : [< `const | `dual ] t -> Tensor.t = function
+let to_tensor = function
   | E (C x) -> x
   | E (D (x, _)) -> x
 
@@ -58,7 +66,7 @@ let of_array ?device ~shape x =
 
 let to_float_exn x = x |> to_tensor |> Tensor.to_float0_exn
 
-let const : [< `const | `dual ] t -> [ `const ] t = function
+let const : _ some t -> const t = function
   | E (C x) -> E (C x)
   | E (D (x, _)) -> E (C x)
 
@@ -69,12 +77,12 @@ let kind x = x |> to_tensor |> Tensor.type_
 let numel x =
   x |> to_tensor |> Tensor.shape |> List.fold ~init:0 ~f:Int.( + ) |> Int.max 1
 
-let tangent_exn (E x : [< `const | `dual ] t) : [ `const ] t =
+let tangent_exn (E x : _ some t) : const t =
   match x with
   | D (x, dx) -> E (C (tangent_tensor_of x dx))
   | _ -> raise Not_dual
 
-let dual : tangent:[ `const ] t -> [ `const ] t -> [ `dual ] t =
+let dual : tangent:const t -> const t -> dual t =
   fun ~tangent (E x) ->
   match x with
   | C x ->
@@ -84,7 +92,7 @@ let dual : tangent:[ `const ] t -> [ `const ] t -> [ `dual ] t =
     E (D (x, Explicit dxp))
   | _ -> raise Not_const
 
-let dual_on_demand : tangent:(Device.t -> [ `const ] t) -> [ `const ] t -> [ `dual ] t =
+let dual_on_demand : tangent:(Device.t -> const t) -> const t -> dual t =
   fun ~tangent (E x) ->
   match x with
   | C x ->
@@ -103,31 +111,24 @@ let batch_dim dx = List.hd_exn (Tensor.shape dx)
 let first_dim x = List.hd_exn (Tensor.shape (to_tensor x))
 
 (* constant scalar tensor *)
-let f x : [ `const ] t = E (C (Tensor.f x))
+let f x = E (C (Tensor.f x))
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
 
-let zeros ?device ?kind shape : [ `const ] t = E (C (Tensor.zeros ?device ?kind shape))
-
-let ones ?device ?kind ?scale shape : [ `const ] t =
-  E (C (Tensor.ones ?device ?kind ?scale shape))
-
-let rand ?device ?kind ?scale shape : [ `const ] t =
-  E (C (Tensor.rand ?device ?kind ?scale shape))
-
-let randn ?device ?kind ?scale shape : [ `const ] t =
-  E (C (Tensor.randn ?device ?kind ?scale shape))
-
-let zeros_like x : [ `const ] t = E (C (Tensor.zeros_like (to_tensor x)))
+let zeros ?device ?kind shape = E (C (Tensor.zeros ?device ?kind shape))
+let ones ?device ?kind ?scale shape = E (C (Tensor.ones ?device ?kind ?scale shape))
+let rand ?device ?kind ?scale shape = E (C (Tensor.rand ?device ?kind ?scale shape))
+let randn ?device ?kind ?scale shape = E (C (Tensor.randn ?device ?kind ?scale shape))
+let zeros_like x = E (C (Tensor.zeros_like (to_tensor x)))
 
 let zeros_like_k ~k x =
   let x = to_tensor x in
   let x = Tensor.(broadcast_to x ~size:(k :: shape x)) in
   E (C (Tensor.zeros_like x))
 
-let ones_like x : [ `const ] t = E (C (Tensor.ones_like (to_tensor x)))
-let rand_like x : [ `const ] t = E (C (Tensor.rand_like (to_tensor x)))
-let randn_like x : [ `const ] t = E (C (Tensor.randn_like (to_tensor x)))
+let ones_like x = E (C (Tensor.ones_like (to_tensor x)))
+let rand_like x = E (C (Tensor.rand_like (to_tensor x)))
+let randn_like x = E (C (Tensor.randn_like (to_tensor x)))
 
 let randn_like_k ~k x =
   let x = to_tensor x in
@@ -302,10 +303,8 @@ module Ops = struct
   let tanh =
     let f = Tensor.tanh in
     let df ~f:y ~x:_ ~dx =
-      let tmp = Tensor.(square y) in
-      let tmp = Tensor.(neg_ tmp) in
-      let tmp = Tensor.(add_scalar_ tmp Scalar.(f 1.)) in
-      Tensor.mul_ tmp dx
+      let tmp = Tensor.(f 1. - square y) in
+      Tensor.mul dx tmp
     in
     { f; df }
 
@@ -463,7 +462,7 @@ end
    ---------------------------------------------------- *)
 
 let make_unary (z : unary_info) =
-  let f (E x : ([< `const | `dual ] as 'a) t) : 'a t =
+  let f (E x : 'a some t) : 'a t =
     match x with
     | C x -> E (C (z.f x))
     | D (x, dx) ->
@@ -474,8 +473,7 @@ let make_unary (z : unary_info) =
   f
 
 let make_binary (z : binary_info) =
-  let f (E x : [< `const | `dual ] t) (E y : [< `const | `dual ] t) : [ `const | `dual ] t
-    =
+  let f (E x : _ some t) (E y : _ some t) : any t =
     match x, y with
     | C x, C y -> E (C (z.f x y))
     | D (x, dx), C y ->
@@ -525,9 +523,7 @@ let ( $* ) z = make_unary Ops.(( $* ) z)
 let ( $/ ) z = make_unary Ops.(( $/ ) z)
 let ( *@ ) x = make_binary Ops.(( *@ )) x
 
-let einsum (operands : ([< `const | `dual ] t * string) list) return
-  : [ `const | `dual ] t
-  =
+let einsum (operands : (_ some t * string) list) return : any t =
   let tangent_id = 'x' in
   assert (not (String.contains return tangent_id));
   assert (
@@ -563,7 +559,7 @@ let einsum (operands : ([< `const | `dual ] t * string) list) return
 
 module C = struct
   let make_unary (z : unary_info) =
-    let f (E x : [ `const ] t) : [ `const ] t =
+    let f (E x : const t) : const t =
       match x with
       | C x -> E (C (z.f x))
       | D _ -> raise Not_const
@@ -571,7 +567,7 @@ module C = struct
     f
 
   let make_binary (z : binary_info) =
-    let f (E x : [ `const ] t) (E y : [ `const ] t) : [ `const ] t =
+    let f (E x : const t) (E y : const t) : const t =
       match x, y with
       | C x, C y -> E (C (z.f x y))
       | _ -> raise Not_const
@@ -583,7 +579,7 @@ module C = struct
   let permute ~dims = make_unary (Ops.permute ~dims)
   let squeeze ~dim = make_unary (Ops.squeeze ~dim)
   let unsqueeze ~dim = make_unary (Ops.unsqueeze ~dim)
-  let transpose ?dims = make_unary Ops.(transpose ?dims)
+  let transpose ?dims x = make_unary Ops.(transpose ?dims) x
   let neg = make_unary Ops.neg
   let trace = make_unary Ops.trace
   let sin = make_unary Ops.sin

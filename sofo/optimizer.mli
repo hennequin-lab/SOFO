@@ -1,4 +1,5 @@
 open Forward_torch
+open Maths
 
 (** Four types of optimizers supported in this library. *)
 include module type of Optimizer_typ
@@ -10,7 +11,7 @@ module SOFO (P : Prms.T) : sig
     with module P = P
      and type ('a, 'b) config = ('a, 'b) Config.SOFO.t
      and type ('a, 'b, 'c) init_opts = P.param -> 'c
-     and type info = [ `const ] P.t sofo_info
+     and type info = const P.t sofo_info
 
   (** Initialise parameters with random tangents (also returned), ready to go into forward pass;
       in your optimization loop, just do
@@ -21,7 +22,7 @@ module SOFO (P : Prms.T) : sig
       (* carry on with the new optimizer state *)
       ]}
      *)
-  val prepare : config:(_, _) config -> state -> [ `dual ] P.t * [ `const ] P.t
+  val prepare : config:(_, _) config -> state -> dual P.t * const P.t
 end
 
 (** Stochastic gradient descent *)
@@ -30,7 +31,7 @@ module SGDm (P : Prms.T) :
   with module P = P
    and type ('a, 'b) config = ('a, 'b) Config.SGDm.t
    and type ('a, 'b, 'c) init_opts = P.param -> 'c
-   and type info = [ `const ] P.t
+   and type info = const P.t
 
 (** Adam optimizer *)
 module Adam (P : Prms.T) :
@@ -38,4 +39,4 @@ module Adam (P : Prms.T) :
   with module P = P
    and type ('a, 'b) config = ('a, 'b) Config.Adam.t
    and type (_, _, 'c) init_opts = P.param -> 'c
-   and type info = [ `const ] P.t
+   and type info = const P.t

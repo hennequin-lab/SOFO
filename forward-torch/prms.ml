@@ -47,6 +47,7 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
   let iter x ~f = fold ?path:None x ~init:() ~f:(fun () (x, _) -> f x)
   let iter2 x y ~f = fold2 ?path:None x y ~init:() ~f:(fun () (x, y, _) -> f x y)
   let value = map ~f:value
+  let any = map ~f:any
   let of_tensor = map ~f:of_tensor
   let to_tensor = map ~f:to_tensor
   let const = map ~f:const
@@ -136,10 +137,10 @@ module Single = struct
       let fold2 ?path x y ~init ~f = f init (x, y, path)
     end)
 
-  let pinned (x : [ `const ] t) : param = Pinned (to_tensor x)
-  let free (x : [ `const ] t) : param = Free (to_tensor x)
+  let pinned x = Pinned (to_tensor x)
+  let free x = Free (to_tensor x)
 
-  let bounded ?above:lb ?below:ub (x : [ `const ] t) : param =
+  let bounded ?above:lb ?below:ub x =
     Bounded
       { v = to_tensor x
       ; lb = Option.map ~f:to_tensor lb

@@ -34,7 +34,7 @@ module SOFO (P : Prms.T) = struct
   type ('a, 'b) config = ('a, 'b) Config.SOFO.t
   type ('a, 'b, 'c) init_opts = P.param -> 'c
   type state = { theta : P.param }
-  type info = [ `const ] P.t sofo_info
+  type info = const P.t sofo_info
 
   let params state = state.theta
   let init theta = { theta }
@@ -113,11 +113,11 @@ module SGDm (P : Prms.T) = struct
 
   type ('a, 'b) config = ('a, 'b) Config.SGDm.t
   type ('a, 'b, 'c) init_opts = P.param -> 'c
-  type info = [ `const ] P.t
+  type info = const P.t
 
   type state =
     { theta : P.param
-    ; g_avg : [ `const ] P.t option
+    ; g_avg : const P.t option
     ; beta_t : float
     }
 
@@ -145,12 +145,12 @@ module Adam (P : Prms.T) = struct
 
   type ('a, 'b) config = ('a, 'b) Config.Adam.t
   type (_, _, 'c) init_opts = P.param -> 'c
-  type info = [ `const ] P.t
+  type info = const P.t
 
   type state =
     { theta : P.param
-    ; m : [ `const ] P.t option
-    ; v : [ `const ] P.t option
+    ; m : const P.t option
+    ; v : const P.t option
     ; beta1_t : float
     ; beta2_t : float
     }
