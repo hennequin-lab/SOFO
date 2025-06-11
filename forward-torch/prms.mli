@@ -5,6 +5,9 @@ include module type of Prms_typ
 
 val value : param -> const t
 val enforce_bounds : ?lb:Tensor.t -> ?ub:Tensor.t -> Tensor.t -> Tensor.t
+val cat : string -> path option -> path option
+
+module Make (B : Basic) : T with type 'a p = 'a B.p
 
 module Single : sig
   include T with type +'a p = 'a

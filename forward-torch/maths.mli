@@ -22,6 +22,17 @@ val any : _ some t -> any t
 val of_tensor : Tensor.t -> const t
 val to_tensor : _ some t -> Tensor.t
 val of_array : ?device:Device.t -> shape:int list -> float array -> const t
+
+val of_bigarray
+  :  ?device:Device.t
+  -> ('a, 'b, Bigarray.c_layout) Bigarray.Genarray.t
+  -> const t
+
+val to_bigarray
+  :  kind:('a, 'b) Bigarray.kind
+  -> const t
+  -> ('a, 'b, Bigarray.c_layout) Bigarray.Genarray.t
+
 val to_float_exn : const t -> float
 val const : _ some t -> const t
 val shape : _ some t -> int list
@@ -97,6 +108,7 @@ val ( $* ) : float -> 'a some t -> 'a t
 val ( $/ ) : float -> 'a some t -> 'a t
 val ( *@ ) : _ some t -> _ some t -> any t
 val einsum : (_ some t * string) list -> string -> any t
+val concat : dim:int -> _ some t list -> any t
 
 (* ---------------------------------------------------
    -- Type-preserving ops on constants
@@ -122,6 +134,7 @@ module C : sig
   val relu : const t -> const t
   val sigmoid : const t -> const t
   val softplus : const t -> const t
+  val sign : const t -> const t
   val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> const t -> const t
   val sum : const t -> const t
   val mean : const t -> const t
@@ -137,6 +150,7 @@ module C : sig
   val ( $/ ) : float -> const t -> const t
   val ( *@ ) : const t -> const t -> const t
   val einsum : (const t * string) list -> string -> const t
+  val concat : dim:int -> const t list -> const t
   val svd : const t -> const t * const t * const t
   val qr : const t -> const t * const t
 end

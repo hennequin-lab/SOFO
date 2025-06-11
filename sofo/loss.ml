@@ -1,7 +1,6 @@
 open Base
 open Forward_torch
 open Maths
-include Loss_typ
 
 let n_reduction dim y =
   let s = Array.of_list (shape y) in

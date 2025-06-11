@@ -64,6 +64,8 @@ let to_tensor = function
 let of_array ?device ~shape x =
   x |> Tensor.of_float1 ?device |> Tensor.reshape ~shape |> of_tensor
 
+let of_bigarray ?device x = E (C (Tensor.of_bigarray ?device x))
+let to_bigarray ~kind x = Tensor.to_bigarray ~kind (to_tensor x)
 let to_float_exn x = x |> to_tensor |> Tensor.to_float0_exn
 
 let const : _ some t -> const t = function
@@ -553,6 +555,35 @@ let einsum (operands : (_ some t * string) list) return : any t =
   | None -> E (C primal)
   | Some dz -> E (D (primal, Explicit dz))
 
+let concat ~dim x_list =
+  let y = List.map x_list ~f:to_tensor |> Tensor.concat ~dim in
+  let all_const, n_tangents =
+    List.fold_until
+      x_list
+      ~init:(true, 0)
+      ~f:(fun _ (E x) ->
+        match x with
+        | C _ -> Continue (true, 0)
+        | D (x, dx) ->
+          let k = batch_dim (tangent_tensor_of x dx) in
+          Stop (false, k))
+      ~finish:Fn.id
+  in
+  if all_const
+  then E (C y)
+  else (
+    let dx_list =
+      List.map x_list ~f:(fun (E x) ->
+        match x with
+        | D (x, dx) ->
+          let dx = tangent_tensor_of x dx in
+          assert (Int.(batch_dim dx = n_tangents));
+          dx
+        | C x -> to_tensor (zeros_like_k ~k:n_tangents (of_tensor x)))
+    in
+    let dy = Tensor.concat dx_list ~dim:Int.(dim + 1) in
+    E (D (y, Explicit dy)))
+
 (* ----------------------------------------------------
    -- Operations on [`const] t 
    ---------------------------------------------------- *)
@@ -574,6 +605,10 @@ module C = struct
     in
     f
 
+  let direct_unary f = function
+    | E (C x) -> E (C (f x))
+    | _ -> raise Not_const
+
   let view ~size = make_unary (Ops.view ~size)
   let reshape ~shape = make_unary (Ops.reshape ~shape)
   let permute ~dims = make_unary (Ops.permute ~dims)
@@ -592,6 +627,7 @@ module C = struct
   let relu = make_unary Ops.relu
   let sigmoid = make_unary Ops.sigmoid
   let softplus = make_unary Ops.softplus
+  let sign = direct_unary Tensor.sign
   let slice ?start ?end_ ?step ~dim = make_unary Ops.(slice ?start ?end_ ?step ~dim)
   let sum = make_unary Ops.sum
   let mean = make_unary Ops.mean
@@ -622,6 +658,20 @@ module C = struct
     if not all_const then raise Not_const;
     let z = Ops.einsum (List.map operands ~f:(fun (x, eq) -> to_tensor x, eq)) return in
     E (C z)
+
+  let concat ~dim x_list =
+    let y = List.map x_list ~f:to_tensor |> Tensor.concat ~dim in
+    let all_const =
+      List.fold_until
+        x_list
+        ~init:true
+        ~f:(fun _ (E x) ->
+          match x with
+          | C _ -> Continue true
+          | D _ -> Stop false)
+        ~finish:Fn.id
+    in
+    if all_const then E (C y) else raise Not_const
 
   let svd (E x) =
     match x with

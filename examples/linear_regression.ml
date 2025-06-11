@@ -61,15 +61,15 @@ let max_iter = 10_000
 let rec loop ~t ~out ~state =
   Stdlib.Gc.major ();
   let x, y = data_minibatch batch_size in
-  let theta, vs = O.prepare ~config state in
+  let theta, tangents = O.prepare ~config state in
   let y_pred = Model.f ~theta x in
-  let loss = Loss.mse ~average_over:[ 0; 1 ] (sqr (y - y_pred)) in
+  let loss = Loss.mse ~average_over:[ 0; 1 ] (y - y_pred) in
   let ggn =
     let yt = tangent_exn y_pred in
     let hyt = Loss.mse_hv_prod ~average_over:[ 0; 1 ] (const y) ~v:yt in
     C.einsum [ yt, "kab"; hyt, "lab" ] "kl"
   in
-  let new_state = O.step ~config ~info:{ loss; ggn; tangents = vs } state in
+  let new_state = O.step ~config ~info:{ loss; ggn; tangents } state in
   if t % 100 = 0
   then (
     let loss = to_float_exn (const loss) in

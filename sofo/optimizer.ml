@@ -4,6 +4,8 @@ open Maths
 open Torch
 include Optimizer_typ
 
+let print s = Stdio.print_endline (Sexp.to_string_hum s)
+
 (* update parameters, respecting any specified bounds *)
 module Update_params (P : Prms.T) = struct
   let update ~learning_rate:eta ~theta delta =
@@ -74,7 +76,7 @@ module SOFO (P : Prms.T) = struct
     P.map vs ~f:(fun v_i ->
       let[@warning "-8"] (n_samples :: s) = shape v_i in
       let v_i = C.view v_i ~size:[ n_samples; -1 ] in
-      C.(view (weights *@ v_i) ~size:s))
+      C.(view (reshape weights ~shape:[ 1; -1 ] *@ v_i) ~size:s))
 
   (* calculate natural gradient = V(VtGtGV)^-1 V^t g *)
   let sofo_update ?damping ~tangents:vs ~ggn vtg =
