@@ -87,7 +87,8 @@ def value_and_sofo_grad(
                     , axis=0))
 
         u,s,_ = jnp.linalg.svd(vggv)
-        damped_s = jnp.sqrt(s) + damping # * jnp.max(jnp.sqrt(s))
+        damped_s = s + damping * jnp.max(s)
+
 
         vggv_vg = (u / damped_s) @ (u.T @ vg)
         h = tree_map(lambda vs: jnp.dot(jnp.moveaxis(vs,0,-1), vggv_vg), v)

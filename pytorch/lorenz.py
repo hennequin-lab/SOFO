@@ -190,7 +190,7 @@ def main():
                 print(f"Iter {i}, Test Loss: {test_loss:.4f}, R²@{k}: {test_r2:.4f}")
 
         training_log.append([i, loss.item(), test_loss.item(), test_r2])
-    np.savez(f"logs/lorenz/sofo_{tangent_size}.npz", np.asarray(training_log))
+        np.savez(f"logs/lorenz/sofo_{tangent_size}.npz", np.asarray(training_log))
 
 if __name__ == "__main__":
     main()

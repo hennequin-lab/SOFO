@@ -73,7 +73,7 @@ def value_and_sofo_grad(fun, loss, tangent_size=100, damping=1e-5, classificatio
 
         # SVD of GGN
         u, s, _ = torch.linalg.svd(vggv)
-        damped_s = torch.sqrt(s) + damping
+        damped_s = s + damping * torch.max(s)
 
         # Compute damped inverse times vg
         vggv_vg = (u / damped_s) @ (u.T @ vg)
