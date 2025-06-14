@@ -101,7 +101,7 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
         def wrapper(rng, params):
             v = sample_v(tangent_size, params, device, rng)
 
-            def fun(carry, xs):
+            def fun(carry, xs, tmax):
                 latent, latent_tangents, losses, vg, vggv = carry
                 inputs, labels = xs
             
@@ -123,9 +123,9 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
                 else:
                     vggv_new = ggn_mse(tangents_out).mean(dim=0)
                                     
-                losses += losses_new[0]
-                vg += vg_new
-                vggv += vggv_new
+                losses += losses_new[0]/tmax
+                vg += vg_new/tmax
+                vggv += vggv_new/tmax
                 return (latent_primal[0], new_latent_tangents_out, losses, vg, vggv), preds[0]
             
             # intialise quantities to be accumulated
@@ -139,10 +139,11 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
             inputs, labels = batch 
             labels_lst = list(torch.unbind(labels, dim=0))
             inputs_lst = list(torch.unbind(inputs, dim=0))
+            tmax = len(inputs_lst)
 
             z = z_init
             for (inputs, labels) in zip(inputs_lst, labels_lst):
-                (z, latent_tangent, losses, vg, vggv), preds = fun((z, latent_tangent, losses, vg, vggv), (inputs, labels))
+                (z, latent_tangent, losses, vg, vggv), preds = fun((z, latent_tangent, losses, vg, vggv), (inputs, labels), tmax)
                 preds_list.append(preds)
 
             preds_t = torch.stack(preds_list, dim=0)

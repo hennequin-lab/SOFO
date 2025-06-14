@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from torch.func import functional_call
+import numpy as np
 
 from api import value_and_sofo_grad
 
@@ -42,14 +43,15 @@ def main():
     device = torch.device("cpu")
     rng = torch.Generator(device=device).manual_seed(42)
 
-
-    batch_size = 32
+    eval_freq = 10
+    n_epochs = 200
+    batch_size = 256
     input_size = 784
     output_size = 10
-    learning_rate = 0.5
-    tangent_size = 256
+    learning_rate = 0.01
+    tangent_size = 340
     damping = 1e-3
-    hidden_layers = [100]
+    hidden_layers = [128]
 
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -86,24 +88,31 @@ def main():
 
 
     params = init_params
-    for epoch in range(5):
+    training_log = []
+    for epoch in range(n_epochs):
         model.train()
         for i, (batch_x, batch_y) in enumerate(train_loader):
             params, loss, acc = train(batch_x, batch_y, params)
             if i % 100 == 0:
                 print(f"Epoch {epoch}, Batch {i}, Loss: {loss.item():.4f}, Acc: {acc:.4f}")
 
-        # Evaluation
-        model.eval()
-        correct, total = 0, 0
-        with torch.no_grad():
-            for x, y in test_loader:
-                x, y = x.to(device), y.to(device)
-                logits = functional_call(model, params, (x,))
-                pred = logits.argmax(dim=1)
-                correct += (pred == y).sum().item()
-                total += y.size(0)
-        print(f"Test accuracy after epoch {epoch}: {correct / total:.4f}")
+            # Evaluation
+            if i % eval_freq == 0:
+                model.eval()
+                correct, total = 0, 0
+                with torch.no_grad():
+                    for x, y in test_loader:
+                        x, y = x.to(device), y.to(device)
+                        logits = functional_call(model, params, (x,))
+                        pred = logits.argmax(dim=1)
+                        correct += (pred == y).sum().item()
+                        total += y.size(0)
+                test_acc = correct / total
+                epoch_ = epoch + i*batch_size /len(train_loader.dataset)
+
+                training_log.append([epoch_, loss.item(), acc, test_acc])
+                np.savez(f"logs/mnist/sofo_{tangent_size}.npz", np.asarray(training_log))
+                print(f"Test accuracy after epoch {epoch_:.4f}: {test_acc:.4f}")
 
 
 if __name__ == "__main__":

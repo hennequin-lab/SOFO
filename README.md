@@ -10,7 +10,17 @@ Training recurrent neural networks (RNNs) to perform neuroscience tasks can be c
 ## Presentation 
 Checkout our poster and video presentation at [Neurips 2024](https://neurips.cc/virtual/2024/poster/95282)!
 
-## Installation steps
+## Python Releases
+- The JAX version for SOFO can be found in [Jax](./jax/api.py), where we also provide example use cases in [CIFAR classification](./jax/cifar10.py), [MNIST classification](./jax/mnist.py), [MNIST with MLP-mixer](./jax/mlp_mixer.py) and [learning the Lorenz attractor with an RNN](./jax/lorenz.py). SOFO requires JAX 0.6.1.
+
+- The PyTorch version for SOFO can be found in [Pytorch](./pytorch/api.py), where we also provide example use cases in [MNIST classification](./pytorch/mnist.py) and [learning the Lorenz attractor with an RNN](./pytorch/lorenz.py). SOFO requires PyTorch 2.2.0.
+
+- We now go into details of the OCaml version for SOFO in the rest of this file.
+
+
+## OCaml Releases
+
+### Installation steps
 
 - install opam : https://opam.ocaml.org/doc/Install.html
 - choose opam switch 5.0.0 
@@ -18,13 +28,13 @@ Checkout our poster and video presentation at [Neurips 2024](https://neurips.cc/
 - install base, torch, bos (`opam install base torch bos ppx_accessor ppx_deriving_yojson`)
 - clone https://github.com/hennequin-lab/cmdargs and do `dune build @install` followed by `dune install` (after `cd`-ing into the corresponding directory)
 
-## To run examples
+### To run examples
 - install owl and owl_ode (run `opam install owl owl-ode`); you will need to have OpenBLAS installed (see below in case issues with OpenBLAS arise). 
 - compile the example by running e.g. `dune build examples/example.exe`. If linking issues arise, please get in touch.
 - run `dune exec _build/default/examples/example.exe -d [results_directory]` (where `[results_directory]` is where you want your results to be saved). Depending on the example file you are trying to execute, there might be additional command line arguments.
 
  
-## OpenBLAS installation
+### OpenBLAS installation
 
 - on certain operating systems linking errors to OpenBLAS can arise when installing owl. One solution to circumvent them is to install OpenBLAS from source (https://github.com/xianyi/OpenBLAS.git), and to then manually include the path to the OpenBLAS installation in LD_LIBRARY_PATH and PKG_CONFIG_PATH.
   

@@ -90,7 +90,7 @@ def main():
     n_test = 100
     tangent_size = 128
     damping = 1e-5
-    learning_rate = 0.1
+    learning_rate = 0.3
     num_iterations = 3000
     k = 30
     eval_freq = 200
@@ -189,8 +189,8 @@ def main():
                 test_r2 = r2_k(test_pred, test_trajs, k).item()
                 print(f"Iter {i}, Test Loss: {test_loss:.4f}, R²@{k}: {test_r2:.4f}")
 
-        training_log.append([i, loss.item(), test_loss.item(), test_r2])
-        np.savez(f"logs/lorenz/sofo_{tangent_size}.npz", np.asarray(training_log))
+            training_log.append([i, loss.item(), test_loss.item(), test_r2])
+            np.savez(f"logs/lorenz/sofo_{tangent_size}.npz", np.asarray(training_log))
 
 if __name__ == "__main__":
     main()

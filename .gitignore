@@ -38,3 +38,4 @@ _opam/
 
 # Mac remains
 pytorch/.DS_Store
+.DS_Store
