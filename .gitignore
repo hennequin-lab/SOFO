@@ -16,6 +16,7 @@ _build/
 
 # data folder 
 _data
+data
 
 
 # ocamlbuild targets

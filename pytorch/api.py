@@ -15,11 +15,15 @@ def jmp_apply(f, W, M):
     return torch.func.vmap(_jvp)(M_params, M_latents)
 
 
-# GGN function
-def ggn(tangents: torch.Tensor, h: torch.Tensor):
+# GGN for cross entropy loss
+def ggn_ce(tangents: torch.Tensor, h: torch.Tensor):
     # tangents: (k, batch_size, dim), h: (dim,)
     Jgh = (tangents @ h)[:,None]
     return (tangents * h) @ tangents.T - Jgh @ Jgh.T  # (k, k)
+
+# GGN for mean squared loss
+def ggn_mse(tangents: torch.Tensor):
+    return torch.func.vmap(lambda t: t @ t.T, in_dims=1)(tangents)
 
 # Sample normalized random tangents
 def sample_v(tangent_size, params, device, rng):
@@ -62,10 +66,10 @@ def value_and_sofo_grad(fun, loss, tangent_size=100, damping=1e-5, classificatio
         # Compute GGN matrix approx
         if classification:
             h_batch = F.softmax(outs[0], dim=-1)  # (batch_size, out_dim)
-            ggn_vmapped = torch.func.vmap(ggn, in_dims=(1, 0))
+            ggn_vmapped = torch.func.vmap(ggn_ce, in_dims=(1, 0))
             vggv = ggn_vmapped(tangents_out, h_batch).mean(dim=0)
         else:
-            vggv = torch.mean(torch.func.vmap(lambda t: t @ t.T, in_dims=1)(tangents_out), dim=0)
+            vggv = ggn_mse(tangents_out).mean(dim=0)
 
         # SVD of GGN
         u, s, _ = torch.linalg.svd(vggv)
@@ -114,11 +118,11 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
                 # Compute GGN matrix at this step
                 if classification:
                     h_batch = F.softmax(primal_out[0], dim=-1)  # (batch_size, out_dim)
-                    ggn_vmapped = torch.func.vmap(ggn, in_dims=(1, 0))
+                    ggn_vmapped = torch.func.vmap(ggn_ce, in_dims=(1, 0))
                     vggv_new = ggn_vmapped(tangents_out, h_batch).mean(dim=0)
                 else:
-                    vggv_new = torch.mean(torch.func.vmap(lambda t: t @ t.T, in_dims=1)(tangents_out), dim=0)
-                
+                    vggv_new = ggn_mse(tangents_out).mean(dim=0)
+                                    
                 losses += losses_new[0]
                 vg += vg_new
                 vggv += vggv_new

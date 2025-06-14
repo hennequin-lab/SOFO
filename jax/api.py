@@ -12,9 +12,15 @@ def jmp(f, W, M):
     return jax.vmap(_jvp)(M)
 
 
-def ggn(tangents, h):
+# GGN for cross entropy loss
+def ggn_ce(tangents, h):
+    # tangents: (k, batch_size, dim), h: (dim,)
     Jgh = (tangents @ h)[:,None]
-    return (tangents * h) @ tangents.T - Jgh @ Jgh.T
+    return (tangents * h) @ tangents.T - Jgh @ Jgh.T  # (k, k)
+
+# GGN for mean squared loss
+def ggn_mse(tangents):
+    return ( tangents @ tangents.T)
 
 def ggn_off(t1, t2, h):
     return (t1 * h) @ t2.T - ((t1 @ h)[:,None]) @ ((t2 @ h)[None,:])
@@ -74,10 +80,10 @@ def value_and_sofo_grad(
         vggv = jax.lax.select(
                 classification,
                 jnp.mean(
-                        jax.vmap(ggn, in_axes=(1,0))(tangents_out, jax.nn.softmax(outs[0], axis=-1))
+                        jax.vmap(ggn_ce, in_axes=(1,0))(tangents_out, jax.nn.softmax(outs[0], axis=-1))
                     , axis=0),
                 jnp.mean(
-                        jax.vmap(lambda t: t@t.T, in_axes=1)(tangents_out)
+                        jax.vmap(ggn_mse, in_axes=1)(tangents_out)
                     , axis=0))
 
         u,s,_ = jnp.linalg.svd(vggv)
@@ -145,15 +151,15 @@ def value_and_sofo_grad_temporal(
                 [new_latent_tangents_out, tangents_out] = latent_tangents_out
                 losses_new, vg_new = jmp(fun_loss, primal_out[0], tangents_out)
 
-                #TODO: classification?
-                #ybar = jax.nn.softmax(outs[0], axis=-1)
-                #vggv = jnp.mean(
-                #            jax.vmap(ggn, in_axes=(1,0))(tangents_out, ybar)
-                #       , axis=0)
+                vggv_new = jax.lax.select(
+                classification,
+                jnp.mean(
+                        jax.vmap(ggn_ce, in_axes=(1,0))(tangents_out, jax.nn.softmax(outs[0], axis=-1))
+                    , axis=0),
+                jnp.mean(
+                        jax.vmap(ggn_mse, in_axes=1)(tangents_out)
+                    , axis=0))
 
-                vggv_new = jnp.mean(
-                    jax.vmap(lambda t: t@t.T, in_axes=1)(tangents_out),
-                   axis=0)
 
                 losses += losses_new[0]
                 vg += vg_new
