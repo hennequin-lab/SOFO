@@ -1,32 +1,87 @@
 import torch
 import torch.nn.functional as F
 
+# Jacobian-vector product
+def jmp(f, W, M, has_aux=False):
+    """Batched Jacobian-vector products
 
-def jmp(f, W, M):
-    "batched Jacobian vector products."
-    _jvp = lambda s: torch.func.jvp(f, (W,), (s,))
+    Args:
+        f (function): function on which the primal is evaluated.
+        W (torch.Tensor): primal.
+        M (torch.Tensor): tangent.
+        has_aux (bool, optional): whether to return the output of function as first element. Defaults to False.
+    Returns:
+        torch.Tensor or Tuple[torch.Tensor, Any]:
+            If has_aux is False:
+                A tensor of shape (batch_size, *f(W).shape), the JVP results.
+            If has_aux is True:
+                A tuple (output, jvp_output), where output is f(W) and jvp_output is the batched JVP result.
+    """
+    _jvp = lambda s: torch.func.jvp(f, (W,), (s,), has_aux)
     return torch.func.vmap(_jvp)(M)
 
 
-def jmp_apply(f, W, M):
-    "vmapped function of jvp for Jacobian-matrix product"
-    M_params, M_latents = M
-    _jvp = lambda s,z: torch.func.jvp(f, W, (s, z), has_aux=True)
-    return torch.func.vmap(_jvp)(M_params, M_latents)
+def jmp_pair(f, W, M, has_aux=False):
+    """Batched Jacobian-vector products for a pair of primals.
+
+    This computes the JVP of a function `f` with respect to two inputs (e.g., parameters and latents),
+    batched over a set of tangent vectors.
+    Args:
+        f (function): function on which the primal is evaluated.
+        W (torch.Tensor, torch.Tensor): (primal, primal) pair.
+        M (torch.Tensor, torch.Tensor): (tangent, tangent) pair.
+        has_aux (bool, optional): whether to return the output of function as first element. Defaults to False.
+
+    Returns:
+    Union[torch.Tensor, Tuple[torch.Tensor, Any]]:
+        If `has_aux` is False:
+            torch.Tensor: Batched Jacobian-vector product.
+        If `has_aux` is True:
+            Tuple[torch.Tensor, Any]: A tuple containing (output, auxiliary data).
+    """
+    M_1, M_2 = M
+    _jvp = lambda M_1, M_2: torch.func.jvp(f, W, (M_1, M_2), has_aux)
+    return torch.func.vmap(_jvp)(M_1, M_2)
 
 
 # GGN for cross entropy loss
-def ggn_ce(tangents: torch.Tensor, h: torch.Tensor):
-    # tangents: (k, batch_size, dim), h: (dim,)
+def ggn_ce(tangents, h):
+    """Generalised Gauss-Newton (GGN) matrixs for cross-entropy loss.
+
+    Args:
+        tangents (torch.Tensor): tangents associated with network output. size (k, batch_size, dim).
+        h (torch.Tensor): predictions, usually probabilities of classes. size (dim,).
+
+    Returns:
+        torch.Tensor: GGN matrix. size (k, k).
+    """
     Jgh = (tangents @ h)[:,None]
-    return (tangents * h) @ tangents.T - Jgh @ Jgh.T  # (k, k)
+    return (tangents * h) @ tangents.T - Jgh @ Jgh.T  
 
 # GGN for mean squared loss
 def ggn_mse(tangents: torch.Tensor):
+    """Generalised Gauss-Newton (GGN) matrixs for mean-squared loss.
+
+    Args:
+        tangents (torch.Tensor): tangents associated with network output. size (k, batch_size, dim).
+
+    Returns:
+        torch.Tensor: GGN matrix. size (k, k).
+    """
     return torch.func.vmap(lambda t: t @ t.T, in_dims=1)(tangents)
 
-# Sample normalized random tangents
 def sample_v(tangent_size, params, device, rng):
+    """Sample tangents associated with parameters.
+
+    Args:
+        tangent_size (int): number of tangents/subspace dimension.
+        params (dict): parameters to train.
+        device (torch.device): device on which to generate tensors.
+        rng (torch.Generator): a pseudorandom number generator for sampling.
+
+    Returns:
+        dict: key is the parameter name and value is its tangent.
+    """
     v = {}
     for name, p in params.items():
         shape = (tangent_size,) + p.shape
@@ -50,13 +105,31 @@ def sample_v(tangent_size, params, device, rng):
 
 
 def value_and_sofo_grad(fun, loss, tangent_size=100, damping=1e-5, classification=False, device="cpu"):
-    """
-    fun: params tuple -> output tensor [batch, out_dim]
-    loss: logits tensor -> scalar loss
-    Returns a function rng, params -> (loss_val, sofo_grad, max_singular_val)
-    """
+    """SOFO forward pass to compute loss and gradient. 
 
+    Args:
+        fun (function): forward pass of the network.
+        loss (function): loss function.
+        tangent_size (int, optional): number of tangets/subspace dimension. Defaults to 100.
+        damping (float, optional): dampling parameter on ggn. Defaults to 1e-5.
+        classification (bool, optional): whether the task is classification. Defaults to False.
+        device (str, optional): device on which the network is run. Defaults to "cpu".
+    """
     def wrapper(rng, params):
+        """Wrapper for the forward pass of the function.
+
+        Args:
+            rng (int): pseudorandom number generator for sampling tangents.
+            params (dict): network params where key is the name and value is the params (primal).
+
+        Returns:
+            tuple:
+                - loss_value (float): Scalar loss evaluated on the current batch.
+                - h (dict): Gradient direction (same structure as `params`).
+                - max_singular_value (float): Largest singular value of the GGN matrix,
+                useful for monitoring curvature or condition number.
+        """
+        # Sample tangents associated with params
         v = sample_v(tangent_size, params, device, rng)
         
         # Compute model output and tangent outputs
@@ -92,16 +165,54 @@ def value_and_sofo_grad(fun, loss, tangent_size=100, damping=1e-5, classificatio
 
 
 def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, classification=False, device="cpu"):
-    """
-    rnn: params tuple -> output tensor [batch, out_dim]
-    loss: logits tensor -> scalar loss
-    Returns a function rng, params -> (loss_val, sofo_grad, max_singular_val)
+    """SOFO forward pass on a recurrent neural network to compute loss and gradient. 
+
+    Args:
+        rnn (function): one-step update of the recurrent network.
+        loss (function): loss function.
+        tangent_size (int, optional): number of tangets/subspace dimension. Defaults to 100.
+        damping (float, optional): dampling parameter on ggn. Defaults to 1e-5.
+        classification (bool, optional): whether the task is classification. Defaults to False.
+        device (str, optional): device on which the network is run. Defaults to "cpu".
     """
     def value_and_grad_f_batch(z_init, batch):
+        """Compute loss and gradient on a data batch.
+
+        Args:
+            z_init (torch.Tensor): initial state of the RNN.
+            batch (tuple): A tuple (inputs, labels), where:
+                - inputs (torch.Tensor): Input sequence of shape (tmax, batch_size, input_dim).
+                - labels (torch.Tensor): Target sequence of shape (tmax, batch_size, output_dim) 
+                  or (tmax, batch_size) for classification.        """
         def wrapper(rng, params):
+            """Wrapper for the forward pass of the RNN.
+
+            Args:
+                rng (int): pseudorandom number generator for sampling tangents.
+                params (dict): network params where key is the name and value is the params (primal).
+
+            Returns:
+                tuple:
+                    - loss_value (float): Scalar loss evaluated on the current batch.
+                    - h (dict): Gradient direction (same structure as `params`).
+                    - max_singular_value (float): Largest singular value of the GGN matrix,
+                    useful for monitoring curvature or condition number.
+            """
             v = sample_v(tangent_size, params, device, rng)
 
             def fun(carry, xs, tmax):
+                """One-step recurrent function of the RNN.
+
+                Args:
+                    carry (tuple): (latent, latent_tangents, losses, vg, vggv) accumulated from previous step.
+                    xs (tuple): (inputs, labels) at current step.
+                    tmax (int): total number of steps.
+
+                Returns:
+                    tuple:
+                        - carry: (latent, latent_tangents, losses, vg, vggv) at current step.
+                        - preds: The network output at the current iteration.
+                """
                 latent, latent_tangents, losses, vg, vggv = carry
                 inputs, labels = xs
             
@@ -109,7 +220,7 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
                 fun_loss = lambda preds: loss(preds, labels)
 
                 # Compute next latent and tangents
-                latent_new, latent_tangents_out, preds = jmp_apply(fun, (params, latent), (v, latent_tangents))
+                latent_new, latent_tangents_out, preds = jmp_pair(fun, (params, latent), (v, latent_tangents), has_aux=True)
 
                 [latent_primal, primal_out] = latent_new
                 [new_latent_tangents_out, tangents_out] = latent_tangents_out
@@ -128,19 +239,19 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
                 vggv += vggv_new/tmax
                 return (latent_primal[0], new_latent_tangents_out, losses, vg, vggv), preds[0]
             
-            # intialise quantities to be accumulated
+            # Intialise quantities to be accumulated
             latent_tangent = torch.zeros((tangent_size,) + z_init.shape, device=device)
             losses = 0.
             vg = torch.zeros(tangent_size, device=device)
             vggv = torch.zeros((tangent_size, tangent_size), device=device)
 
             preds_list = []
-            # need to convert batch_y to a list
+            # Need to convert batch_y to a list
             inputs, labels = batch 
             labels_lst = list(torch.unbind(labels, dim=0))
             inputs_lst = list(torch.unbind(inputs, dim=0))
             tmax = len(inputs_lst)
-
+            # Recurrent pass through the RNN
             z = z_init
             for (inputs, labels) in zip(inputs_lst, labels_lst):
                 (z, latent_tangent, losses, vg, vggv), preds = fun((z, latent_tangent, losses, vg, vggv), (inputs, labels), tmax)
