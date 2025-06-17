@@ -7,13 +7,13 @@ import jax.numpy as jnp
 
 
 def jmp(f, W, M, has_aux=False):
-    """Batched Jacobian-vector products
+    """Batched Jacobian-vector products.
 
     Args:
-        f (Callable): function on which the primal is evaluated.
-        W (jnp.ndarray): primal.
-        M (jnp.ndarray): tangent.
-        has_aux (bool, optional): whether to return the output of function as first element. Defaults to False.
+        f (Callable): Function on which the primal is evaluated.
+        W (jnp.ndarray): Primal.
+        M (jnp.ndarray): Tangent.
+        has_aux (bool, optional): Whether to return the output of function as first element. Defaults to False.
 
     Returns:
         jnp.ndarray or Tuple[jnp.ndarray, Any]:
@@ -31,10 +31,10 @@ def jmp_pair(f, W, M, has_aux=False):
     This computes the JVP of a function `f` with respect to two inputs (e.g., parameters and latents),
     batched over a set of tangent vectors.
     Args:
-        f (Callable): function on which the primal is evaluated.
+        f (Callable): Function on which the primal is evaluated.
         W (jnp.ndarray, jnp.ndarray): (primal, primal) pair.
         M (jnp.ndarray, jnp.ndarray): (tangent, tangent) pair.
-        has_aux (bool, optional): whether to return the output of function as first element. Defaults to False.
+        has_aux (bool, optional): Whether to return the output of function as first element. Defaults to False.
 
     Returns:
     Union[jnp.ndarray, Tuple[jnp.ndarray, Any]]:
@@ -53,8 +53,8 @@ def ggn_ce(tangents, h):
     """Generalised Gauss-Newton (GGN) matrixs for cross-entropy loss.
 
     Args:
-        tangents (jnp.ndarray): tangents associated with network output. size (k, batch_size, dim).
-        h (jnp.ndarray): predictions, usually probabilities of classes. size (dim,).
+        tangents (jnp.ndarray): Tangents associated with network output. size (k, batch_size, dim).
+        h (jnp.ndarray): Predictions, usually probabilities of classes. size (dim,).
 
     Returns:
         jnp.ndarray: GGN matrix. size (k, k).
@@ -67,7 +67,7 @@ def ggn_mse(tangents):
     """Generalised Gauss-Newton (GGN) matrixs for mean-squared loss.
 
     Args:
-        tangents (jnp.ndarray): tangents associated with network output. size (k, batch_size, dim).
+        tangents (jnp.ndarray): Tangents associated with network output. size (k, batch_size, dim).
 
     Returns:
         jnp.ndarray: GGN matrix. size (k, k).
@@ -92,7 +92,7 @@ def random_split_like_tree(rng_key, target=None, treedef=None):
     keys = random.split(rng_key, treedef.num_leaves)
     return tree_unflatten(treedef, keys)
 
-def sample_v(rng, params, tangent_size):
+def sample_v(tangent_size, params, rng):
     """
     Samples a batch of random, normalized tangent vectors matching the structure of `params`.
 
@@ -101,9 +101,10 @@ def sample_v(rng, params, tangent_size):
     `(tangent_size, *x.shape)`.
 
     Args:
-        rng (jax.Array): A JAX PRNG key.
-        params (PyTree): A pytree of parameters whose structure and shapes are used to sample tangents.
         tangent_size (int): The number of tangents/subspace dimension.
+        params (PyTree): A pytree of parameters whose structure and shapes are used to sample tangents.
+        rng (jax.Array): A JAX PRNG key.
+
 
     Returns:
         PyTree: A pytree with the same structure as `params`, where each leaf is a tensor of
@@ -132,12 +133,12 @@ def value_and_sofo_grad(
     """SOFO forward pass to compute loss and gradient. 
 
     Args:
-        fun (Callable): forward pass of the network. ``fun`` s answer should be concatenation 
+        fun (Callable): Forward pass of the network. ``fun`` s answer should be concatenation 
             of function on a batch of samples with mean function over the same batch.
-        loss (Callable): loss function.
-        tangent_size (int, optional): number of tangets/subspace dimension. Defaults to 100.
-        damping (float, optional): dampling parameter on ggn. Defaults to 1e-5.
-        classification (bool, optional): whether the task is classification. Defaults to False.
+        loss (Callable): Loss function.
+        tangent_size (int, optional): Number of tangets/subspace dimension. Defaults to 100.
+        damping (float, optional): Dampling parameter on ggn. Defaults to 1e-5.
+        classification (bool, optional): Whether the task is classification. Defaults to False.
     """
     def value_and_fish_grad_f(rng, params):
         """Wrapper for the forward pass of the function.
@@ -154,7 +155,7 @@ def value_and_sofo_grad(
                 useful for monitoring curvature or condition number.
         """
         rng, key = random.split(rng)
-        v = sample_v(key, params, tangent_size)  
+        v = sample_v(tangent_size, params, key)  
 
         outs, tangents_out = jmp(fun, params, v)    #tangents_out shape: t_size, b_size, out_size
         losses, vg = jmp(loss, outs[0], tangents_out)
@@ -192,10 +193,10 @@ def value_and_sofo_grad_temporal(
     Args:
         rnn (Callable): One-step update of the recurrent network. ``rnn`` s answer should be concatenation 
             of function on a batch of samples with mean function over the same batch.
-        loss (Callable): loss function.
-        tangent_size (int, optional): number of tangets/subspace dimension. Defaults to 100.
-        damping (float, optional): dampling parameter on ggn. Defaults to 1e-5.
-        classification (bool, optional): whether the task is classification. Defaults to False.
+        loss (Callable): Loss function.
+        tangent_size (int, optional): Number of tangets/subspace dimension. Defaults to 100.
+        damping (float, optional): Dampling parameter on ggn. Defaults to 1e-5.
+        classification (bool, optional): Whether the task is classification. Defaults to False.
     """
     def value_and_grad_f_batch(z_init, batch):
         """Compute loss and gradient on a data batch.
@@ -222,8 +223,7 @@ def value_and_sofo_grad_temporal(
                     useful for monitoring curvature or condition number.
             """
             rngs = random.split(rng, 2)
-            v = sample_v(rngs[1], params, tangent_size)  
-        
+            v = sample_v(tangent_size, params, rngs[1])          
             def fun(carry, xs):
                 """Recurrent function of the RNN.
 

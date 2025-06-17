@@ -3,13 +3,13 @@ import torch.nn.functional as F
 
 # Jacobian-vector product
 def jmp(f, W, M, has_aux=False):
-    """Batched Jacobian-vector products
+    """Batched Jacobian-vector products.
 
     Args:
-        f (function): function on which the primal is evaluated.
-        W (torch.Tensor): primal.
-        M (torch.Tensor): tangent.
-        has_aux (bool, optional): whether to return the output of function as first element. Defaults to False.
+        f (function): Function on which the primal is evaluated.
+        W (torch.Tensor): Primal.
+        M (torch.Tensor): Tangent.
+        has_aux (bool, optional): Whether to return the output of function as first element. Defaults to False.
     Returns:
         torch.Tensor or Tuple[torch.Tensor, Any]:
             If has_aux is False:
@@ -27,10 +27,10 @@ def jmp_pair(f, W, M, has_aux=False):
     This computes the JVP of a function `f` with respect to two inputs (e.g., parameters and latents),
     batched over a set of tangent vectors.
     Args:
-        f (function): function on which the primal is evaluated.
+        f (function): Function on which the primal is evaluated.
         W (torch.Tensor, torch.Tensor): (primal, primal) pair.
         M (torch.Tensor, torch.Tensor): (tangent, tangent) pair.
-        has_aux (bool, optional): whether to return the output of function as first element. Defaults to False.
+        has_aux (bool, optional): Whether to return the output of function as first element. Defaults to False.
 
     Returns:
     Union[torch.Tensor, Tuple[torch.Tensor, Any]]:
@@ -49,8 +49,8 @@ def ggn_ce(tangents, h):
     """Generalised Gauss-Newton (GGN) matrixs for cross-entropy loss.
 
     Args:
-        tangents (torch.Tensor): tangents associated with network output. size (k, batch_size, dim).
-        h (torch.Tensor): predictions, usually probabilities of classes. size (dim,).
+        tangents (torch.Tensor): Tangents associated with network output. size (k, batch_size, dim).
+        h (torch.Tensor): Predictions, usually probabilities of classes. size (dim,).
 
     Returns:
         torch.Tensor: GGN matrix. size (k, k).
@@ -63,7 +63,7 @@ def ggn_mse(tangents: torch.Tensor):
     """Generalised Gauss-Newton (GGN) matrixs for mean-squared loss.
 
     Args:
-        tangents (torch.Tensor): tangents associated with network output. size (k, batch_size, dim).
+        tangents (torch.Tensor): Tangents associated with network output. size (k, batch_size, dim).
 
     Returns:
         torch.Tensor: GGN matrix. size (k, k).
@@ -71,16 +71,20 @@ def ggn_mse(tangents: torch.Tensor):
     return torch.func.vmap(lambda t: t @ t.T, in_dims=1)(tangents)
 
 def sample_v(tangent_size, params, device, rng):
-    """Sample tangents associated with parameters.
+    """Samples a batch of random, normalized tangent vectors matching the structure of `params`.
+
+    Each tangent vector is drawn from a standard normal distribution and normalized across
+    the entire dictionary (global L2 norm). The output is a dictionary where each value has shape
+    `(tangent_size, *x.shape)`.
 
     Args:
-        tangent_size (int): number of tangents/subspace dimension.
-        params (dict): parameters to train.
-        device (torch.device): device on which to generate tensors.
-        rng (torch.Generator): a pseudorandom number generator for sampling.
+        tangent_size (int): Number of tangents/subspace dimension.
+        params (dict): Parameters to train.
+        device (torch.device): Device on which to generate tensors.
+        rng (torch.Generator): A pseudorandom number generator for sampling.
 
     Returns:
-        dict: key is the parameter name and value is its tangent.
+        v: A dict where the key is the parameter name and value is its tangent.
     """
     v = {}
     for name, p in params.items():
@@ -108,19 +112,19 @@ def value_and_sofo_grad(fun, loss, tangent_size=100, damping=1e-5, classificatio
     """SOFO forward pass to compute loss and gradient. 
 
     Args:
-        fun (function): forward pass of the network.
-        loss (function): loss function.
-        tangent_size (int, optional): number of tangets/subspace dimension. Defaults to 100.
-        damping (float, optional): dampling parameter on ggn. Defaults to 1e-5.
-        classification (bool, optional): whether the task is classification. Defaults to False.
-        device (str, optional): device on which the network is run. Defaults to "cpu".
+        fun (function): Forward pass of the network.
+        loss (function): Loss function.
+        tangent_size (int, optional): Number of tangets/subspace dimension. Defaults to 100.
+        damping (float, optional): Dampling parameter on ggn. Defaults to 1e-5.
+        classification (bool, optional): Whether the task is classification. Defaults to False.
+        device (str, optional): Device on which the network is run. Defaults to "cpu".
     """
     def wrapper(rng, params):
         """Wrapper for the forward pass of the function.
 
         Args:
-            rng (int): pseudorandom number generator for sampling tangents.
-            params (dict): network params where key is the name and value is the params (primal).
+            rng (int): Pseudorandom number generator for sampling tangents.
+            params (dict): Model params where key is the name and value is the params (primal).
 
         Returns:
             tuple:
@@ -169,11 +173,11 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
 
     Args:
         rnn (function): one-step update of the recurrent network.
-        loss (function): loss function.
-        tangent_size (int, optional): number of tangets/subspace dimension. Defaults to 100.
-        damping (float, optional): dampling parameter on ggn. Defaults to 1e-5.
-        classification (bool, optional): whether the task is classification. Defaults to False.
-        device (str, optional): device on which the network is run. Defaults to "cpu".
+        loss (function): Loss function.
+        tangent_size (int, optional): Number of tangets/subspace dimension. Defaults to 100.
+        damping (float, optional): Dampling parameter on ggn. Defaults to 1e-5.
+        classification (bool, optional): Whether the task is classification. Defaults to False.
+        device (str, optional): Device on which the network is run. Defaults to "cpu".
     """
     def value_and_grad_f_batch(z_init, batch):
         """Compute loss and gradient on a data batch.
@@ -188,8 +192,8 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
             """Wrapper for the forward pass of the RNN.
 
             Args:
-                rng (int): pseudorandom number generator for sampling tangents.
-                params (dict): network params where key is the name and value is the params (primal).
+                rng (int): Pseudorandom number generator for sampling tangents.
+                params (dict): Model params where key is the name and value is the params (primal).
 
             Returns:
                 tuple:
