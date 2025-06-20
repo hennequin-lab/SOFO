@@ -48,7 +48,7 @@ module FF =
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
-
+let cycle = true
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
     type 'a p =
@@ -61,9 +61,12 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   module P = P
   module A = Make (Prms.P)
 
-  type sampling_state = unit
+  type sampling_state = int
 
-  let init_sampling_state () = ()
+  let init_sampling_state () = 0
+
+  (* cache storage with a ref to memoize computed results *)
+  let s_u_cache = ref []
 
   (* approximation defined implicitly via Gv products *)
   let g12v ~(lambda : A.M.t) (v : P.M.t) : P.M.t =
@@ -75,7 +78,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   let random_localised_vs _K : P.T.t =
     Tensor.randn ~device:base.device ~kind:base.kind [ _K; d; n ]
 
-  let eigenvectors ~(lambda : A.M.t) () (_K : int) =
+  let eigenvectors ~(lambda : A.M.t) ~switch_to_learn t (_K : int) =
     let left, right, n_per_param = lambda.theta_left, lambda.theta_right, _K in
     let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
     let u_right, s_right, _ =
@@ -96,11 +99,15 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       * Convenience.first_dim (Maths.primal right)
     in
     let selection =
-      List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
+      if cycle
+      then
+        List.init n_per_param ~f:(fun i ->
+          ((t * n_per_param) + i) % n_params)
+      else List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
     in
-    let selection = List.map selection ~f:(fun j -> s_all.(j)) in
     let vs =
-      List.map selection ~f:(fun (il, ir, _) ->
+      List.map selection ~f:(fun idx->
+        let il, ir, _ = s_all.(idx) in
         let u_left =
           Tensor.(
             squeeze_dim
@@ -117,7 +124,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         Tensor.unsqueeze tmp ~dim:0)
       |> Tensor.concatenate ~dim:0
     in
-    vs, ()
+    (* reset s_u_cache and set sampling state to 0 if learn again *)
+    if switch_to_learn then s_u_cache := [];
+    let new_sampling_state = if switch_to_learn then 0 else t + 1 in
+    vs, new_sampling_state
 
   let init () =
     let init_eye size =
@@ -131,6 +141,17 @@ end
 module O = Optimizer.SOFO (FF) (GGN)
 
 let config =
+  let aux =
+    Optimizer.Config.SOFO.
+      { (default_aux (in_dir "aux")) with
+        config =
+          Optimizer.Config.Adam.
+            { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
+      ; steps = 50
+      ; learn_steps = 10
+      ; exploit_steps = 10
+      }
+  in
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some 100.
@@ -138,6 +159,7 @@ let config =
     ; rank_one = false
     ; damping = None
     ; aux = None
+    ; orthogonalize = false
     }
 
 (* Adam optimizer *)

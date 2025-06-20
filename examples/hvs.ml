@@ -714,6 +714,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; rank_one = false
       ; damping = Some 1e-3
       ; aux = Some aux
+      ; orthogonalize = false
       }
 
   let init = O.init LGS.init

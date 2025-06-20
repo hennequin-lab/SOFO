@@ -510,6 +510,8 @@ module Do_with_SOFO : Do_with_T = struct
       ; rank_one = false
       ; damping = None  
       ; aux=None
+      ; orthogonalize = false
+
       }
 
   let init = O.init LGS.init

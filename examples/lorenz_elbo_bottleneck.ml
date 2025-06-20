@@ -178,7 +178,7 @@ module GRU = struct
     | Some x, Some u ->
       let d_soft_relu = d_soft_relu (pre_soft_relu ~x ~u theta) in
       let tmp1 =
-        let _D = Maths.slice theta._D ~dim:0 ~start:(Some 0) ~end_:(Some n) ~step:1 in 
+        let _D = Maths.slice theta._D ~dim:0 ~start:(Some 0) ~end_:(Some n) ~step:1 in
         Maths.einsum [ _D, "mp"; d_soft_relu, "bp"; theta._W, "pn" ] "bmn"
       in
       let tmp2 = Maths.unsqueeze theta._A ~dim:0 in
@@ -477,7 +477,7 @@ module GRU = struct
       Convenience.gaussian_tensor_2d_normed
         ~device:base.device
         ~kind:base.kind
-        ~a:(n+1)
+        ~a:(n + 1)
         ~b:p
         ~sigma:1.
       |> Prms.free
@@ -543,16 +543,29 @@ type param_name =
   | B_bias
   | Log_obs_var
   | Scaling_factor
+[@@deriving compare]
 
+let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
 let n_params_a = 20
 let n_params_b = 20
 let n_params_c = 20
-
 let n_params_b_bias = 2
 let n_params_log_obs_var = 1
 let n_params_scaling_factor = 1
 let n_params_w = Int.((_K - (n_params_a * 3) - 4) / 2)
 let n_params_d = n_params_w
+let param_names_list = [ W; A; D; B; C; B_bias; Log_obs_var; Scaling_factor ]
+
+let n_params_list =
+  [ n_params_w
+  ; n_params_a
+  ; n_params_b
+  ; n_params_c
+  ; n_params_b_bias
+  ; n_params_log_obs_var
+  ; n_params_scaling_factor
+  ]
+let cycle = true
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -565,7 +578,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       ; d_right : 'a
       ; b_left : 'a
       ; b_right : 'a
-
       ; c_left : 'a
       ; c_right : 'a
       ; b_bias_left : 'a
@@ -581,15 +593,56 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
   module P = P
   module A = Make (Prms.P)
 
-  type sampling_state = unit
+  type sampling_state = int
 
-  let init_sampling_state () = ()
+  let init_sampling_state () = 0
 
   let zero_params ~shape _K =
     Tensor.zeros ~device:base.device ~kind:base.kind (_K :: shape)
 
   let random_params ~shape _K =
     Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
+
+  let get_shapes (param_name : param_name) =
+    match param_name with
+    | W -> [ p; n ]
+    | A -> [ n; n ]
+    | D -> [ n + 1; p ]
+    | B -> [ 1; o ]
+    | C -> [ n; o ]
+    | B_bias -> [ 1; o ]
+    | Log_obs_var -> [ 1 ]
+    | Scaling_factor -> [ 1 ]
+
+  let get_n_params (param_name : param_name) =
+    match param_name with
+    | W -> n_params_w
+    | A -> n_params_a
+    | D -> n_params_d
+    | B -> n_params_b
+    | C -> n_params_c
+    | B_bias -> n_params_b_bias
+    | Log_obs_var -> n_params_log_obs_var
+    | Scaling_factor -> n_params_scaling_factor
+
+  let get_total_n_params (param_name : param_name) =
+    let list_prod l = List.fold l ~init:1 ~f:(fun accu i -> accu * i) in
+    list_prod (get_shapes param_name)
+
+  let get_n_params_before_after (param_name : param_name) =
+    let n_params_prefix_suffix_sums = Convenience.prefix_suffix_sums n_params_list in
+    let param_idx =
+      match param_name with
+      | W -> 0
+      | A -> 1
+      | D -> 2
+      | B -> 3
+      | C -> 4
+      | B_bias -> 5
+      | Log_obs_var -> 6
+      | Scaling_factor -> 7
+    in
+    List.nth_exn n_params_prefix_suffix_sums param_idx
 
   (* approximation defined implicitly via Gv products *)
   let g12v ~(lambda : A.M.t) (v : P.M.t) : P.M.t =
@@ -599,7 +652,6 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let _A = einsum_w ~left:lambda.a_left ~right:lambda.a_right v._A in
     let _D = einsum_w ~left:lambda.d_left ~right:lambda.d_right v._D in
     let _B = einsum_w ~left:lambda.b_left ~right:lambda.b_right v._B in
-
     let _c = einsum_w ~left:lambda.c_left ~right:lambda.c_right v._c in
     let _b = einsum_w ~left:lambda.b_bias_left ~right:lambda.b_bias_right v._b in
     let _log_obs_var =
@@ -614,19 +666,18 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         ~right:lambda.scaling_factor_right
         (reshape v._scaling_factor ~shape:[ -1; 1; 1 ])
     in
-    { _W; _A; _D; _B;  _b; _c; _log_obs_var; _scaling_factor }
+    { _W; _A; _D; _B; _c; _b; _log_obs_var; _scaling_factor }
 
   (* set tangents = zero for other parameters but v for this parameter *)
-  let localise ~local ~param_name ~n_per_param v =
-    let sample = if local then zero_params else random_params in
-    let _W = sample ~shape:[ p; n ] n_per_param in
-    let _A = sample ~shape:[ n; n ] n_per_param in
-    let _D = sample ~shape:[ n+1; p ] n_per_param in
-    let _B = sample ~shape:[ m; p ] n_per_param in
-    let _c = sample ~shape:[ n; o ] n_per_param in
-    let _b = sample ~shape:[ 1; o ] n_per_param in
-    let _log_obs_var = sample ~shape:[ 1 ] n_per_param in
-    let _scaling_factor = sample ~shape:[ 1 ] n_per_param in
+  let localise ~param_name ~n_per_param v =
+    let _W = zero_params ~shape:(get_shapes W) n_per_param in
+    let _A = zero_params ~shape:(get_shapes A) n_per_param in
+    let _D = zero_params ~shape:(get_shapes D) n_per_param in
+    let _B = zero_params ~shape:(get_shapes B) n_per_param in
+    let _c = zero_params ~shape:(get_shapes C) n_per_param in
+    let _b = zero_params ~shape:(get_shapes B_bias) n_per_param in
+    let _log_obs_var = zero_params ~shape:(get_shapes Log_obs_var) n_per_param in
+    let _scaling_factor = zero_params ~shape:(get_shapes Scaling_factor) n_per_param in
     let params_tmp = PP.{ _W; _A; _D; _B; _c; _b; _log_obs_var; _scaling_factor } in
     match param_name with
     | W -> { params_tmp with _W = v }
@@ -639,29 +690,37 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     | Scaling_factor -> { params_tmp with _scaling_factor = v }
 
   let random_localised_vs _K : P.T.t =
-    { _W = random_params ~shape:[ p; n ] _K
-    ; _A = random_params ~shape:[ n; n ] _K
-    ; _D = random_params ~shape:[ n+1; p ] _K
-    ; _B = random_params ~shape:[ m; p ] _K
-    ; _c = random_params ~shape:[ n; o ] _K
-    ; _b = random_params ~shape:[ 1; o ] _K
-    ; _log_obs_var = random_params ~shape:[ 1 ] _K
-    ; _scaling_factor = random_params ~shape:[ 1 ] _K
+    let random_localised_param_name param_name =
+      let w_shape = get_shapes param_name in
+      let before, after = get_n_params_before_after param_name in
+      let w = random_params ~shape:w_shape (get_n_params param_name) in
+      let zeros_before = zero_params ~shape:w_shape before in
+      let zeros_after = zero_params ~shape:w_shape after in
+      let final = Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0 in
+      final
+    in
+    { _W = random_localised_param_name W
+    ; _A = random_localised_param_name A
+    ; _D = random_localised_param_name D
+    ; _B = random_localised_param_name B
+    ; _c = random_localised_param_name C
+    ; _b = random_localised_param_name B_bias
+    ; _log_obs_var = random_localised_param_name Log_obs_var
+    ; _scaling_factor = random_localised_param_name Scaling_factor
     }
 
-  let eigenvectors_for_each_params ~local ~lambda ~param_name =
-    let left, right, n_per_param =
+  (* compute sorted eigenvalues, u_left and u_right. *)
+  let eigenvectors_for_params ~lambda ~param_name =
+    let left, right =
       match param_name with
-      | W -> lambda.w_left, lambda.w_right, n_params_w
-      | A -> lambda.a_left, lambda.a_right, n_params_a
-      | D -> lambda.d_left, lambda.d_right, n_params_d
-      | B -> lambda.b_left, lambda.b_right, n_params_b
-      | C -> lambda.c_left, lambda.c_right, n_params_c
-      | B_bias -> lambda.b_bias_left, lambda.b_bias_right, n_params_b_bias
-      | Log_obs_var ->
-        lambda.log_obs_var_left, lambda.log_obs_var_right, n_params_log_obs_var
-      | Scaling_factor ->
-        lambda.scaling_factor_left, lambda.scaling_factor_right, n_params_scaling_factor
+      | W -> lambda.w_left, lambda.w_right
+      | A -> lambda.a_left, lambda.a_right
+      | D -> lambda.d_left, lambda.d_right
+      | B -> lambda.b_left, lambda.b_right
+      | C -> lambda.c_left, lambda.c_right
+      | B_bias -> lambda.b_bias_left, lambda.b_bias_right
+      | Log_obs_var -> lambda.log_obs_var_left, lambda.log_obs_var_right
+      | Scaling_factor -> lambda.scaling_factor_left, lambda.scaling_factor_right
     in
     let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
     let u_right, s_right, _ =
@@ -676,44 +735,59 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
       |> Array.of_list
     in
-    (* randomly select the indices *)
-    let n_params =
-      Convenience.first_dim (Maths.primal left)
-      * Convenience.first_dim (Maths.primal right)
-    in
-    let selection =
-      List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
-    in
-    let selection = List.map selection ~f:(fun j -> s_all.(j)) in
+    s_all, u_left, u_right
+
+  (* cache storage with a ref to memoize computed results *)
+  let s_u_cache = ref []
+
+  (* given param name, get eigenvalues and eigenvectors. *)
+  let get_s_u ~lambda ~param_name =
+    match List.Assoc.find !s_u_cache param_name ~equal:equal_param_name with
+    | Some s -> s
+    | None ->
+      let s = eigenvectors_for_params ~lambda ~param_name in
+      s_u_cache := (param_name, s) :: !s_u_cache;
+      s
+
+  let extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection =
+    let n_per_param = get_n_params param_name in
     let local_vs =
-      List.map selection ~f:(fun (il, ir, _) ->
-        let u_left =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
+      List.map selection ~f:(fun idx ->
+        let il, ir, _ = s_all.(idx) in
+        let slice_and_squeeze t dim idx =
+          Tensor.squeeze_dim
+            ~dim
+            (Tensor.slice t ~dim ~start:(Some idx) ~end_:(Some (idx + 1)) ~step:1)
         in
-        let u_right =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_right ~dim:1 ~start:(Some ir) ~end_:(Some Int.(ir + 1)) ~step:1))
-        in
+        let u_l = slice_and_squeeze u_left 1 il in
+        let u_r = slice_and_squeeze u_right 1 ir in
         let tmp =
           match param_name with
-          | Log_obs_var | Scaling_factor -> Tensor.(u_left * u_right)
-          | _ -> Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ]
+          | Log_obs_var | Scaling_factor -> Tensor.(u_l * u_r)
+          | _ -> Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_l; u_r ]
         in
         Tensor.unsqueeze tmp ~dim:0)
       |> Tensor.concatenate ~dim:0
     in
-    local_vs |> localise ~local ~param_name ~n_per_param
+    localise ~param_name ~n_per_param local_vs
 
-  let eigenvectors ~(lambda : A.M.t) () (_K : int) =
-    let param_names_list = [ W; A; D; B;  C; B_bias; Log_obs_var; Scaling_factor ] in
+  let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state =
+    let n_per_param = get_n_params param_name in
+    let n_params = get_total_n_params param_name in
+    let s_all, u_left, u_right = get_s_u ~lambda ~param_name in
+    let selection =
+      if cycle
+      then
+        List.init n_per_param ~f:(fun i ->
+          ((sampling_state * n_per_param) + i) % n_params)
+      else List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
+    in
+    extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection
+
+  let eigenvectors ~(lambda : A.M.t) ~switch_to_learn t (_K : int) =
     let eigenvectors_each =
       List.map param_names_list ~f:(fun param_name ->
-        eigenvectors_for_each_params ~local:true ~lambda ~param_name)
+        eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:t)
     in
     let vs =
       List.fold eigenvectors_each ~init:None ~f:(fun accu local_vs ->
@@ -721,7 +795,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         | None -> Some local_vs
         | Some a -> Some (P.map2 a local_vs ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ])))
     in
-    Option.value_exn vs, ()
+    (* reset s_u_cache and set sampling state to 0 if learn again *)
+    if switch_to_learn then s_u_cache := [];
+    let new_sampling_state = if switch_to_learn then 0 else t + 1 in
+    Option.value_exn vs, new_sampling_state
 
   let init () =
     let init_eye size =
@@ -731,11 +808,10 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     ; w_right = init_eye n
     ; a_left = init_eye n
     ; a_right = init_eye n
-    ; d_left = init_eye (n+1)
+    ; d_left = init_eye (n + 1)
     ; d_right = init_eye p
     ; b_left = init_eye m
     ; b_right = init_eye p
-
     ; c_left = init_eye n
     ; c_right = init_eye o
     ; b_bias_left = init_eye 1
@@ -784,7 +860,7 @@ module Make (D : Do_with_T) = struct
           | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
         in
         (* save params *)
-        if iter % 10 = 0
+        if iter % 1 = 0
         then (
           (* simulation error *)
           let o_error =
@@ -826,6 +902,8 @@ module Do_with_SOFO : Do_with_T = struct
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
         ; steps = 5
+        ; learn_steps = 10
+        ; exploit_steps = 10
         }
     in
     Optimizer.Config.SOFO.
@@ -834,7 +912,8 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-5
-      ; aux = None
+      ; aux = Some aux
+      ; orthogonalize = false
       }
 
   let name = "sofo"

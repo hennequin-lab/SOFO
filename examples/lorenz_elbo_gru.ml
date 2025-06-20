@@ -615,6 +615,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; rank_one = false
       ; damping = Some 1e-5
       ; aux = None
+      ; orthogonalize = false
       }
 
   let name = "sofo"

@@ -324,11 +324,11 @@ module Do_with_SOFO : Do_with_T = struct
       ; damping = Some 1e-3
       ; rank_one = false
       ; aux = None
+      ; orthogonalize = true
       }
 
   let name = "sofo"
-
-  let init = O.init  VAE.init
+  let init = O.init VAE.init
 end
 
 (* --------------------------------
