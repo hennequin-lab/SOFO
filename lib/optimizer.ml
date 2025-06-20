@@ -191,6 +191,7 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
     ; theta : W.P.tagged
     ; aux : O.state
     ; sampling_state : A.sampling_state
+    ; prev_seeds : int list option
     }
 
   (* obtain parameters from state *)
@@ -201,7 +202,8 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
     let lambda = A.init () in
     let aux = O.init lambda in
     let sampling_state = A.init_sampling_state () in
-    { t = 0; theta; aux; sampling_state }
+    let prev_seeds = None in
+    { t = 0; theta; aux; sampling_state; prev_seeds }
 
   (* orthogonalise vs *)
   let orthonormalise vs =
@@ -220,9 +222,37 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
       let v = Tensor.(matmul normalizer v) in
       Tensor.reshape v ~shape:s)
 
-  (* given [base] configuration, [rank_one] condition, [n_tangents],
-    initialise tangents where each tangent is normalised *)
-  let init_tangents ~base ~rank_one ~n_tangents theta =
+  let prepend a vs =
+    Stdlib.Gc.minor ();
+    W.P.map2 vs a ~f:(fun v a -> Tensor.concatenate ~dim:0 [ a; v ])
+
+  (* orthogonalize [vs] against a single-tangent [against] *)
+  let orthogonalize_single vs against =
+    let overlaps =
+      W.P.fold2 ~init:(Tensor.f 0.) vs against ~f:(fun accu (v, a, _) ->
+        Tensor.(accu + Convenience.sum_except_dim0 (a * v)))
+      |> Tensor.view ~size:[ -1; 1 ]
+    in
+    W.P.map2 vs against ~f:(fun v a ->
+      let s = Tensor.shape v in
+      let r = Tensor.(matmul overlaps (view a ~size:[ 1; -1 ])) in
+      let v = Tensor.(v - view ~size:s r) in
+      v)
+
+  (* orthogonalize [vs] against [against] which has [against_k] tangents. *)
+  let orthogonalize ~against_k ~against vs =
+    let vs = orthonormalise vs in
+    let against = orthonormalise against in
+    (* kth item in against_lst is the k_th tangent in against*)
+    let against_lst =
+      List.init against_k ~f:(fun k ->
+        W.P.map against ~f:(fun v ->
+          Tensor.slice v ~dim:0 ~start:(Some k) ~end_:(Some (k + 1)) ~step:1))
+    in
+    List.fold against_lst ~init:vs ~f:orthogonalize_single
+
+  let gen_theta_from_seed ~base ~rank_one ~n_tangents theta seed =
+    Torch_core.Wrapper.manual_seed seed;
     W.P.map theta ~f:(function
       | Prms.Const x ->
         Tensor.zeros
@@ -233,6 +263,73 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
         sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
       | Prms.Bounded (x, _, _) ->
         sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
+
+  (* orthogonalize [vs] against vs generated from [seed_list] *)
+  let orthogonalize_seeds ~seeds ~base ~rank_one ~n_tangents theta vs =
+    List.fold seeds ~init:vs ~f:(fun accu seed ->
+      Stdlib.Gc.major ();
+      (* re-generate vs from seed *)
+      let against = gen_theta_from_seed ~base ~rank_one ~n_tangents theta seed in
+      (* orthonormalise both vs and re-generated vs *)
+      let accu = orthonormalise accu in
+      let against = orthonormalise against in
+      (* kth item in against_lst is the k_th tangent in against*)
+      let against_lst =
+        List.init n_tangents ~f:(fun k ->
+          W.P.map against ~f:(fun v ->
+            Tensor.slice v ~dim:0 ~start:(Some k) ~end_:(Some (k + 1)) ~step:1))
+      in
+      (* orthogonalise vs against each tangent in against_lst *)
+      let accu_new = List.fold against_lst ~init:accu ~f:orthogonalize_single in
+      accu_new)
+
+  let gen_theta_from_seed ~base ~rank_one ~n_tangents theta seed =
+    (* let v = *)
+    Torch_core.Wrapper.manual_seed seed;
+    W.P.map theta ~f:(function
+      | Prms.Const x ->
+        Tensor.zeros
+          ~device:(Tensor.device x)
+          ~kind:(Tensor.kind x)
+          (n_tangents :: Tensor.shape x)
+      | Prms.Free x ->
+        sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x)
+      | Prms.Bounded (x, _, _) ->
+        sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
+
+  let rec gen_unique_int max l =
+    let x = Random.int max in
+    if List.mem l x ~equal:Int.equal then gen_unique_int max l else x
+
+  (* given [base] configuration, [rank_one] condition, [n_tangents],
+    initialise tangents which may be orthogonal against prev tangents. *)
+  let init_tangents ~base ~rank_one ~n_tangents ~prev_seeds ~ortho theta =
+    if ortho
+    then (
+      let n_params = W.P.T.numel (W.P.map theta ~f:(fun p -> Prms.value p)) in
+      let new_vs, new_seeds_list =
+        match prev_seeds with
+        | None ->
+          let new_seed = Random.int 1999 in
+          let new_vs = gen_theta_from_seed ~base ~rank_one ~n_tangents theta new_seed in
+          let new_seeds_list = Some [ new_seed ] in
+          new_vs, new_seeds_list
+        | Some seeds ->
+          let new_seed = gen_unique_int 1999 seeds in
+          let new_vs = gen_theta_from_seed ~base ~rank_one ~n_tangents theta new_seed in
+          let new_vs_orth =
+            orthogonalize_seeds ~seeds ~base ~rank_one ~n_tangents theta new_vs
+          in
+          (* if completed one cycle, empty the seed list and restart *)
+          let new_seeds_list =
+            if Int.(List.length seeds) > Int.(n_params / n_tangents)
+            then None
+            else Some (new_seed :: seeds)
+          in
+          new_vs_orth, new_seeds_list
+      in
+      new_vs, new_seeds_list)
+    else gen_theta_from_seed ~base ~rank_one ~n_tangents theta (Random.int 1999), None
 
   (* fold vs over sets of v_i s, multiply with associated [weights]. *)
   let weighted_vs_sum vs ~weights =
@@ -288,19 +385,26 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
     (* initialise tangents *)
     let theta = params state in
     (* if learning or not using aux, use random vs; else use vs sampled from eigenvectors *)
-    let _vs, new_sampling_state =
+    let _vs, new_sampling_state, new_seeds =
       if aux_exploit
       then (
-        let lambda = O.params state.aux in
-        let lambda = A.A.map ~f:(fun x -> Maths.const (Prms.value x)) lambda in
-        A.eigenvectors ~lambda ~switch_to_learn state.sampling_state config.n_tangents)
-      else
-        ( init_tangents
+        let _vs, new_sampling_state =
+          let lambda = O.params state.aux in
+          let lambda = A.A.map ~f:(fun x -> Maths.const (Prms.value x)) lambda in
+          A.eigenvectors ~lambda ~switch_to_learn state.sampling_state config.n_tangents
+        in
+        _vs, new_sampling_state, None)
+      else (
+        let _vs, new_seeds =
+          init_tangents
             ~base:config.base
             ~rank_one:config.rank_one
             ~n_tangents:config.n_tangents
+            ~prev_seeds:state.prev_seeds
+            ~ortho:config.orthogonalize
             theta
-        , state.sampling_state )
+        in
+        _vs, state.sampling_state, new_seeds)
     in
     let _vs = orthonormalise _vs in
     let vs = W.P.map _vs ~f:(fun x -> Maths.Direct x) in
@@ -352,6 +456,7 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
       ; theta = new_theta
       ; aux = new_aux
       ; sampling_state = new_sampling_state
+      ; prev_seeds = new_seeds
       } )
 end
 

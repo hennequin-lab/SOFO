@@ -21,7 +21,7 @@ let base = Optimizer.Config.Base.default
 
 module Settings = struct
   (* length of data *)
-  let n_steps = 128 (* 20 to 600 *)
+  let n_steps = 1000 (* 20 to 600 *)
 
   (* first signal upper bound *)
   let t1_bound = 10
@@ -145,7 +145,8 @@ module RNN = struct
     result
 end
 
-let _K = 128
+(* TODO: _K should be 128 *)
+let _K = 32
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
@@ -448,10 +449,10 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-2; eps = 1e-8 }
-        ; steps = 3
-        ; learn_steps = 100
-        ; exploit_steps = 100
+              { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
+        ; steps = 50
+        ; learn_steps = 10
+        ; exploit_steps = 10
         }
     in
     Optimizer.Config.SOFO.
@@ -460,7 +461,8 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-5
-      ; aux = Some aux
+      ; aux = None
+      ; orthogonalize = true
       }
 
   let init = O.init RNN.init
@@ -476,13 +478,13 @@ module Do_with_Adam : Do_with_T = struct
   module O = Optimizer.Adam (RNN)
 
   let config ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 1e-4 }
+    Optimizer.Config.Adam.{ default with base; learning_rate = Some 1e-5 }
 
   let init = O.init RNN.init
 end
 
 let _ =
-  let max_iter = 2000 in
+  let max_iter = 20000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

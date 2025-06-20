@@ -25,7 +25,7 @@ let m = 5
 let n = 10
 let o = 40
 let true_noise_std = 0.1
-let tmax = 10
+let tmax = 50
 let bs = 32
 let _K = 120
 let eye_m = Maths.(const (Tensor.of_bigarray ~device:base.device Mat.(eye m)))
@@ -396,7 +396,7 @@ let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
             gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u_tmp
           in
           (* sticking the landing idea where gradients w.r.t variational parameters removed. *)
-          let q_term = gaussian_llh_chol ~mu ~precision_chol u_sample in
+          let q_term = gaussian_llh_chol ~mu:(detach mu) ~precision_chol:(detach precision_chol) u_sample in
           q_term - prior_term
         in
         z, kl :: kl_list, (ustar + u_sample) :: us)
@@ -506,7 +506,7 @@ let n_params_d = 10
 let n_params_c = Int.(_K - 2 - n_params_d - n_params_q)
 let n_params_log_obs_var = 1
 let n_params_scaling_factor = 1
-let cycle = false
+let cycle = true
 
 let n_params_list =
   [ n_params_q; n_params_d; n_params_c; n_params_log_obs_var; n_params_scaling_factor ]
@@ -859,18 +859,18 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-2; eps = 1e-4 }
-        ; steps = 5
-        ; learn_steps = 1
-        ; exploit_steps = 1
+              { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
+        ; steps = 50
+        ; learn_steps = 100
+        ; exploit_steps = 100
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.01
+      ; learning_rate = Some 0.0005
       ; n_tangents = _K
       ; rank_one = false
-      ; damping = Some 1e-3
+      ; damping = Some 1e-5
       ; aux = Some aux
       }
 

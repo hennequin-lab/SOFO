@@ -73,6 +73,7 @@ module Config = struct
       ; rank_one : bool
       ; damping : float option
       ; aux : ('a, 'b) aux option
+      ; orthogonalize: bool
       }
 
     let default_aux file =
@@ -85,6 +86,7 @@ module Config = struct
       ; rank_one = false
       ; damping = None
       ; aux = None
+      ; orthogonalize = false
       }
   end
 

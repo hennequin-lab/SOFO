@@ -3,7 +3,6 @@ open Base
 open Forward_torch
 open Torch
 open Sofo
-module Arr = Owl.Dense.Ndarray.S
 module Mat = Owl.Dense.Matrix.D
 
 let _ =
@@ -18,9 +17,10 @@ let base =
     ; ba_kind = Bigarray.float64
     }
 
-(* batch size. TODO: different params for each trial? Or same params? *)
+(* batch size. *)
 let bs = 32
 let in_dir = Cmdargs.in_dir "-d"
+let data_dir = Cmdargs.in_dir "-data"
 
 (* -----------------------------------------
    --- Utility Functions ---
@@ -76,7 +76,7 @@ let sqrt_precision_of_log_var log_var = Maths.(exp (f (-0.5) * log_var))
    -- Data Read In ---
    ----------------------------------------- *)
 let load_npy_data hvs_folder =
-  let folder_path = in_dir ("hvs_npy/" ^ hvs_folder) in
+  let folder_path = data_dir ("hvs_npy/" ^ hvs_folder) in
   (* get array of .npy files, each contains a mat of shape [T x n_channels] *)
   let files = Stdlib.Sys.readdir folder_path |> List.of_array in
   let npy_files = List.filter ~f:(fun f -> Stdlib.Filename.check_suffix f ".npy") files in
@@ -84,22 +84,27 @@ let load_npy_data hvs_folder =
     List.map ~f:(fun filename -> Stdlib.Filename.concat folder_path filename) npy_files
   in
   (* load data *)
-  List.map ~f:(fun path -> Arr.load_npy path) full_paths
+  List.map ~f:(fun path -> Owl.Dense.Ndarray.S.load_npy path) full_paths
 
 (* array of [T x n_channels] files. *)
 let data_raw = load_npy_data "DH1"
 
 let chunking ~tmax mat =
-  let shape = Owl.Dense.Ndarray.S.shape mat in
+  let shape = Owl.Dense.Ndarray.D.shape mat in
   let t = shape.(0) in
   let num_blocks = t / tmax in
   List.init num_blocks ~f:(fun i ->
-    Owl.Dense.Ndarray.S.get_slice [ [ tmax * i; (tmax * (i + 1)) - 1 ]; [] ] mat)
+    Owl.Dense.Ndarray.D.get_slice [ [ tmax * i; (tmax * (i + 1)) - 1 ]; [] ] mat)
 
 let tmax = 160
 
 (* array of [tmax x n_channels] files *)
-let data = List.map data_raw ~f:(fun mat -> chunking ~tmax mat) |> List.concat
+let data =
+  List.map data_raw ~f:(fun mat ->
+    let mat = Owl.Dense.Matrix.Generic.cast_s2d mat in
+    chunking ~tmax mat)
+  |> List.concat
+
 let full_batch_size = List.length data
 
 (* state dim *)
@@ -143,7 +148,7 @@ let sample_data ~sampling_state_data bs =
 (* -----------------------------------------
    -- Model setup and optimizer
    ----------------------------------------- *)
-(* each individual trial has different parameters. *)
+(* each trial has the same parameters. *)
 let batch_const = true
 
 module PP = struct
@@ -365,7 +370,9 @@ module LGS = struct
       |> Prms.free
     in
     let _log_scaling_factor =
-      Prms.create ~above:(Tensor.f 0.1) Tensor.(log (ones [ 1 ] ~device:base.device))
+      Prms.create
+        ~above:(Tensor.f 0.1)
+        Tensor.(log (ones [ 1 ] ~device:base.device ~kind:base.kind))
     in
     { _a; _b; _b_0; _c; _log_obs_var; _log_scaling_factor }
 end
@@ -659,6 +666,10 @@ module Make (D : Do_with_T) = struct
         (* save params *)
         if iter % 10 = 0
         then (
+          O.W.P.T.save
+            (LGS.P.value (O.params new_state))
+            ~kind:base.ba_kind
+            ~out:(in_dir name ^ "_params");
           (* avg error *)
           Convenience.print [%message (iter : int) (loss_avg : float)];
           let t = iter in
@@ -685,13 +696,24 @@ module Do_with_SOFO : Do_with_T = struct
   let name = "sofo"
 
   let config ~iter:_ =
+    let aux =
+      Optimizer.Config.SOFO.
+        { (default_aux (in_dir "aux")) with
+          config =
+            Optimizer.Config.Adam.
+              { default with base; learning_rate = Some 1e-2; eps = 1e-8 }
+        ; steps = 10
+        ; learn_steps = 50
+        ; exploit_steps = 50
+        }
+    in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.1
+      ; learning_rate = Some 0.01
       ; n_tangents = _K
       ; rank_one = false
-      ; damping = None
-      ; aux = None
+      ; damping = Some 1e-3
+      ; aux = Some aux
       }
 
   let init = O.init LGS.init

@@ -21,7 +21,8 @@ let base = Optimizer.Config.Base.default
 let _K = 128
 
 module Settings = struct
-  let b = 3
+  (* can we still train with more flips? *)
+  let b = 10
   let n_steps = 200
   let pulse_prob = 0.02
   let pulse_duration = 2
@@ -492,18 +493,19 @@ module Do_with_SOFO : Do_with_T = struct
           config =
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
-        ; steps = 50
+        ; steps = 5
         ; learn_steps = 100
         ; exploit_steps = 100
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 1.
+      ; learning_rate = Some 3.
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-5
       ; aux = Some aux
+      ; orthogonalize = false
       }
 
   let init = O.init (RNN.init ())
@@ -525,7 +527,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 20000 in
+  let max_iter = 100000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

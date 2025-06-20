@@ -424,9 +424,9 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     let left, right =
       match param_name with
       | W -> lambda.w_left, lambda.w_right
-      | A -> lambda.a_left, lambda.a_right
       | C -> lambda.c_left, lambda.c_right
       | B -> lambda.b_left, lambda.b_right
+      | A -> lambda.a_left, lambda.a_right
       | O -> lambda.o_left, lambda.o_right
     in
     let u_left, s_left, _ = Tensor.svd ~some:true ~compute_uv:true Maths.(primal left) in
@@ -609,14 +609,14 @@ module Do_with_SOFO : Do_with_T = struct
           config =
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-4 }
-        ; steps = 500
-        ; learn_steps = 10
-        ; exploit_steps = 10
+        ; steps = 5
+        ; learn_steps = 100
+        ; exploit_steps = 100
         }
     in
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.3
+      ; learning_rate = Some 0.1
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
@@ -642,7 +642,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 100000 in
+  let max_iter = 200000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

@@ -364,7 +364,6 @@ module Make (D : Do_with_T) = struct
           | [] -> loss
           | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
         in
-        (* save params *)
         if iter % 10 = 0
         then (
           (* save params *)

@@ -356,7 +356,14 @@ let max_2d_dim1 (x, dx) ~keepdim =
 (* y = x^T, dy = dx^T *)
 let transpose (x, dx) ~dim0 ~dim1 =
   let y = Tensor.transpose_copy x ~dim0 ~dim1 in
-  let dy = with_tangent dx ~f:(Tensor.transpose_copy ~dim0:(dim0 + 1) ~dim1:(dim1 + 1)) in
+  let dy =
+    with_tangent
+      dx
+      ~f:
+        (let new_dim0 = if dim0 < 0 then dim0 else dim0 + 1 in
+         let new_dim1 = if dim1 < 0 then dim1 else dim1 + 1 in
+         Tensor.transpose_copy ~dim0:new_dim0 ~dim1:new_dim1)
+  in
   (y, dy) |> assert_right_shape "transpose"
 
 (* y = batch transpose x where the last two dims of x is transposed *)

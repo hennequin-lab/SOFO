@@ -90,7 +90,7 @@ open Lorenz_common
 let d = 3
 let dh = 400
 let batch_size = 256
-let num_epochs_to_run = 2000
+let num_epochs_to_run = 4000
 let n_trials_simulation = 10
 let train_data = data 32
 let test_horizon = 10000
@@ -145,7 +145,7 @@ let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
 let n_params_w, n_params_c, n_params_a = 60, 60, Int.(_K - 120)
 let n_params_list = [ n_params_w; n_params_c; n_params_a ]
 let param_names_list = [ W; C; A ]
-let cycle = true
+let cycle = false
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -415,9 +415,9 @@ module Do_with_SOFO : Do_with_T = struct
           config =
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
-        ; steps = 50
-        ; learn_steps = 100
-        ; exploit_steps = 100
+        ; steps = 5
+        ; learn_steps = 1
+        ; exploit_steps = 1
         }
     in
     Optimizer.Config.SOFO.
@@ -426,7 +426,8 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-5
-      ; aux = Some aux
+      ; aux = None
+      ; orthogonalize = true
       }
 
   let init = O.init (RNN.init ~d ~dh)
