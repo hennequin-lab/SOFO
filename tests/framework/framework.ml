@@ -5,10 +5,7 @@ open Maths
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
 
 module Make (P : Prms.T) (O : Prms.T) = struct
-  let run
-        (p : [< `const | `dual ] P.t)
-        ~(f : [< `const | `dual ] P.t -> [ `const | `dual ] O.t)
-    =
+  let run (p : const P.t) ~(f : [< `const | `dual ] P.t -> [ `const | `dual ] O.t) =
     let open Torch in
     (* batched JVP tests *)
     let k = 7 in
@@ -22,7 +19,7 @@ module Make (P : Prms.T) (O : Prms.T) = struct
       let dp1 =
         O.fold2 w o ~init:(Maths.f 0.) ~f:(fun accu (w, o, _) ->
           let wo = C.(reshape (w * o) ~shape:[ k; -1 ]) in
-          C.(accu + sum_dim ~dim:[ 1 ] ~keepdim:false wo))
+          C.(accu + sum ~dim:[ 1 ] ~keepdim:false wo))
       in
       dp1, v, w
     in
@@ -48,7 +45,7 @@ module Make (P : Prms.T) (O : Prms.T) = struct
       let dp2 =
         P.fold2 v g ~init:(Maths.f 0.) ~f:(fun accu (v, g, _) ->
           let vg = C.(reshape (v * g) ~shape:[ k; -1 ]) in
-          C.(accu + sum_dim ~dim:[ 1 ] ~keepdim:false vg))
+          C.(accu + sum ~dim:[ 1 ] ~keepdim:false vg))
       in
       dp2
     in

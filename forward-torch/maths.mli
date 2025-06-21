@@ -49,6 +49,7 @@ val f : float -> const t
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
 
+val eye : (int -> const t) with_tensor_params
 val zeros : (int list -> const t) with_tensor_params
 val ones : (?scale:float -> int list -> const t) with_tensor_params
 val rand : (?scale:float -> int list -> const t) with_tensor_params
@@ -94,10 +95,8 @@ val relu : 'a some t -> 'a t
 val sigmoid : 'a some t -> 'a t
 val softplus : 'a some t -> 'a t
 val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> 'a some t -> 'a t
-val sum : 'a some t -> 'a t
-val mean : 'a some t -> 'a t
-val sum_dim : ?keepdim:bool -> dim:int list -> 'a some t -> 'a t
-val mean_dim : ?keepdim:bool -> dim:int list -> 'a some t -> 'a t
+val sum : ?keepdim:bool -> ?dim:int list -> 'a some t -> 'a t
+val mean : ?keepdim:bool -> ?dim:int list -> 'a some t -> 'a t
 val logsumexp : ?keepdim:bool -> dim:int list -> 'a some t -> 'a t
 val ( + ) : _ some t -> _ some t -> any t
 val ( - ) : _ some t -> _ some t -> any t
@@ -109,6 +108,8 @@ val ( $/ ) : float -> 'a some t -> 'a t
 val ( *@ ) : _ some t -> _ some t -> any t
 val einsum : (_ some t * string) list -> string -> any t
 val concat : dim:int -> _ some t list -> any t
+val cholesky : 'a some t -> 'a some t
+val linsolve_triangular : ?left:bool -> ?upper:bool -> _ some t -> _ some t -> any t
 
 (* ---------------------------------------------------
    -- Type-preserving ops on constants
@@ -136,10 +137,8 @@ module C : sig
   val softplus : const t -> const t
   val sign : const t -> const t
   val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> const t -> const t
-  val sum : const t -> const t
-  val mean : const t -> const t
-  val sum_dim : ?keepdim:bool -> dim:int list -> const t -> const t
-  val mean_dim : ?keepdim:bool -> dim:int list -> const t -> const t
+  val sum : ?keepdim:bool -> ?dim:int list -> const t -> const t
+  val mean : ?keepdim:bool -> ?dim:int list -> const t -> const t
   val logsumexp : ?keepdim:bool -> dim:int list -> const t -> const t
   val ( + ) : const t -> const t -> const t
   val ( - ) : const t -> const t -> const t
@@ -153,4 +152,6 @@ module C : sig
   val concat : dim:int -> const t list -> const t
   val svd : const t -> const t * const t * const t
   val qr : const t -> const t * const t
+  val cholesky : const t -> const t
+  val linsolve_triangular : ?left:bool -> ?upper:bool -> const t -> const t -> const t
 end

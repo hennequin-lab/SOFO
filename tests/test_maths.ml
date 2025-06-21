@@ -35,10 +35,10 @@ type input_constr =
 (* each unary test test is characterized by a name,
    a (potentially empty) list of constraints on the input,
    and a unary math function to be tested *)
-type 'a unary =
-  string
-  * input_constr list
-  * (int list -> ([< `const | `dual ] as 'a) t -> [ `const | `dual ] t)
+type 'a unary = string * input_constr list * (int list -> 'a some t -> 'a t)
+
+type ('a, 'b) binary =
+  string * input_constr list * (int list -> 'a some t -> 'b some t -> any t)
 
 let any_shape f _ x = f x
 
@@ -123,15 +123,7 @@ let test_unary ((name, input_constr, f) : _ unary) =
         Alcotest.(check @@ rel_tol) name 0.0 (check_grad1 f (of_tensor x))) )
 
 (*
-   let cholesky_test x =
-  let x_sym = Maths.(x *@ transpose x ~dim0:0 ~dim1:1) in
-  Maths.cholesky x_sym
-
-let batch_cholesky_test x =
-  let x_sym = Maths.(x *@ transpose x ~dim0:1 ~dim1:2) in
-  Maths.cholesky x_sym
-
-let cholesky_then_linsolve a b =
+   let cholesky_then_linsolve a b =
   let a_sym = Maths.(a *@ transpose a ~dim0:1 ~dim1:2) in
   let ell = Maths.cholesky a_sym in
   Maths.linsolve_triangular ell b ~left:true ~upper:false
@@ -153,42 +145,43 @@ let unary_tests =
   let test_list : _ unary list =
     [ ( "permute"
       , [ `specified_unary [ 2; 3; 6; 4 ] ]
-      , any_shape (Maths.permute ~dims:[ 0; 2; 3; 1 ]) )
-    ; "sqr", [], any_shape Maths.sqr
-    ; "neg", [], any_shape Maths.neg
-    ; "trace", [ `specified_unary [ 10; 10 ] ], any_shape Maths.trace
+      , any_shape (permute ~dims:[ 0; 2; 3; 1 ]) )
+    ; "sqr", [], any_shape sqr
+    ; "neg", [], any_shape neg
+    ; "trace", [ `specified_unary [ 10; 10 ] ], any_shape trace
     ; ( "trace_with_einsum"
       , [ `specified_unary [ 10; 10 ] ]
-      , any_shape (fun a -> Maths.einsum [ a, "ii" ] "") )
+      , any_shape (fun a -> einsum [ a, "ii" ] "") )
     ; ( "transpose_with_einsum"
       , [ `specified_unary [ 10; 10 ] ]
-      , any_shape (fun a -> Maths.einsum [ a, "ij" ] "ji") )
+      , any_shape (fun a -> einsum [ a, "ij" ] "ji") )
     ; ( "batch_transpose_with_einsum"
       , [ `specified_unary [ 4; 10; 10 ] ]
-      , any_shape (fun a -> Maths.einsum [ a, "kij" ] "kji") )
-    ; "cos", [], any_shape Maths.cos
-    ; "sin", [], any_shape Maths.sin
-    ; "sqrt", [ `positive ], any_shape Maths.sqrt
-    ; "log", [ `positive ], any_shape Maths.log
-    ; "exp", [], any_shape Maths.exp
-    ; "sigmoid", [], any_shape Maths.sigmoid
-    ; "softplus", [], any_shape Maths.softplus
-    ; "tanh", [], any_shape Maths.tanh
-    ; "relu", [ `positive ], any_shape Maths.relu
-    ; "sum", [], any_shape Maths.sum
-    ; "mean", [], any_shape Maths.mean
-      (* ; "max2d_dim1", [ `order_equal_to 2 ], any_shape (Maths.max_2d_dim1 ~keepdim:false) *)
-    ; ( "sum_dim"
+      , any_shape (fun a -> einsum [ a, "kij" ] "kji") )
+    ; "cos", [], any_shape cos
+    ; "sin", [], any_shape sin
+    ; "sqrt", [ `positive ], any_shape sqrt
+    ; "log", [ `positive ], any_shape log
+    ; "exp", [], any_shape exp
+    ; "sigmoid", [], any_shape sigmoid
+    ; "softplus", [], any_shape softplus
+    ; "tanh", [], any_shape tanh
+    ; "relu", [ `positive ], any_shape relu
+    ; ( "sum"
       , []
       , fun shape ->
           let n_dims = List.length shape in
           let keepdim = Random.bool () in
           (* randomly choose the dimensions to be summed over.*)
           let dim =
-            List.(
-              range 0 n_dims |> permute |> sub ~pos:0 ~len:Int.(1 + Random.int n_dims))
+            match Random.bool () with
+            | true ->
+              Some
+                List.(
+                  range 0 n_dims |> permute |> sub ~pos:0 ~len:Int.(1 + Random.int n_dims))
+            | false -> None
           in
-          Maths.sum_dim ~dim ~keepdim )
+          sum ?dim ~keepdim )
     ; ( "slice"
       , [ `order_greater_than 4 ]
       , fun shape ->
@@ -202,17 +195,21 @@ let unary_tests =
             if tmp > dim_length then None else Some tmp
           in
           let step = Int.(1 + Random.int 1) in
-          Maths.slice ~dim ~start ?end_ ~step )
-    ; ( "mean_dim"
+          slice ~dim ~start ?end_ ~step )
+    ; ( "mean"
       , []
       , fun shape ->
           let n_dims = List.length shape in
           let keepdim = Random.bool () in
           let dim =
-            List.(
-              range 0 n_dims |> permute |> sub ~pos:0 ~len:Int.(1 + Random.int n_dims))
+            match Random.bool () with
+            | true ->
+              Some
+                List.(
+                  range 0 n_dims |> permute |> sub ~pos:0 ~len:Int.(1 + Random.int n_dims))
+            | false -> None
           in
-          Maths.mean_dim ~dim ~keepdim )
+          mean ?dim ~keepdim )
     ; ( "transpose"
       , [ `order_greater_than 2 ]
       , fun shape ->
@@ -228,19 +225,24 @@ let unary_tests =
               range 0 n_dims |> permute |> sub ~pos:0 ~len:Int.(1 + Random.int n_dims))
           in
           let keepdim = Random.bool () in
-          Maths.logsumexp ~dim ~keepdim )
+          logsumexp ~dim ~keepdim )
+    ; ( "cholesky"
+      , [ `specified_unary [ 5; 5 ] ]
+      , any_shape (fun x ->
+          let xxt = x *@ transpose x in
+          cholesky xxt) )
+    ; ( "batch_cholesky"
+      , [ `specified_unary [ 3; 5; 5 ] ]
+      , any_shape (fun x ->
+          let xxt = einsum [ x, "ijk"; x, "ilk" ] "ijl" in
+          cholesky xxt) )
     ]
   in
   List.map ~f:test_unary test_list
 
-(*
-   (* each binary test is characterized by a name,
-   a (potentially empty) list of constraints on the input,
-   and a binary math function to be tested *)
-type binary = string * input_constr list * (int list -> Maths.t -> Maths.t -> Maths.t)
-
 (* generate the shape of 2 by 2 matrices where A *@ B is possible. *)
 let random_mult_matrix_shapes () =
+  let open Int in
   let first_dim = 1 + Random.int 3 in
   let second_dim = 1 + Random.int 3 in
   let third_dim = 1 + Random.int 3 in
@@ -250,19 +252,21 @@ let random_mult_matrix_shapes () =
    2. if left is false, the shape of A of shape [m x n x n] and B of shape [m x p x n] or B of shape [m x n]. *)
 
 let random_linsolve_matrix_shapes ~left =
+  let open Int in
   let m = 3 + Random.int 5 in
   let n = 3 + Random.int 5 in
   let p = 3 + Random.int 5 in
   if left then [ m; n; n ], [ m; n; p ] else [ m; n; n ], [ m; p; n ]
 
 let random_linsolve_2d_matrix_shapes () =
+  let open Int in
   let m = 3 + Random.int 5 in
   let n = 3 + Random.int 5 in
   [ m; n; n ], [ m; n ]
 
 (* this is how we test a binary function *)
 (* for simplicity apply same constraint on both tensors. *)
-let test_binary ((name, input_constr, f) : binary) =
+let test_binary ((name, input_constr, f) : (_, _) binary) =
   ( name
   , `Quick
   , fun () ->
@@ -336,7 +340,10 @@ let test_binary ((name, input_constr, f) : binary) =
         (* x and y same shape *)
         let x = generate_tensor ~shape:(fst shape) ~input_constr_list:input_constr in
         let y = generate_tensor ~shape:(snd shape) ~input_constr_list:input_constr in
-        Alcotest.(check @@ rel_tol) name 0.0 (check_grad2 (fun (x, y) -> f x y) x y)) )
+        Alcotest.(check @@ rel_tol)
+          name
+          0.0
+          (check_grad2 (fun (x, y) -> f x y) (of_tensor x) (of_tensor y))) )
 
 let matmul_with_einsum a b = Maths.einsum [ a, "ij"; b, "jk" ] "ik"
 let batch_matmul_with_einsum_33 a b = Maths.einsum [ a, "mij"; b, "mjk" ] "mik"
@@ -345,33 +352,8 @@ let batch_trans_matmul_with_einsum a b = Maths.(einsum [ a, "mij"; b, "mik" ] "m
 let batch_vecmat_with_einsum a b = Maths.(einsum [ a, "mi"; b, "mij" ] "mj")
 let batch_vecmat_trans_with_einsum a b = Maths.(einsum [ a, "mi"; b, "mji" ] "mj")
 
-let linsolve ~left a b =
-  let a_primal = Maths.primal a in
-  let a_device = Tensor.device a_primal in
-  let a_kind = Tensor.type_ a_primal in
-  let n = List.last_exn (Tensor.shape a_primal) in
-  (* improve condition number of a *)
-  let a =
-    Maths.(
-      a
-      + const
-          Tensor.(
-            mul_scalar
-              (eye ~n ~options:(a_kind, a_device))
-              (Scalar.f Float.(1. *. of_int n))))
-  in
-  Maths.linsolve ~left a b
-
-let linsolve_tri ~left ~upper a b =
-  let a =
-    match upper with
-    | false -> Maths.tril a ~diagonal:0
-    | true -> Maths.(btr (tril a ~diagonal:0))
-  in
-  Maths.linsolve_triangular a b ~left ~upper
-
 let binary_tests =
-  let test_list : binary list =
+  let test_list : (_, _) binary list =
     [ "plus", [], any_shape Maths.( + )
     ; "minus", [], any_shape Maths.( - )
     ; "mult", [], any_shape Maths.( * )
@@ -393,46 +375,23 @@ let binary_tests =
     ; ( "batch_vecmat_trans_with_einsum"
       , [ `specified_binary ([ 3; 4 ], [ 3; 8; 4 ]) ]
       , any_shape batch_vecmat_trans_with_einsum )
-    ; "linsolve_2d_left_true", [ `linsolve_2d_left_true ], any_shape (linsolve ~left:true)
-    ; "cholesky_then_linsolve", [ `linsolve_left_true ], any_shape cholesky_then_linsolve
-    ; "linsolve_left_true", [ `linsolve_left_true ], any_shape (linsolve ~left:true)
-    ; "linsolve_left_false", [ `linsolve_left_false ], any_shape (linsolve ~left:false)
-    ; ( "linsolve_tri_left_true_upper_true"
-      , [ `linsolve_left_true ]
-      , any_shape (linsolve_tri ~left:true ~upper:true) )
-    ; ( "linsolve_tri_left_true_upper_false"
-      , [ `linsolve_left_true ]
-      , any_shape (linsolve_tri ~left:true ~upper:false) )
-    ; ( "linsolve_tri_left_false_upper_true"
-      , [ `linsolve_left_false ]
-      , any_shape (linsolve_tri ~left:false ~upper:true) )
-    ; ( "linsolve_tri_left_false_upper_false"
-      , [ `linsolve_left_false ]
-      , any_shape (linsolve_tri ~left:false ~upper:false) )
+      (*; ( "cholesky_then_linsolve"
+      , [ `specified_binary ([ 3; 5; 5 ], [ 3; 5 ]) ]
+      , any_shape (fun x y ->
+          let xxt = einsum [ x, "ijk"; x, "ilk" ] "ijl" in
+          let ell = cholesky xxt in
+          linsolve_triangular ~left:false ~upper:false ell y) )*)
     ; ( "concat"
       , []
-      , fun shape ->
+      , fun shape x y ->
           let n_dims = List.length shape in
           let dim = Random.int n_dims in
-          Maths.concat ~dim )
-    ; ( "conv2d"
-      , [ `order_equal_to 4 ]
-      , fun shape ->
-          let out_channel = List.hd_exn shape in
-          let b = Tensor.zeros ~kind ~device [ out_channel ] in
-          let stride = 1 + Random.int 1 in
-          Maths.conv2d
-            ~padding:(0, 0)
-            ~dilation:(1, 1)
-            ~groups:1
-            ~bias:(b, None)
-            ~stride:(stride, stride) )
+          concat ~dim [ x; y ] )
     ]
   in
   List.map ~f:test_binary test_list
-*)
 
 let _ =
   Alcotest.run
     "Maths tests"
-    [ "Unary operations", unary_tests (*; "Binary operations", binary_tests*) ]
+    [ "Unary operations", unary_tests; "Binary operations", binary_tests ]

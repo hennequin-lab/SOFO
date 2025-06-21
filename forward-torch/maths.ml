@@ -2,8 +2,8 @@ open Base
 open Torch
 
 (*
-   We will systematically work with the assumption that for a primal value of shape [n1; n2; ... ],
-   the associated tangents have one more dimension, corresponding to tangent batch: [K; n1; n2; ... ]
+   For a primal value of shape [n1; n2; ... ], the associated tangents 
+   have one more dimension in front, corresponding to tangent batch: [K; n1; n2; ... ]
 *)
 
 type explicit
@@ -116,6 +116,11 @@ let first_dim x = List.hd_exn (Tensor.shape (to_tensor x))
 let f x = E (C (Tensor.f x))
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
+
+let eye ?device ?kind n =
+  let x = Tensor.zeros ?device ?kind [ n; n ] in
+  let x = Tensor.eye_out ~out:x ~n in
+  E (C x)
 
 let zeros ?device ?kind shape = E (C (Tensor.zeros ?device ?kind shape))
 let ones ?device ?kind ?scale shape = E (C (Tensor.ones ?device ?kind ?scale shape))
@@ -334,39 +339,36 @@ module Ops = struct
     let df ~f:_ ~x:_ ~dx = Tensor.slice_copy ~dim:Int.(dim + 1) ~start ~end_ ~step dx in
     { f; df }
 
-  (* y = sum of x_i, dy = sum of dx_i *)
-  let sum =
-    let f = Tensor.sum in
+  let[@warning "-16"] sum ?(keepdim = false) ?dim =
+    let f =
+      match dim with
+      | None -> Tensor.sum
+      | Some dim ->
+        fun x -> Tensor.(sum_dim_intlist x ~dim:(Some dim) ~keepdim ~dtype:(type_ x))
+    in
     let df ~f:_ ~x ~dx =
-      (* make sure to preserve the batch dimension in dx *)
-      let dim = List.mapi (Tensor.shape x) ~f:(fun i _ -> Int.(i + 1)) in
-      Tensor.(sum_dim_intlist ~keepdim:false ~dtype:(type_ dx) ~dim:(Some dim) dx)
+      let dim, keepdim =
+        match dim with
+        | None -> List.mapi (Tensor.shape x) ~f:(fun i _ -> Int.(i + 1)), false
+        | Some dim -> List.map dim ~f:Int.succ, keepdim
+      in
+      Tensor.(sum_dim_intlist ~keepdim ~dtype:(type_ dx) ~dim:(Some dim) dx)
     in
     { f; df }
 
-  let[@warning "-16"] sum_dim ?(keepdim = false) ~dim =
-    let f x = Tensor.(sum_dim_intlist x ~dim:(Some dim) ~keepdim ~dtype:(type_ x)) in
-    let df ~f:_ ~x:_ ~dx =
-      (* make sure to preserve the batch dimension in dx *)
-      let dim = List.map dim ~f:Int.succ in
-      Tensor.(sum_dim_intlist ~dim:(Some dim) ~keepdim ~dtype:(type_ dx) dx)
+  let[@warning "-16"] mean ?(keepdim = false) ?dim =
+    let f =
+      match dim with
+      | None -> Tensor.mean
+      | Some dim -> fun x -> Tensor.(mean_dim x ~dim:(Some dim) ~keepdim ~dtype:(type_ x))
     in
-    { f; df }
-
-  let mean =
-    let f = Tensor.mean in
     let df ~f:_ ~x ~dx =
-      let dim = List.mapi (Tensor.shape x) ~f:(fun i _ -> Int.(i + 1)) in
-      Tensor.(mean_dim ~keepdim:false ~dtype:(type_ dx) ~dim:(Some dim) dx)
-    in
-    { f; df }
-
-  let[@warning "-16"] mean_dim ?(keepdim = false) ~dim =
-    let f x = Tensor.(mean_dim x ~dim:(Some dim) ~keepdim ~dtype:(type_ x)) in
-    let df ~f:_ ~x:_ ~dx =
-      (* make sure to preserve the batch dimension in dx *)
-      let dim = List.map dim ~f:Int.succ in
-      Tensor.(mean_dim ~dim:(Some dim) ~keepdim ~dtype:(type_ dx) dx)
+      let dim, keepdim =
+        match dim with
+        | None -> List.mapi (Tensor.shape x) ~f:(fun i _ -> Int.(i + 1)), false
+        | Some dim -> List.map dim ~f:Int.succ, keepdim
+      in
+      Tensor.(mean_dim ~keepdim ~dtype:(type_ dx) ~dim:(Some dim) dx)
     in
     { f; df }
 
@@ -457,6 +459,53 @@ module Ops = struct
   let einsum operands return =
     let equation = String.concat ~sep:"," (List.map ~f:snd operands) ^ "->" ^ return in
     Tensor.einsum ~equation (List.map ~f:fst operands) ~path:None
+
+  let cholesky =
+    let open Tensor in
+    let f x = linalg_cholesky ~upper:false x in
+    let df ~f:y ~x:_ ~dx =
+      let yt =
+        let dim0, dim1 =
+          let n = List.length (shape y) in
+          assert (Int.(n <= 3));
+          Int.(n - 2, n - 1)
+        in
+        transpose y ~dim0 ~dim1
+      in
+      let solve = linalg_solve_triangular ~unitriangular:false in
+      (* compute L^(-1) dx by solving L z = dx *)
+      let tmp = solve y ~b:dx ~upper:false ~left:true in
+      (* compute tmp L^(-T) by A L^T = TMP *)
+      let tmp = solve yt ~b:tmp ~upper:true ~left:false in
+      (* take the lower triangular part and halve the diagonal *)
+      let tmp = Tensor.tril_ ~diagonal:0 tmp in
+      let dim1, dim2 =
+        match Tensor.shape tmp with
+        | [ _; a; b ] when Int.(a = b) -> 1, 2
+        | [ _; _; a; b ] when Int.(a = b) -> 2, 3
+        | _ -> assert false
+      in
+      let _ = mul_scalar_ (diagonal tmp ~offset:0 ~dim1 ~dim2) (Scalar.f 0.5) in
+      matmul (tril ~diagonal:0 y) tmp
+    in
+    { f; df }
+
+  let[@warning "-16"] linsolve_triangular ?(left = true) ?(upper = false) =
+    let unitriangular = false in
+    let f a b = Tensor.linalg_solve_triangular a ~b ~upper ~left ~unitriangular in
+    let dfx ~f:x ~x:a ~y:_ ~dx:da =
+      let dz = Tensor.(neg_ (if left then matmul da x else matmul x da)) in
+      Tensor.linalg_solve_triangular a ~b:dz ~upper ~left ~unitriangular
+    in
+    let dfy ~f:_ ~x:a ~y:_ ~dy:db =
+      let dz = db in
+      Tensor.linalg_solve_triangular a ~b:dz ~upper ~left ~unitriangular
+    in
+    let dfxy ~f:x ~x:a ~y:_ ~dx:da ~dy:db =
+      let dz = Tensor.(db - if left then matmul da x else matmul x da) in
+      Tensor.linalg_solve_triangular a ~b:dz ~upper ~left ~unitriangular
+    in
+    { f; dfx; dfy; dfxy }
 end
 
 (* ----------------------------------------------------
@@ -511,10 +560,8 @@ let relu x = make_unary Ops.relu x
 let sigmoid x = make_unary Ops.sigmoid x
 let softplus x = make_unary Ops.softplus x
 let slice ?start ?end_ ?step ~dim = make_unary Ops.(slice ?start ?end_ ?step ~dim)
-let mean x = make_unary Ops.mean x
-let sum x = make_unary Ops.sum x
-let sum_dim ?keepdim ~dim = make_unary (Ops.sum_dim ?keepdim ~dim)
-let mean_dim ?keepdim ~dim = make_unary (Ops.mean_dim ?keepdim ~dim)
+let mean ?keepdim ?dim x = make_unary (Ops.mean ?keepdim ?dim) x
+let sum ?keepdim ?dim x = make_unary (Ops.sum ?keepdim ?dim) x
 let logsumexp ?keepdim ~dim = make_unary (Ops.logsumexp ?keepdim ~dim)
 let ( + ) x = make_binary Ops.( + ) x
 let ( - ) x = make_binary Ops.( - ) x
@@ -584,6 +631,11 @@ let concat ~dim x_list =
     let dy = Tensor.concat dx_list ~dim:Int.(dim + 1) in
     E (D (y, Explicit dy)))
 
+let cholesky x = make_unary Ops.cholesky x
+
+let linsolve_triangular ?left ?upper x =
+  make_binary (Ops.linsolve_triangular ?left ?upper) x
+
 (* ----------------------------------------------------
    -- Operations on [`const] t 
    ---------------------------------------------------- *)
@@ -629,10 +681,8 @@ module C = struct
   let softplus = make_unary Ops.softplus
   let sign = direct_unary Tensor.sign
   let slice ?start ?end_ ?step ~dim = make_unary Ops.(slice ?start ?end_ ?step ~dim)
-  let sum = make_unary Ops.sum
-  let mean = make_unary Ops.mean
-  let sum_dim ?keepdim ~dim = make_unary (Ops.sum_dim ?keepdim ~dim)
-  let mean_dim ?keepdim ~dim = make_unary (Ops.mean_dim ?keepdim ~dim)
+  let sum ?keepdim ?dim = make_unary (Ops.sum ?keepdim ?dim)
+  let mean ?keepdim ?dim = make_unary (Ops.mean ?keepdim ?dim)
   let logsumexp ?keepdim ~dim = make_unary (Ops.logsumexp ?keepdim ~dim)
   let ( + ) = make_binary Ops.( + )
   let ( - ) = make_binary Ops.( - )
@@ -686,4 +736,9 @@ module C = struct
       let q, r = Tensor.linalg_qr ~a:x ~mode:"complete" in
       of_tensor q, of_tensor r
     | _ -> raise Not_const
+
+  let cholesky x = make_unary Ops.cholesky x
+
+  let linsolve_triangular ?left ?upper x =
+    make_binary (Ops.linsolve_triangular ?left ?upper) x
 end
