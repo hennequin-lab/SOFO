@@ -22,7 +22,7 @@ def jmp(f, W, M, has_aux=False):
             If has_aux is True:
                 A tuple (output, jvp_output), where output is f(W) and jvp_output is the batched JVP result.
     """    
-    _jvp = lambda s: jax.jvp(f, (W,), (s,), has_aux)
+    _jvp = lambda s: jax.jvp(f, (W,), (s,), has_aux=has_aux)
     return jax.vmap(_jvp)(M)
 
 def jmp_pair(f, W, M, has_aux=False):
@@ -44,7 +44,7 @@ def jmp_pair(f, W, M, has_aux=False):
             Tuple[jnp.ndarray, Any]: A tuple containing (output, auxiliary data).
     """
     M_1, M_2 = M
-    _jvp = lambda M_1, M_2: jax.jvp(f, W, (M_1, M_2), has_aux)
+    _jvp = lambda M_1, M_2: jax.jvp(f, W, (M_1, M_2), has_aux=has_aux)
     return jax.vmap(_jvp)(M_1, M_2)
 
 

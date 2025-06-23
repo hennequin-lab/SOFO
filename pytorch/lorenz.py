@@ -40,30 +40,24 @@ def safe_norm(x, axis):
     return x/norm
 
 # --- Model ---
-class GRUCell(nn.Module):
+class RNNCell(nn.Module):
     def __init__(self, input_dim, hidden_dim, activation_fn=F.relu):
         super().__init__()
         self.input_dim = input_dim
         self.hidden = hidden_dim
         self.activation_fn = activation_fn
 
-        # Equivalent to Flax parameters
-        self.bias = nn.Parameter(torch.zeros(input_dim))
-
-        self.Wl = nn.Linear(input_dim, input_dim, bias=False)      # Linear term
-        self.Wh = nn.Linear(hidden_dim, input_dim, bias=False)   # Hidden transform
-        self.C = nn.Linear(input_dim, hidden_dim, bias=False)    # Expansion (acts like "C" in your code)
-
-        #self.Wout = nn.Linear(input_dim, input_dim, bias=False)    # Readout
-
+        self.c = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.w = nn.Linear(hidden_dim, input_dim, bias=False)
+        self.a = nn.Linear(input_dim, input_dim, bias=False)
+        self.b = nn.Parameter(torch.zeros(hidden_dim))
+    
     def forward(self, h, inputs):
-        # Equivalent to new_h = h @ Wl + activation(h @ C) @ Wh + bias
-        linear_part = self.Wl(h)  # h @ Wl
-        hidden_input = self.activation_fn(self.C(h))  # h @ C → act
-        hidden_part = self.Wh(hidden_input)  # (h @ C) @ Wh
-        new_h = linear_part + hidden_part + self.bias
-
-        #out = self.Wout(self.activation_fn(new_h))
+        # new_y = (h @ a) + (activation((h @c) + bias) @ w)
+        linear_part = self.c(h) + self.b
+        hidden_input = self.activation_fn(linear_part)
+        hidden_part = self.w(hidden_input)
+        new_h = self.a(h) + hidden_part
         return (new_h, new_h), new_h
 
     
@@ -85,27 +79,22 @@ def main():
     input_dim = 3
     hidden_dim = 400
     sigma = 0.0125
-    n_steps = 51
-    n_trials = 400
+    n_steps = 33
+    n_trials = 500
     n_test = 100
     tangent_size = 128
     damping = 1e-5
-    learning_rate = 0.3
+    learning_rate = 0.01
     num_iterations = 3000
     k = 30
     eval_freq = 200
 
-    ### load data
-    if os.path.exists("trajs.npy"):
-        bouts = np.load("trajs.npy")
-    else:
-        bouts = generate_from_long(n_steps, n_trials + n_test)
-        np.save("trajs.npy", bouts)
+    ## Generate data
+    bouts = generate_from_long(n_steps, n_trials + n_test)
     # normalize
     bouts = bouts.reshape(-1,3)
     bouts = (bouts - np.mean(bouts, axis=0)) / np.sqrt(np.var(bouts, axis=0))
-    bouts = bouts.reshape(-1, n_steps, 3)
-    
+    bouts = bouts.reshape(-1, n_steps, 3)    
     # add noise
     noise_bouts = bouts + np.random.randn(*bouts.shape) * sigma
 
@@ -125,7 +114,7 @@ def main():
     batches = data_stream()
     test_x, test_trajs = torch.from_numpy(test_x).float().to(device), torch.from_numpy(test_trajs).float().to(device)
 
-    model = GRUCell(input_dim=input_dim, hidden_dim=hidden_dim).to(device)
+    model = RNNCell(input_dim=input_dim, hidden_dim=hidden_dim).to(device)
     init_params = get_param_dict(model)
     def rnn(params, latent, inputs):
         return functional_call(model, params, (latent, inputs))
@@ -190,7 +179,7 @@ def main():
                 print(f"Iter {i}, Test Loss: {test_loss:.4f}, R²@{k}: {test_r2:.4f}")
 
             training_log.append([i, loss.item(), test_loss.item(), test_r2])
-            np.savez(f"logs/lorenz/sofo_{tangent_size}.npz", np.asarray(training_log))
+            np.savez(f"sofo_{tangent_size}.npz", np.asarray(training_log))
 
 if __name__ == "__main__":
     main()
