@@ -249,7 +249,9 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
         W.P.map against ~f:(fun v ->
           Tensor.slice v ~dim:0 ~start:(Some k) ~end_:(Some (k + 1)) ~step:1))
     in
-    List.fold against_lst ~init:vs ~f:orthogonalize_single
+    List.fold against_lst ~init:vs ~f:(fun accu against ->
+      Stdlib.Gc.major ();
+      orthogonalize_single accu against)
 
   let gen_theta_from_seed ~base ~rank_one ~n_tangents theta seed =
     Torch_core.Wrapper.manual_seed seed;
@@ -280,11 +282,14 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
             Tensor.slice v ~dim:0 ~start:(Some k) ~end_:(Some (k + 1)) ~step:1))
       in
       (* orthogonalise vs against each tangent in against_lst *)
-      let accu_new = List.fold against_lst ~init:accu ~f:orthogonalize_single in
+      let accu_new =
+        List.fold against_lst ~init:accu ~f:(fun accu against ->
+          Stdlib.Gc.major ();
+          orthogonalize_single accu against)
+      in
       accu_new)
 
   let gen_theta_from_seed ~base ~rank_one ~n_tangents theta seed =
-    (* let v = *)
     Torch_core.Wrapper.manual_seed seed;
     W.P.map theta ~f:(function
       | Prms.Const x ->
