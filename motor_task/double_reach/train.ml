@@ -301,7 +301,7 @@ end
    ----------------------------------------- *)
 
 
-let max_iter = 10000 
+let max_iter = 5000 
 
 module Run (X : sig
     module O :
@@ -430,11 +430,12 @@ module With_standard = struct
     in
     Optimizer.Config.SOFO.
       { base = Arm.base
-      ; learning_rate = Some 0.3
+      ; learning_rate = Some 0.05
       ; rank_one = false
       ; n_tangents = _K
       ; damping = Some 1e-5
-      ; aux = Some aux
+      ; aux = None
+      ; orthogonalize = true
       }
 
   let init = O.init (R.init ~base ~n_input_channels)

@@ -13,8 +13,10 @@ let batch_size = 32
 let _ =
   Random.init 1999;
   (* Random.self_init (); *)
-  Owl_stats_prng.init (Random.int 100000);
-  Torch_core.Wrapper.manual_seed (Random.int 100000)
+  (* Owl_stats_prng.init (Random.int 100000);
+  Torch_core.Wrapper.manual_seed (Random.int 100000) *)
+  Owl_stats_prng.init 2000;
+  Torch_core.Wrapper.manual_seed 2000
 
 let in_dir = Cmdargs.in_dir "-d"
 let base = Optimizer.Config.Base.default

@@ -20,7 +20,7 @@ let base =
 (* batch size. *)
 let bs = 32
 let in_dir = Cmdargs.in_dir "-d"
-let data_dir = Cmdargs.in_dir "-data"
+let data_folder = Option.value (Cmdargs.get_string "-data") ~default:"DH1"
 
 (* -----------------------------------------
    --- Utility Functions ---
@@ -76,7 +76,7 @@ let sqrt_precision_of_log_var log_var = Maths.(exp (f (-0.5) * log_var))
    -- Data Read In ---
    ----------------------------------------- *)
 let load_npy_data hvs_folder =
-  let folder_path = data_dir ("hvs_npy/" ^ hvs_folder) in
+  let folder_path = "_data/hvs_npy/" ^ hvs_folder in
   (* get array of .npy files, each contains a mat of shape [T x n_channels] *)
   let files = Stdlib.Sys.readdir folder_path |> List.of_array in
   let npy_files = List.filter ~f:(fun f -> Stdlib.Filename.check_suffix f ".npy") files in
@@ -87,7 +87,7 @@ let load_npy_data hvs_folder =
   List.map ~f:(fun path -> Owl.Dense.Ndarray.S.load_npy path) full_paths
 
 (* array of [T x n_channels] files. *)
-let data_raw = load_npy_data "DH1"
+let data_raw = load_npy_data data_folder
 
 let chunking ~tmax mat =
   let shape = Owl.Dense.Ndarray.D.shape mat in
@@ -157,6 +157,7 @@ module PP = struct
     ; _b : 'a
     ; _b_0 : 'a (* b at time step 0 has same dimension as state *)
     ; _c : 'a
+    ; _d : 'a (* o ~ N(cx + d, log_obs_var^{-1/2}) *)
     ; _log_obs_var : 'a (* log of covariance of emission noise *)
     ; _log_scaling_factor : 'a
     }
@@ -188,7 +189,8 @@ module LGS = struct
           List.mapi o_list_tmp ~f:(fun i o ->
             let _cx =
               Maths.(
-                neg (einsum [ const o, "mb"; _obs_var_inv, "b"; theta._c, "cb" ] "mc"))
+                einsum [ theta._d, "mb"; _obs_var_inv, "b"; theta._c, "cb" ] "mc"
+                - einsum [ const o, "mb"; _obs_var_inv, "b"; theta._c, "cb" ] "mc")
             in
             Lds_data.Temp.
               { _f = None
@@ -215,13 +217,13 @@ module LGS = struct
             Maths.(
               tmp_einsum x _Fx_prod + tmp_einsum u (if i = 0 then _b_0_true else _b_true))
           in
-          let new_y = tmp_einsum new_x theta._c in
+          let new_y = Maths.(tmp_einsum new_x theta._c + theta._d) in
           new_x, new_y :: y_list)
     in
     List.rev y_list_rev
 
   (* approximate kalman filtered distribution of u *)
-  let sample_and_kl ~_Fx ~_Fu ~_Fu_0 ~_c ~obs_precision ~scaling_factor ustars o_list =
+  let sample_and_kl ~_Fx ~_Fu ~_Fu_0 ~_c ~_d ~obs_precision ~scaling_factor ustars o_list =
     let open Maths in
     let o_list = List.map ~f:Maths.const o_list in
     let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> Maths.const in
@@ -236,6 +238,7 @@ module LGS = struct
       let tmp = scaling_factor * ones_u |> reshape ~shape:[ 1; -1 ] in
       (eye_m + einsum [ btrinv, "io"; _c, "jo"; _Fu, "kj" ] "ik" |> cholesky) * tmp
     in
+    (* ustars go from 0 to T-1 and o goes from 1 to T *)
     let ustars_o_list = List.map2_exn ustars o_list ~f:(fun u o -> u, o) in
     let _, kl, us =
       List.foldi
@@ -247,7 +250,7 @@ module LGS = struct
           let precision_chol = if i = 0 then precision_chol_0 else precision_chol in
           let btrinv = if i = 0 then btrinv_0 else btrinv in
           let zpred = (z *@ _Fx) + (ustar *@ _Fu) in
-          let ypred = zpred *@ _c in
+          let ypred = (zpred *@ _c) + _d in
           let delta = o - ypred in
           (* posterior mean of filtered u *)
           let mu =
@@ -298,6 +301,7 @@ module LGS = struct
         ~_Fu:_b_true
         ~_Fu_0:_b_0_true
         ~_c:theta._c
+        ~_d:theta._d
         ~obs_precision
         ~scaling_factor
         ustars
@@ -365,6 +369,7 @@ module LGS = struct
           f Float.(1. /. sqrt (of_int n))
           * randn ~device:base.device ~kind:base.kind [ n; o ])
     in
+    let _d = Prms.free Tensor.(randn ~device:base.device ~kind:base.kind [ 1; o ]) in
     let _log_obs_var =
       Tensor.(log (f Float.(square 1.) * ones ~device:base.device ~kind:base.kind [ 1 ]))
       |> Prms.free
@@ -374,7 +379,7 @@ module LGS = struct
         ~above:(Tensor.f 0.1)
         Tensor.(log (ones [ 1 ] ~device:base.device ~kind:base.kind))
     in
-    { _a; _b; _b_0; _c; _log_obs_var; _log_scaling_factor }
+    { _a; _b; _b_0; _c; _d; _log_obs_var; _log_scaling_factor }
 end
 
 (* ------------------------------------------------
@@ -383,6 +388,7 @@ end
 type param_name =
   | A
   | C
+  | D
   | Log_obs_var
   | Log_scaling_factor
 [@@deriving compare]
@@ -391,13 +397,19 @@ let _K = 128
 let param_names_list = [ A; C; Log_obs_var; Log_scaling_factor ]
 let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
 let n_params_a = 60
-let n_params_c = Int.(_K - 2 - n_params_a)
+let n_params_d = 10
+let n_params_c = Int.(_K - 2 - n_params_a - n_params_d)
 let n_params_log_obs_var = 1
 let n_params_log_scaling_factor = 1
 let cycle = true
 
 let n_params_list =
-  [ n_params_a; n_params_c; n_params_log_obs_var; n_params_log_scaling_factor ]
+  [ n_params_a
+  ; n_params_c
+  ; n_params_d
+  ; n_params_log_obs_var
+  ; n_params_log_scaling_factor
+  ]
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -406,6 +418,8 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       ; a_right : 'a
       ; c_left : 'a
       ; c_right : 'a
+      ; d_left : 'a
+      ; d_right : 'a
       ; log_obs_var_left : 'a
       ; log_obs_var_right : 'a
       ; log_scaling_factor_left : 'a
@@ -431,6 +445,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     match param_name with
     | A -> [ n; n ]
     | C -> [ n; o ]
+    | D -> [ 1; o ]
     | Log_obs_var -> [ 1 ]
     | Log_scaling_factor -> [ 1 ]
 
@@ -438,6 +453,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     match param_name with
     | A -> n_params_a
     | C -> n_params_c
+    | D -> n_params_d
     | Log_obs_var -> n_params_log_obs_var
     | Log_scaling_factor -> n_params_log_scaling_factor
 
@@ -451,8 +467,9 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       match param_name with
       | A -> 0
       | C -> 1
-      | Log_obs_var -> 2
-      | Log_scaling_factor -> 3
+      | D -> 2
+      | Log_obs_var -> 3
+      | Log_scaling_factor -> 4
     in
     List.nth_exn n_params_prefix_suffix_sums param_idx
 
@@ -468,6 +485,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       Tensor.zeros [ _K; n; n ] ~device:base.device ~kind:base.kind |> Maths.const
     in
     let _c = einsum [ lambda.c_left, "in"; v._c, "aij"; lambda.c_right, "jm" ] "anm" in
+    let _d = einsum [ lambda.d_left, "in"; v._d, "aij"; lambda.d_right, "jm" ] "anm" in
     let _log_obs_var =
       einsum
         [ lambda.log_obs_var_left, "in"
@@ -486,22 +504,24 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
         "anm"
       |> reshape ~shape:[ -1; 1 ]
     in
-    { _a; _b; _b_0; _c; _log_obs_var; _log_scaling_factor }
+    { _a; _b; _b_0; _c; _d; _log_obs_var; _log_scaling_factor }
 
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~param_name ~n_per_param v =
     let _a = zero_params ~shape:(get_shapes A) n_per_param in
     let _c = zero_params ~shape:(get_shapes C) n_per_param in
+    let _d = zero_params ~shape:(get_shapes D) n_per_param in
     let _log_obs_var = zero_params ~shape:(get_shapes Log_obs_var) n_per_param in
     let _log_scaling_factor =
       zero_params ~shape:(get_shapes Log_scaling_factor) n_per_param
     in
     let _b = zero_params ~shape:[ m; n ] n_per_param in
     let _b_0 = zero_params ~shape:[ n; n ] n_per_param in
-    let params_tmp = PP.{ _a; _b; _b_0; _c; _log_obs_var; _log_scaling_factor } in
+    let params_tmp = PP.{ _a; _b; _b_0; _c; _d; _log_obs_var; _log_scaling_factor } in
     match param_name with
     | A -> { params_tmp with _a = v }
     | C -> { params_tmp with _c = v }
+    | D -> { params_tmp with _d = v }
     | Log_obs_var -> { params_tmp with _log_obs_var = v }
     | Log_scaling_factor -> { params_tmp with _log_scaling_factor = v }
 
@@ -517,6 +537,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     { _a = random_localised_param_name A
     ; _c = random_localised_param_name C
+    ; _d = random_localised_param_name D
     ; _log_obs_var = random_localised_param_name Log_obs_var
     ; _log_scaling_factor = random_localised_param_name Log_scaling_factor
     ; _b = zero_params ~shape:[ m; n ] _K
@@ -529,6 +550,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       match param_name with
       | A -> lambda.a_left, lambda.a_right
       | C -> lambda.c_left, lambda.c_right
+      | D -> lambda.d_left, lambda.d_right
       | Log_obs_var -> lambda.log_obs_var_left, lambda.log_obs_var_right
       | Log_scaling_factor ->
         lambda.log_scaling_factor_left, lambda.log_scaling_factor_right
@@ -619,6 +641,8 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     ; a_right = init_eye n
     ; c_left = init_eye n
     ; c_right = init_eye o
+    ; d_left = init_eye 1
+    ; d_right = init_eye o
     ; log_obs_var_left = init_eye 1
     ; log_obs_var_right = init_eye 1
     ; log_scaling_factor_left = init_eye 1
@@ -702,9 +726,9 @@ module Do_with_SOFO : Do_with_T = struct
           config =
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-2; eps = 1e-8 }
-        ; steps = 10
-        ; learn_steps = 50
-        ; exploit_steps = 50
+        ; steps = 50
+        ; learn_steps = 100
+        ; exploit_steps = 100
         }
     in
     Optimizer.Config.SOFO.
@@ -713,7 +737,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-3
-      ; aux = Some aux
+      ; aux = None
       ; orthogonalize = false
       }
 
@@ -748,3 +772,7 @@ let _ =
     | _ -> failwith "-m [sofo | fgd | adam]"
   in
   optimise max_iter
+
+(* let _ =
+  let adam_params = LGS.P.T.load ~device:base.device (in_dir "adam_params") in
+  LGS.P.T.save_npy adam_params ~kind:base.ba_kind ~out:(in_dir "adam_params") *)
