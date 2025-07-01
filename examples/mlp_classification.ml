@@ -21,12 +21,7 @@ let cifar =
   | Some "cifar" -> true
   | _ -> failwith "-dataset [mnist | cifar]"
 
-let tan_from_act =
-  match Cmdargs.(get_bool "-tan_from_act") with
-  | Some true -> true
-  | Some false -> false
-  | _ -> failwith "-tan_from_act [true | false]"
-
+let tan_from_act = Option.value (Cmdargs.get_bool "-tan_from_act") ~default:false
 let output_dim = 10
 let batch_size = 256
 let n_tangents = batch_size

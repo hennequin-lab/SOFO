@@ -145,7 +145,7 @@ let rec iter ~f_name ~config ~t ~state running_avg =
         save_txt
           ~append:true
           ~out:(in_dir f_name)
-          (of_array [| epoch_of t; loss_avg |] 1 3));
+          (of_array [| epoch_of t; loss_avg |] 1 2));
       [])
     else running_avg
   in
@@ -154,6 +154,6 @@ let rec iter ~f_name ~config ~t ~state running_avg =
 
 (* Start the loop. *)
 let _ =
-  let f_name = "lorenz" in
-  Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore;
+  let f_name = "sofo" in
+  (* Bos.Cmd.(v "rm" % "-f" % in_dir f_name) |> Bos.OS.Cmd.run |> ignore; *)
   iter ~f_name ~config ~t:0 ~state:(O.init ~config RNN.(init ~d ~dh)) []
