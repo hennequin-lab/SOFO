@@ -25,6 +25,7 @@ let tan_from_act = Option.value (Cmdargs.get_bool "-tan_from_act") ~default:fals
 let output_dim = 10
 let batch_size = 256
 let n_tangents = batch_size
+let k = Int.(batch_size)
 let input_size = if cifar then Int.(32 * 32 * 3) else Int.(28 * 28)
 let full_batch_size = 60_000
 let layer_sizes = [| 128; output_dim |]
@@ -54,12 +55,23 @@ module MLP = struct
   type input = Tensor.t
 
   (* for w of shape [n_in, n_out], dw_i = eps_i activation_i *)
-  let sample_rand_tensor_activation ~param_shape ~activation =
+  let sample_rand_tensor_activation ~k ~param_shape ~activation =
     let n_out = List.last_exn param_shape in
-    let bs = List.hd_exn (Tensor.shape activation) in
-    (* eps of shape [n_out x bs], activation of shape [bs x n_in] *)
-    let eps = Tensor.randn ~device:base.device ~kind:base.kind [ n_out; bs ] in
-    Tensor.einsum ~path:None [ eps; activation ] ~equation:"ob,bi->bio"
+    (* eps of shape [n_out x k], activation of shape [k x n_in] *)
+    let eps = Tensor.randn ~device:base.device ~kind:base.kind [ n_out; k ] in
+    let activation_sliced =
+      Tensor.slice ~dim:0 ~start:(Some 0) ~end_:(Some (k )) ~step:1 activation
+    in
+    let from_act =
+      Tensor.einsum ~path:None [ eps; activation_sliced ] ~equation:"ob,bi->bio"
+    in
+    if k < n_tangents
+    then (
+      let from_gauss =
+        Tensor.randn ~device:base.device ~kind:base.kind ((n_tangents - k) :: param_shape)
+      in
+      Tensor.concat [ from_act; from_gauss ] ~dim:0)
+    else from_act
 
   let f ~(theta : P.M.t) ~(input : input) =
     Array.foldi theta ~init:(Maths.const input) ~f:(fun i accu wb ->
@@ -68,6 +80,7 @@ module MLP = struct
       then (
         let new_tangents_w =
           sample_rand_tensor_activation
+            ~k
             ~param_shape:(Maths.shape wb.w)
             ~activation:(Maths.primal accu)
         in
@@ -273,7 +286,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.1
+      ; learning_rate = Some 0.05
       ; n_tangents
       ; rank_one = false
       ; damping = Some 1e-3
