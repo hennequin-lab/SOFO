@@ -79,7 +79,31 @@ module SOFO (W : Wrapper.T) = struct
   let init ~(config : ('a, 'b) config) theta =
     { theta; g_avg = None; beta_t = Option.map config.momentum ~f:(fun _ -> 1.) }
 
-  (* initialise tangents, where each tangent is normalised. *)
+  let orthonormalizer vs =
+    let vtv =
+      W.P.fold vs ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
+        let n_tangents = Convenience.first_dim v in
+        let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
+        Tensor.(accu + einsum ~equation:"ij,kj->ik" ~path:None [ v; v ]))
+    in
+    let u, s, _ = Tensor.svd ~some:true ~compute_uv:true vtv in
+    Tensor.(u / sqrt s |> transpose ~dim0:0 ~dim1:1)
+
+  (* orthogonalise vs *)
+  let orthonormalize ~orthonormalizer vs =
+    W.P.map vs ~f:(fun v ->
+      let n_tangents = Convenience.first_dim v in
+      let s = Tensor.shape v in
+      let v = Tensor.reshape v ~shape:[ n_tangents; -1 ] in
+      let v = Tensor.(matmul orthonormalizer v) in
+      Tensor.reshape v ~shape:s)
+
+  let orthonormalize_vs vs =
+    let orthonormalizer = orthonormalizer vs in
+    orthonormalize ~orthonormalizer vs
+
+  (* initialise tangents, where each tangent is normalised. 
+    [activations] is of same type as theta but Tensor.t *)
   let init_tangents ~base ~rank_one ~n_tangents theta =
     let vs =
       W.P.map theta ~f:(function
@@ -93,35 +117,16 @@ module SOFO (W : Wrapper.T) = struct
         | Prms.Bounded (x, _, _) ->
           sample_rand_tensor ~base ~rank_one ~shape:(n_tangents :: Tensor.shape x))
     in
-    (* normalise each tangent *)
-    let normalize vs =
-      let normalizer =
-        W.P.fold vs ~init:(Tensor.f 0.) ~f:(fun accu (v, _) ->
-          Tensor.(accu + Convenience.sum_except_dim0 (square v)))
-        |> Tensor.sqrt_
-        |> Tensor.reciprocal_
-      in
-      let normed_vs =
-        W.P.map vs ~f:(fun v ->
-          (* reshape normalizer from [n_tangents] to [n_tangents, 1, ...] with same shape as v. *)
-          let normalizer =
-            Tensor.view
-              normalizer
-              ~size:(List.mapi (Tensor.size v) ~f:(fun i si -> if i = 0 then si else 1))
-          in
-          Maths.Direct Tensor.(v * normalizer))
-      in
-      normed_vs
-    in
-    normalize vs
+    (* orthonormalise tangents against each other *)
+    orthonormalize_vs vs
 
   (* fold vs over sets of v_i s, multiply with associated weights. *)
   let weighted_vs_sum vs ~weights =
     W.P.map vs ~f:(fun v ->
-      let v_i = Maths.tangent' v in
-      let[@warning "-8"] (n_samples :: s) = Tensor.shape v_i in
+      (* let v_i = Maths.tangent' v in *)
+      let[@warning "-8"] (n_samples :: s) = Tensor.shape v in
       let n_ws = Convenience.first_dim weights in
-      let v_i = Tensor.view v_i ~size:[ n_samples; -1 ] in
+      let v_i = Tensor.view v ~size:[ n_samples; -1 ] in
       let s = if n_ws = 1 then s else n_ws :: s in
       Tensor.(view (matmul weights v_i) ~size:s))
 
@@ -159,14 +164,30 @@ module SOFO (W : Wrapper.T) = struct
     in
     (* initialise tangents *)
     let theta = params state in
-    let vs =
-      init_tangents
-        ~base:config.base
-        ~rank_one:config.rank_one
-        ~n_tangents:config.n_tangents
-        theta
+    (* during the forward pass, if [tan_from_act], leave tangents as empty, else set the tangents randomly *)
+    let theta_dual =
+      if config.tan_from_act
+      then
+        W.P.map theta ~f:(fun x ->
+          let d = Maths.Deferred.empty () in
+          match x with
+          | Const x -> x, None
+          | Free x | Bounded (x, _, _) -> x, Some (Maths.Deferred d))
+      else (
+        let vs_random =
+          init_tangents
+            ~base:config.base
+            ~rank_one:config.rank_one
+            ~n_tangents:config.n_tangents
+            theta
+        in
+        W.P.map2 theta vs_random ~f:(fun x t ->
+          let d = Maths.Deferred.empty () in
+          Maths.Deferred.set_exn d t;
+          match x with
+          | Const x -> x, None
+          | Free x | Bounded (x, _, _) -> x, Some (Maths.Deferred d)))
     in
-    let theta_dual = W.P.make_dual theta ~t:vs in
     (* define update function *)
     let update = `loss_and_ggn update_each_step in
     (* initialise losses and ggn *)
@@ -176,8 +197,6 @@ module SOFO (W : Wrapper.T) = struct
     (* compute loss and vtg *)
     let batch_size = final_losses |> Maths.primal |> Convenience.first_dim in
     let loss = final_losses |> Maths.primal |> Tensor.mean |> Tensor.to_float0_exn in
-    (* normalise ggn by batch size *)
-    let final_ggn = Tensor.div_scalar_ final_ggn (Scalar.f Float.(of_int batch_size)) in
     let loss_tangents = final_losses |> Maths.tangent |> Option.value_exn in
     let vtg =
       Tensor.(
@@ -188,7 +207,38 @@ module SOFO (W : Wrapper.T) = struct
           ~keepdim:true)
     in
     (* compute natural gradient and update theta *)
-    let natural_g = natural_g ?damping:config.damping ~vs ~ggn:final_ggn vtg in
+    let natural_g =
+      let ggn_scaled =
+        Tensor.div_scalar_ final_ggn (Scalar.f Float.(of_int batch_size))
+      in
+      let vs_actual_tensors =
+        W.P.map theta_dual ~f:(fun x ->
+          match x with
+          | _, Some tangent -> Maths.tangent' tangent
+          | _ -> assert false)
+      in
+      let vs, ggn, vtg =
+        if config.tan_from_act
+        then (
+          (* orthonormalize if tangents drawn from activations *)
+          let vs_orthonormalizer = orthonormalizer vs_actual_tensors in
+          let vs_actual_orthonormalized =
+            orthonormalize ~orthonormalizer:vs_orthonormalizer vs_actual_tensors
+          in
+          let final_vtg = Tensor.(matmul vs_orthonormalizer vtg) in
+          let final_ggn =
+            Tensor.(
+              einsum
+                ~equation:"ab,bc,dc->ad"
+                [ vs_orthonormalizer; ggn_scaled; vs_orthonormalizer ]
+                ~path:None)
+          in
+          vs_actual_orthonormalized, final_ggn, final_vtg)
+        else vs_actual_tensors, ggn_scaled, vtg
+      in
+      natural_g ?damping:config.damping ~vs ~ggn vtg
+    in
+    Stdlib.Gc.major ();
     let natural_g_avg =
       let module M = Momentum (W.P) in
       M.apply ?momentum:config.momentum ~avg:state.g_avg natural_g

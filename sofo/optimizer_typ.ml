@@ -47,6 +47,7 @@ module Config = struct
       ; rank_one : bool
       ; damping : float option
       ; momentum : float option
+      ; tan_from_act : bool
       }
 
     let default =
@@ -56,6 +57,7 @@ module Config = struct
       ; rank_one = false
       ; damping = None
       ; momentum = None
+      ; tan_from_act = false
       }
   end
 

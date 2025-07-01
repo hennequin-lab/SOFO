@@ -20,6 +20,7 @@ let primal = fst
 let tangent' = function
   | Direct dx -> dx
   | Lazy dx -> dx ()
+  | Deferred dx -> Deferred.get_exn dx
 
 (* get tangent, which is the second element *)
 let tangent (_, t) = Option.map t ~f:tangent'
@@ -52,7 +53,8 @@ let make_dual x ~t = (x, Some t) |> assert_right_shape "make_dual"
 let with_tangent dx ~f =
   Option.map dx ~f:(function
     | Direct dx -> Direct (f dx)
-    | Lazy dx -> Direct (f (dx ())))
+    | Lazy dx -> Direct (f (dx ()))
+    | Deferred dx -> Direct (f (Deferred.get_exn dx)))
 
 let append_batch ~tangent shape =
   let b = List.hd_exn (Tensor.shape tangent) in

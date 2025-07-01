@@ -47,6 +47,8 @@ let config =
     ; rank_one = false
     ; damping = None
     ; momentum = None
+    ; tan_from_act = false
+
     }
 
 (* -----------------------------------------

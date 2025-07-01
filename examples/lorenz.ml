@@ -85,6 +85,7 @@ let config =
     ; rank_one = false
     ; damping = Some 1e-5
     ; momentum = None
+    ; tan_from_act = false
     }
 
 module O = Optimizer.SOFO (FF)

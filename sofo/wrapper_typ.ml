@@ -32,7 +32,7 @@ module type T = sig
   type args
 
   (** Given an update function [update], [data], the initial value of the losses and ggn [init] and [args],
-   return the final losses and ggn. *)
+   return the final losses and (optionally) ggn. *)
   val f
     :  update:
          [ `loss_only of 'a -> Maths.t option -> 'a
