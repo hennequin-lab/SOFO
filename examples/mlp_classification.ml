@@ -55,15 +55,22 @@ module MLP = struct
   type input = Tensor.t
 
   (* for w of shape [n_in, n_out], dw_i = eps_i activation_i *)
-  let sample_rand_tensor_activation ~k ~param_shape ~activation =
+  let sample_rand_tensor_activation ~k ~param_shape ~activation ~next_weight =
     let n_out = List.last_exn param_shape in
-    (* eps of shape [n_out x k], activation of shape [k x n_in] *)
-    let eps = Tensor.randn ~device:base.device ~kind:base.kind [ n_out; k ] in
     let activation_sliced =
-      Tensor.slice ~dim:0 ~start:(Some 0) ~end_:(Some (k )) ~step:1 activation
+      Tensor.slice ~dim:0 ~start:(Some 0) ~end_:(Some k) ~step:1 activation
     in
     let from_act =
-      Tensor.einsum ~path:None [ eps; activation_sliced ] ~equation:"ob,bi->bio"
+      match next_weight with
+      | Some w ->
+        (* eps of shape [n_out_next x k], activation of shape [k x n_in], w of shape [n_out x n_out_next] *)
+        let n_out_next = List.last_exn (Tensor.shape w) in
+        let eps = Tensor.randn ~device:base.device ~kind:base.kind [ n_out_next; k ] in
+        Tensor.einsum ~path:None [ w; eps; activation_sliced ] ~equation:"oa,ab,bi->bio"
+      | None ->
+        (* eps of shape [n_out x k], activation of shape [k x n_in] *)
+        let eps = Tensor.randn ~device:base.device ~kind:base.kind [ n_out; k ] in
+        Tensor.einsum ~path:None [ eps; activation_sliced ] ~equation:"ob,bi->bio"
     in
     if k < n_tangents
     then (
@@ -78,11 +85,19 @@ module MLP = struct
       let open MLP_Layer in
       if tan_from_act
       then (
+        let next_weight =
+          if i >= n_layers - 1
+          then None
+          else (
+            let next_theta = theta.(i + 1) in
+            Some (Maths.primal next_theta.w))
+        in
         let new_tangents_w =
           sample_rand_tensor_activation
             ~k
             ~param_shape:(Maths.shape wb.w)
             ~activation:(Maths.primal accu)
+            ~next_weight
         in
         let new_tangents_b =
           Tensor.randn ~device:base.device ~kind:base.kind (n_tangents :: Maths.shape wb.b)
@@ -286,7 +301,7 @@ module Do_with_SOFO : Do_with_T = struct
   let config =
     Optimizer.Config.SOFO.
       { base
-      ; learning_rate = Some 0.05
+      ; learning_rate = Some 0.1
       ; n_tangents
       ; rank_one = false
       ; damping = Some 1e-3
