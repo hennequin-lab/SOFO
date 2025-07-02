@@ -2,7 +2,7 @@ open Base
 open Torch
 
 (*
-   For a primal value of shape [n1; n2; ... ], the associated tangents 
+   For a primal value of shape [n1; n2; ... ], the associated tangents
    have one more dimension in front, corresponding to tangent batch: [K; n1; n2; ... ]
 *)
 
@@ -162,6 +162,14 @@ module Ops = struct
     let df ~f:_ ~x:_ ~dx =
       let size = batch_dim dx :: size in
       Tensor.view ~size dx
+    in
+    { f; df }
+
+  let broadcast_to ~size =
+    let f = Tensor.broadcast_to ~size in
+    let df ~f:_ ~x:_ ~dx =
+      let size = batch_dim dx :: size in
+      Tensor.broadcast_to ~size dx
     in
     { f; df }
 
@@ -509,7 +517,7 @@ module Ops = struct
 end
 
 (* ----------------------------------------------------
-   -- Generic operations on [< `const | `dual] t 
+   -- Generic operations on [< `const | `dual] t
    ---------------------------------------------------- *)
 
 let make_unary (z : unary_info) =
@@ -542,6 +550,7 @@ let make_binary (z : binary_info) =
   f
 
 let view ~size = make_unary (Ops.view ~size)
+let broadcast_to ~size = make_unary (Ops.broadcast_to ~size)
 let reshape ~shape = make_unary (Ops.reshape ~shape)
 let permute ~dims = make_unary (Ops.permute ~dims)
 let squeeze ~dim = make_unary (Ops.squeeze ~dim)
@@ -637,7 +646,7 @@ let linsolve_triangular ?left ?upper x =
   make_binary (Ops.linsolve_triangular ?left ?upper) x
 
 (* ----------------------------------------------------
-   -- Operations on [`const] t 
+   -- Operations on [`const] t
    ---------------------------------------------------- *)
 
 module C = struct
@@ -662,6 +671,7 @@ module C = struct
     | _ -> raise Not_const
 
   let view ~size = make_unary (Ops.view ~size)
+  let broadcast_to ~size = make_unary (Ops.broadcast_to ~size)
   let reshape ~shape = make_unary (Ops.reshape ~shape)
   let permute ~dims = make_unary (Ops.permute ~dims)
   let squeeze ~dim = make_unary (Ops.squeeze ~dim)

@@ -13,11 +13,16 @@ module type T = sig
   val params : state -> P.param
   val init : ('a, 'b, state) init_opts
   val step : config:('a, 'b) config -> info:info -> state -> state
+
+  val manual_state_update
+    :  state
+    -> (Maths.const Maths.t P.p -> Maths.const Maths.t P.p)
+    -> state
 end
 
 type 'v sofo_info =
-  { loss : [ `const | `dual ] Maths.t
-  ; ggn : [ `const ] Maths.t
+  { loss : Maths.any Maths.t
+  ; ggn : Maths.const Maths.t
   ; tangents : 'v
   }
 
@@ -43,29 +48,11 @@ module Config = struct
       { base : ('a, 'b) Base.t
       ; learning_rate : float option
       ; n_tangents : int
-      ; damping : float option
+      ; damping : [ `none | `relative_from_top of float | `relative_from_bottom of float ]
       }
 
     let default =
-      { base = Base.default; learning_rate = None; n_tangents = 10; damping = None }
-  end
-
-  module FGD = struct
-    type ('a, 'b) t =
-      { base : ('a, 'b) Base.t
-      ; learning_rate : float option
-      ; n_tangents : int
-      ; rank_one : bool
-      ; momentum : float option
-      }
-
-    let default =
-      { base = Base.default
-      ; learning_rate = None
-      ; n_tangents = 10
-      ; rank_one = false
-      ; momentum = None
-      }
+      { base = Base.default; learning_rate = None; n_tangents = 10; damping = `none }
   end
 
   module SGDm = struct

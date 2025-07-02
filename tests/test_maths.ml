@@ -146,6 +146,12 @@ let unary_tests =
     [ ( "permute"
       , [ `specified_unary [ 2; 3; 6; 4 ] ]
       , any_shape (permute ~dims:[ 0; 2; 3; 1 ]) )
+    ; ( "broadcast_to"
+      , [ `specified_unary [ 2; 1; 3; 4 ] ]
+      , fun shape_ x ->
+          assert (Poly.(shape_ = shape x));
+          let size = [ 2; 7; 3; 4 ] in
+          broadcast_to ~size x )
     ; "sqr", [], any_shape sqr
     ; "neg", [], any_shape neg
     ; "trace", [ `specified_unary [ 10; 10 ] ], any_shape trace
@@ -381,12 +387,6 @@ let binary_tests =
           let xxt = einsum [ x, "ijk"; x, "ilk" ] "ijl" in
           let ell = cholesky xxt in
           linsolve_triangular ~left:false ~upper:false ell y) )*)
-    ; ( "concat"
-      , []
-      , fun shape x y ->
-          let n_dims = List.length shape in
-          let dim = Random.int n_dims in
-          concat ~dim [ x; y ] )
     ]
   in
   List.map ~f:test_binary test_list

@@ -4,8 +4,6 @@ open Maths
 open Torch
 include Optimizer_typ
 
-let print s = Stdio.print_endline (Sexp.to_string_hum s)
-
 (* update parameters, respecting any specified bounds *)
 module Update_params (P : Prms.T) = struct
   let update ~learning_rate:eta ~theta delta =
@@ -17,6 +15,15 @@ module Update_params (P : Prms.T) = struct
       | Free x -> Free (update x delta)
       | Bounded { v = x; lb; ub } ->
         Bounded { v = Prms.enforce_bounds ?lb ?ub (update x delta); lb; ub })
+
+  let manual_replace ~theta (theta' : const P.t) =
+    let open Prms in
+    P.map2 theta theta' ~f:(fun theta theta' ->
+      match theta with
+      | Pinned x -> Pinned x
+      | Free _ -> Free (to_tensor theta')
+      | Bounded { v = _; lb; ub } ->
+        Bounded { v = Prms.enforce_bounds ?lb ?ub (to_tensor theta'); lb; ub })
 end
 
 (* apply momentum to anything *)
@@ -79,16 +86,19 @@ module SOFO (P : Prms.T) = struct
       C.(view (reshape weights ~shape:[ 1; -1 ] *@ v_i) ~size:s))
 
   (* calculate natural gradient = V(VtGtGV)^-1 V^t g *)
-  let sofo_update ?damping ~tangents:vs ~ggn vtg =
+  let sofo_update ~damping ~tangents:vs ~ggn vtg =
     let u, s, _ = C.svd ggn in
     (* how each V should be weighted, as a row array *)
     let weights =
       let tmp = C.(transpose u *@ vtg) in
       let s =
         match damping with
-        | None -> s
-        | Some gamma ->
+        | `none -> s
+        | `relative_from_top gamma ->
           let offset = Float.(gamma * Tensor.(maximum (to_tensor s) |> to_float0_exn)) in
+          C.(offset $+ s)
+        | `relative_from_bottom gamma ->
+          let offset = Float.(gamma * Tensor.(minimum (to_tensor s) |> to_float0_exn)) in
           C.(offset $+ s)
       in
       C.(u / s *@ tmp)
@@ -104,10 +114,14 @@ module SOFO (P : Prms.T) = struct
       Stdlib.Gc.major ();
       let loss_t = tangent_exn info.loss in
       let delta =
-        sofo_update ?damping:config.damping ~tangents:info.tangents ~ggn:info.ggn loss_t
+        sofo_update ~damping:config.damping ~tangents:info.tangents ~ggn:info.ggn loss_t
       in
       let new_theta = U.update ~learning_rate:eta ~theta:(params state) delta in
       { theta = new_theta }
+
+  let manual_state_update state f =
+    let p = P.value state.theta in
+    { theta = U.manual_replace ~theta:state.theta (f p) }
 end
 
 module SGDm (P : Prms.T) = struct
@@ -140,6 +154,10 @@ module SGDm (P : Prms.T) = struct
       let eta = Float.(eta / (1. - beta_t)) in
       let new_theta = U.update ~learning_rate:eta ~theta:(params state) g_avg in
       { theta = new_theta; g_avg = Some g_avg; beta_t }
+
+  let manual_state_update state f =
+    let p = P.value state.theta in
+    { state with theta = U.manual_replace ~theta:state.theta (f p) }
 end
 
 module Adam (P : Prms.T) = struct
@@ -182,4 +200,8 @@ module Adam (P : Prms.T) = struct
       let dtheta = P.C.(m_hat / (c.eps $+ v_hat_sqrt)) in
       let new_theta = U.update ~learning_rate:eta ~theta:(params state) dtheta in
       { theta = new_theta; beta1_t; beta2_t; m = Some m; v = Some v }
+
+  let manual_state_update state f =
+    let p = P.value state.theta in
+    { state with theta = U.manual_replace ~theta:state.theta (f p) }
 end
