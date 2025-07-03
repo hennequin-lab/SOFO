@@ -387,19 +387,25 @@ let sample_and_kl ~a ~b ~b_0 ~c ~obs_precision ~scaling_factor ustars o_list =
                   [ bs; (if i = 0 then n else m) ]))
         in
         let u_sample = mu + u_diff_elbo in
+        (* u_final used to propagate dynamics *)
+        let u_final = ustar + u_sample in
         (* propagate that sample to update z *)
         let z = zpred + (u_sample *@ b) in
         (* update the KL divergence *)
         let kl =
           let prior_term =
-            let u_tmp = ustar + u_sample in
-            gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u_tmp
+            gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u_final
           in
           (* sticking the landing idea where gradients w.r.t variational parameters removed. *)
-          let q_term = gaussian_llh_chol ~mu:(detach mu) ~precision_chol:(detach precision_chol) u_sample in
+          let q_term =
+            gaussian_llh_chol
+              ~mu:(detach mu)
+              ~precision_chol:(detach precision_chol)
+              u_sample
+          in
           q_term - prior_term
         in
-        z, kl :: kl_list, (ustar + u_sample) :: us)
+        z, kl :: kl_list, u_final :: us)
   in
   List.rev kl_list, List.rev us
 
@@ -873,7 +879,6 @@ module Do_with_SOFO : Do_with_T = struct
       ; damping = Some 1e-5
       ; aux = Some aux
       ; orthogonalize = false
-
       }
 
   let init = O.init theta

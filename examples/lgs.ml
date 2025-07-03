@@ -338,18 +338,19 @@ module LGS = struct
                     [ Dims.bs; (if i = 0 then Dims.n else Dims.m) ]))
           in
           let u_sample = mu + u_diff_elbo in
+          (* u_final used to propagate dynamics *)
+          let u_final = ustar + u_sample in
           (* propagate that sample to update z *)
           let z = zpred + (u_sample *@ _Fu) in
           (* update the KL divergence *)
           let kl =
             let prior_term =
-              let u_tmp = ustar + u_sample in
-              gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u_tmp
+              gaussian_llh ~inv_std:(if i = 0 then ones_x else ones_u) u_final
             in
             let q_term = gaussian_llh_chol ~precision_chol u_diff_elbo in
             kl + q_term - prior_term
           in
-          z, kl, (ustar + u_sample) :: us)
+          z, kl, u_final :: us)
     in
     kl, List.rev us
 
@@ -795,7 +796,6 @@ module Do_with_SOFO : Do_with_T = struct
       ; damping = Some 1e-3
       ; aux = Some aux
       ; orthogonalize = false
-
       }
 
   let init = O.init LGS.init
