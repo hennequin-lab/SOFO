@@ -84,6 +84,7 @@ val squeeze : dim:int -> 'a some t -> 'a t
 val unsqueeze : dim:int -> 'a some t -> 'a t
 val transpose : ?dims:int list -> 'a some t -> 'a t
 val neg : 'a some t -> 'a t
+val abs : 'a some t -> 'a t
 val trace : 'a some t -> 'a t
 val sin : 'a some t -> 'a t
 val cos : 'a some t -> 'a t
@@ -92,6 +93,8 @@ val sqrt : 'a some t -> 'a t
 val log : 'a some t -> 'a t
 val exp : 'a some t -> 'a t
 val tanh : 'a some t -> 'a t
+val inv_sqr : 'a some t -> 'a t
+val inv_rectangle : rcond:float -> 'a some t -> 'a t
 val relu : 'a some t -> 'a t
 val sigmoid : 'a some t -> 'a t
 val softplus : 'a some t -> 'a t

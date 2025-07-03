@@ -258,6 +258,11 @@ module Ops = struct
     let df ~f:_ ~x:_ ~dx = Tensor.neg dx in
     { f; df }
 
+  let abs =
+    let f = Tensor.abs in
+    let df ~f:_ ~x:_ ~dx = Tensor.abs dx in
+    { f; df }
+
   let trace =
     let f x =
       assert (
@@ -320,6 +325,32 @@ module Ops = struct
     let df ~f:y ~x:_ ~dx =
       let tmp = Tensor.(f 1. - square y) in
       Tensor.mul dx tmp
+    in
+    { f; df }
+
+  (* invert a square matrix; y = x^-1, dy = - x^-1 dx x^-1 *)
+  let inv_sqr =
+    let f x =
+      let x_size = List.last_exn (Tensor.shape x) in
+      let x_device = Tensor.device x in
+      let x_kind = Tensor.type_ x in
+      Tensor.linalg_solve
+        ~a:x
+        ~b:(Tensor.eye ~n:x_size ~options:(x_kind, x_device))
+        ~left:true
+    in
+    let df ~f:y ~x:_ ~dx = Tensor.(neg (matmul y (matmul dx y))) in
+    { f; df }
+
+  let inv_rectangle ~rcond =
+    let f = Tensor.pinverse ~rcond in
+    let df ~f:y ~x ~dx =
+      let tran_2d = Tensor.transpose ~dim0:(-1) ~dim1:(-2) in
+      let xTx = Tensor.(matmul (tran_2d x) x) in
+      let tmp1 = Tensor.(matmul (inverse xTx) (tran_2d dx)) in
+      let tmp2 = Tensor.(matmul tmp1 (matmul x y)) in
+      let tmp3 = Tensor.(matmul y (matmul dx y)) in
+      Tensor.(tmp1 - tmp2 - tmp3)
     in
     { f; df }
 
