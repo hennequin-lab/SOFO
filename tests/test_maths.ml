@@ -126,20 +126,19 @@ let test_unary ((name, input_constr, f) : _ unary) =
    let cholesky_then_linsolve a b =
   let a_sym = Maths.(a *@ transpose a ~dim0:1 ~dim1:2) in
   let ell = Maths.cholesky a_sym in
-  Maths.linsolve_triangular ell b ~left:true ~upper:false
+  Maths.linsolve_triangular ell b ~left:true ~upper:false *)
 
 let inv_sqr x =
-  let x_primal = Maths.primal x in
+  let x_primal = Maths.to_tensor x in
   let x_device = Tensor.device x_primal in
   let x_kind = Tensor.type_ x_primal in
   (* make sure x is positive definite *)
-  let x_sym = Maths.(x *@ transpose x ~dim0:2 ~dim1:1) in
+  let x_sym = Maths.(x *@ btr x) in
   let x_size = List.last_exn (Tensor.shape x_primal) in
   let x_final =
-    Maths.(x_sym + const (Tensor.eye ~n:x_size ~options:(x_kind, x_device)))
+    Maths.(x_sym + of_tensor (Tensor.eye ~n:x_size ~options:(x_kind, x_device)))
   in
   Maths.inv_sqr x_final
-*)
 
 let unary_tests =
   let test_list : _ unary list =
@@ -152,6 +151,11 @@ let unary_tests =
           assert (Poly.(shape_ = shape x));
           let size = [ 2; 7; 3; 4 ] in
           broadcast_to ~size x )
+    ; ( "reshape"
+      , [ `specified_unary [ 2; 3; 6; 4 ] ]
+      , any_shape (reshape ~shape:[ 2; 4; 18 ]) )
+    ; "squeeze", [ `specified_unary [ 3; 1; 7 ] ], any_shape (squeeze ~dim:1)
+    ; "unsqueeze", [], any_shape (unsqueeze ~dim:0)
     ; "sqr", [], any_shape sqr
     ; "neg", [], any_shape neg
     ; "trace", [ `specified_unary [ 10; 10 ] ], any_shape trace
@@ -172,7 +176,9 @@ let unary_tests =
     ; "sigmoid", [], any_shape sigmoid
     ; "softplus", [], any_shape softplus
     ; "tanh", [], any_shape tanh
+    ; "inv_sqr", [ `specified_unary [ 4; 4 ] ], any_shape inv_sqr
     ; "relu", [ `positive ], any_shape relu
+    ; "soft_relu", [], any_shape soft_relu
     ; ( "sum"
       , []
       , fun shape ->
@@ -222,6 +228,12 @@ let unary_tests =
           let n_dims = List.length shape in
           let dims = List.(permute (range 0 n_dims)) in
           transpose ~dims )
+    ; "btr", [ `order_greater_than 2 ], any_shape btr
+    ; "diagonal", [ `order_greater_than 2 ], any_shape (diagonal ~offset:0)
+    ; ( "diag_embed"
+      , [ `order_greater_than 2 ]
+      , any_shape (diag_embed ~offset:0 ~dim1:0 ~dim2:1) )
+    ; "tril", [ `order_greater_than 2 ], any_shape (tril ~_diagonal:0)
     ; ( "logsumexp"
       , []
       , fun shape ->
