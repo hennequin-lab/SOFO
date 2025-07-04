@@ -84,6 +84,11 @@ let tangent_exn (E x : _ some t) : const t =
   | D (x, dx) -> E (C (tangent_tensor_of x dx))
   | _ -> raise Not_dual
 
+let tangent_tensor_exn (E x : _ some t) : Tensor.t =
+  match x with
+  | D (x, dx) -> tangent_tensor_of x dx
+  | _ -> raise Not_dual
+
 let dual : tangent:const t -> const t -> dual t =
   fun ~tangent (E x) ->
   match x with
@@ -631,18 +636,37 @@ module Ops = struct
     let df ~f:_ ~x:_ ~dx = dx in
     { f; df }
 
-  (* x = x *z *)
+  (* x = x - z *)
+  let ( $- ) z =
+    let f x = Tensor.sub_scalar x (Scalar.f z) in
+    let df ~f:_ ~x:_ ~dx = dx in
+    { f; df }
+
+  (* x = z - x *)
+  let ( -$ ) z =
+    let f x = Tensor.(f z - x) in
+    let df ~f:_ ~x:_ ~dx = dx in
+    { f; df }
+
+  (* x = x * z *)
   let ( $* ) z =
     let f x = Tensor.mul_scalar x (Scalar.f z) in
     let df ~f:_ ~x:_ ~dx = Tensor.(mul_scalar dx Scalar.(f z)) in
     { f; df }
 
+  (* x = z/ x *)
   let ( $/ ) z =
     let f x = Tensor.(mul_scalar (reciprocal x) (Scalar.f z)) in
     let df ~f:_ ~x ~dx =
       let x2 = Tensor.square x in
       Tensor.(neg_ (div_ (mul_scalar dx (Scalar.f z)) x2))
     in
+    { f; df }
+
+  (* x = x/z *)
+  let ( /$ ) z =
+    let f x = Tensor.(mul_scalar x (Scalar.f Float.(1. / z))) in
+    let df ~f:_ ~x:_ ~dx = Tensor.(mul_scalar dx (Scalar.f Float.(1. / z))) in
     { f; df }
 
   (* z = xy, dz = dx y + x dy *)
@@ -705,6 +729,168 @@ module Ops = struct
     let dfxy ~f:x ~x:a ~y:_ ~dx:da ~dy:db =
       let dz = Tensor.(db - if left then matmul da x else matmul x da) in
       Tensor.linalg_solve_triangular a ~b:dz ~upper ~left ~unitriangular
+    in
+    { f; dfx; dfy; dfxy }
+
+  let[@warning "-16"] linsolve ~left =
+    let f a b = Tensor.linalg_solve ~a ~b ~left in
+    let dfx ~f:z ~x:a ~y:b ~dx:da =
+      let a_shape = Tensor.shape a in
+      let b_shape = Tensor.shape b in
+      let num_tangents_a = batch_dim da in
+      let a_exp = Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true in
+      let final =
+        if left
+        then (
+          (* if non-batched a and b, shape of a is length 2. *)
+          let da_z =
+            match List.length a_shape, List.length b_shape with
+            | 2, 1 -> Tensor.einsum ~equation:"kij,j->ki" [ da; z ] ~path:None
+            | 2, 2 -> Tensor.einsum ~equation:"kij,jp->kip" [ da; z ] ~path:None
+            | 3, 2 -> Tensor.einsum ~equation:"kmij,mj->kmi" [ da; z ] ~path:None
+            | 3, 3 -> Tensor.einsum ~equation:"kmij,mjp->kmip" [ da; z ] ~path:None
+            | _ -> assert false
+          in
+          let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(neg da_z) ~left:true in
+          dx)
+        else (
+          let z_da =
+            match List.length a_shape, List.length b_shape with
+            | 2, 2 -> Tensor.einsum ~equation:"pi,kij->kpj" [ z; da ] ~path:None
+            | 3, 3 -> Tensor.einsum ~equation:"mpi,kmij->kmpj" [ z; da ] ~path:None
+            | _ -> assert false
+          in
+          let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(neg z_da) ~left:false in
+          dx)
+      in
+      final
+    in
+    let dfy ~f:_ ~x:a ~y:_ ~dy:db =
+      let a_shape = Tensor.shape a in
+      let num_tangents_b = batch_dim db in
+      let a_exp = Tensor.expand a ~size:(num_tangents_b :: a_shape) ~implicit:true in
+      if left
+      then Tensor.linalg_solve ~a:a_exp ~b:db ~left:true
+      else Tensor.linalg_solve ~a:a_exp ~b:db ~left:false
+    in
+    let dfxy ~f:z ~x:a ~y:b ~dx:da ~dy:db =
+      let a_shape = Tensor.shape a in
+      let b_shape = Tensor.shape b in
+      let num_tangents_a = batch_dim da in
+      let num_tangents_b = batch_dim db in
+      assert (num_tangents_a = num_tangents_b);
+      let final =
+        if left
+        then (
+          let a_exp = Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true in
+          let da_z =
+            match List.length a_shape, List.length b_shape with
+            | 2, 1 -> Tensor.einsum ~equation:"kij,j->ki" [ da; z ] ~path:None
+            | 2, 2 -> Tensor.einsum ~equation:"kij,jp->kip" [ da; z ] ~path:None
+            | 3, 2 -> Tensor.einsum ~equation:"kmij,mj->kmi" [ da; z ] ~path:None
+            | 3, 3 -> Tensor.einsum ~equation:"kmij,mjp->kmip" [ da; z ] ~path:None
+            | _ -> assert false
+          in
+          let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(db - da_z) ~left:true in
+          dx)
+        else (
+          let a_exp = Tensor.expand a ~size:(num_tangents_a :: a_shape) ~implicit:true in
+          let z_da =
+            match List.length a_shape, List.length b_shape with
+            | 2, 2 -> Tensor.einsum ~equation:"pi,kij->kpj" [ z; da ] ~path:None
+            | 3, 3 -> Tensor.einsum ~equation:"mpi,kmij->kmpj" [ z; da ] ~path:None
+            | _ -> assert false
+          in
+          let dx = Tensor.linalg_solve ~a:a_exp ~b:Tensor.(db - z_da) ~left:false in
+          dx)
+      in
+      final
+    in
+    { f; dfx; dfy; dfxy }
+
+  let kron =
+    let f x y = Tensor.kron x y in
+    let dfx ~f:_ ~x:_ ~y ~dx = Tensor.(kron dx y) in
+    let dfy ~f:_ ~x ~y:_ ~dy = Tensor.(kron x dy) in
+    let dfxy ~f:_ ~x ~y ~dx ~dy = Tensor.(kron dx y + kron x dy) in
+    { f; dfx; dfy; dfxy }
+
+  (* apply a 2d convolution over x with weight [w] *)
+  let conv2d ?(padding = 0, 0) ?(dilation = 1, 1) ?(groups = 1) ~bias stride =
+    (* x has shape [bs x n_channels x w x h], w has shape [out_channels x in_channels x kerl_x x kerl_y] *)
+    let bias_p =
+      match bias with
+      | Some bias -> Some (to_tensor bias)
+      | None -> None
+    in
+    let bias_t =
+      match bias with
+      | Some bias ->
+        (match bias with
+         | E (D (x, dx)) -> Some (tangent_tensor_of x dx)
+         | _ -> None)
+      | _ -> None
+    in
+    let f x w =
+      let z = Tensor.conv2d ~padding ~dilation ~groups x w bias_p ~stride in
+      z
+    in
+    let maybe_add_db dz =
+      match bias_t with
+      | None -> dz
+      | Some db ->
+        let n_dim = List.length (Tensor.shape dz) in
+        let[@warning "-8"] [ num_tangents; c_out ] = Tensor.shape db in
+        (* broadcast db *)
+        let db =
+          Tensor.reshape
+            db
+            ~shape:
+              (List.init n_dim ~f:(function
+                 | 0 -> num_tangents
+                 | 2 -> c_out
+                 | _ -> 1))
+        in
+        Tensor.(db + dz)
+    in
+    let dfx ~f:_ ~x:_ ~y:w ~dx =
+      let[@warning "-8"] (num_tangents :: bs :: rest) = Tensor.shape dx in
+      (* collapse num_tangents and batch_size dimensions *)
+      let dx = Tensor.reshape dx ~shape:(-1 :: rest) in
+      let dz = Tensor.conv2d ~padding ~dilation ~groups dx w None ~stride in
+      (* un-collapse *)
+      let[@warning "-8"] (_ :: rest') = Tensor.shape dz in
+      Tensor.reshape dz ~shape:(num_tangents :: bs :: rest') |> maybe_add_db
+    in
+    let dfy ~f:_ ~x ~y:_ ~dy:dw =
+      let[@warning "-8"] (num_tangents :: nc_out :: rest) = Tensor.shape dw in
+      (* collapse num_tangents and num_out_channels dimensions *)
+      let dw = Tensor.reshape dw ~shape:(-1 :: rest) in
+      let dz = Tensor.conv2d ~padding ~dilation ~groups x dw None ~stride in
+      (* un-collapse *)
+      let[@warning "-8"] (bs :: _ :: rest') = Tensor.shape dz in
+      Tensor.reshape dz ~shape:(bs :: num_tangents :: nc_out :: rest')
+      |> Tensor.transpose_ ~dim0:1 ~dim1:0
+      |> maybe_add_db
+    in
+    let dfxy ~f:_ ~x ~y:w ~dx ~dy:dw =
+      let part1 =
+        let[@warning "-8"] (num_tangents :: bs :: rest) = Tensor.shape dx in
+        let dx = Tensor.reshape dx ~shape:(-1 :: rest) in
+        let tmp = Tensor.conv2d ~padding ~dilation ~groups dx w None ~stride in
+        let[@warning "-8"] (_ :: rest') = Tensor.shape tmp in
+        Tensor.reshape tmp ~shape:(num_tangents :: bs :: rest')
+      in
+      let part2 =
+        let[@warning "-8"] (num_tangents :: nc_out :: rest) = Tensor.shape dw in
+        (* collapse num_tangents and num_out_channels dimensions *)
+        let dw = Tensor.reshape dw ~shape:(-1 :: rest) in
+        let tmp = Tensor.conv2d ~padding ~dilation ~groups x dw None ~stride in
+        let[@warning "-8"] (bs :: _ :: rest') = Tensor.shape tmp in
+        Tensor.reshape tmp ~shape:(bs :: num_tangents :: nc_out :: rest')
+        |> Tensor.transpose_ ~dim0:1 ~dim1:0
+      in
+      Tensor.(part1 + part2) |> maybe_add_db
     in
     { f; dfx; dfy; dfxy }
 end
@@ -783,8 +969,11 @@ let ( - ) x = make_binary Ops.( - ) x
 let ( * ) x = make_binary Ops.( * ) x
 let ( / ) x = make_binary Ops.( / ) x
 let ( $+ ) z = make_unary Ops.(( $+ ) z)
+let ( $- ) z = make_unary Ops.(( $- ) z)
+let ( -$ ) z = make_unary Ops.(( -$ ) z)
 let ( $* ) z = make_unary Ops.(( $* ) z)
 let ( $/ ) z = make_unary Ops.(( $/ ) z)
+let ( /$ ) z = make_unary Ops.(( /$ ) z)
 let ( *@ ) x = make_binary Ops.(( *@ )) x
 
 let einsum (operands : (_ some t * string) list) return : any t =
@@ -846,10 +1035,99 @@ let concat ~dim x_list =
     let dy = Tensor.concat dx_list ~dim:Int.(dim + 1) in
     E (D (y, Explicit dy)))
 
+let block_diag x_list =
+  let y = Tensor.block_diag (List.map x_list ~f:to_tensor) in
+  let all_const, n_tangents =
+    List.fold_until
+      x_list
+      ~init:(true, 0)
+      ~f:(fun _ (E x) ->
+        match x with
+        | C _ -> Continue (true, 0)
+        | D (x, dx) ->
+          let k = batch_dim (tangent_tensor_of x dx) in
+          Stop (false, k))
+      ~finish:Fn.id
+  in
+  if all_const
+  then E (C y)
+  else (
+    let dy =
+      List.init n_tangents ~f:(fun k ->
+        List.map x_list ~f:(fun x ->
+          let dx' = tangent_tensor_exn x in
+          Tensor.slice dx' ~dim:0 ~start:(Some k) ~end_:(Some Int.(k + 1)) ~step:1
+          |> Tensor.squeeze_dim ~dim:0)
+        |> Tensor.block_diag
+        |> Tensor.unsqueeze ~dim:0)
+      |> Tensor.concat ~dim:0
+    in
+    E (D (y, Explicit dy)))
+
+let gumbel_softmax ~tau ~with_noise ~discrete x =
+  let x_p = to_tensor x in
+  let gumbel_noise =
+    if with_noise
+    then (
+      let uniform_noise = Tensor.uniform x_p ~from:0. ~to_:1. in
+      Some Tensor.(neg_ (log_ (neg_ (log_ uniform_noise)))))
+    else None
+  in
+  let logits =
+    match gumbel_noise with
+    | None -> Tensor.(div_scalar x_p (Scalar.f tau))
+    | Some gumbel_noise -> Tensor.(div_scalar (x_p + gumbel_noise) (Scalar.f tau))
+  in
+  let reduce_dim_list = List.tl_exn (Tensor.shape x_p) in
+  let num_classes = List.nth_exn (Tensor.shape x_p) 1 in
+  let summed_exp_logits =
+    Tensor.(
+      sum_dim_intlist
+        (exp logits)
+        ~dim:(Some reduce_dim_list)
+        ~keepdim:true
+        ~dtype:(Tensor.type_ x_p))
+  in
+  let y = Tensor.(exp (logits - logsumexp ~dim:reduce_dim_list ~keepdim:true logits)) in
+  let y_final =
+    if discrete
+    then (
+      let pos = Tensor.argmax y ~dim:1 ~keepdim:true in
+      Tensor.one_hot pos ~num_classes |> Tensor.squeeze)
+    else y
+  in
+  match x with
+  | E (C _) -> E (C y_final)
+  | E (D _) ->
+    let dy =
+      let dx = tangent_tensor_exn x in
+      let tmp1 = Tensor.(div_scalar (y * dx) (Scalar.f tau)) in
+      let reduce_dim_list_dx = List.map reduce_dim_list ~f:Int.succ in
+      let tmp2 =
+        let logits_diff = Tensor.(div_scalar (exp logits * dx) (Scalar.f tau)) in
+        let logits_diff_summed =
+          Tensor.sum_dim_intlist
+            logits_diff
+            ~dim:(Some reduce_dim_list_dx)
+            ~keepdim:true
+            ~dtype:(Tensor.type_ dx)
+        in
+        Tensor.(logits_diff_summed * y / summed_exp_logits)
+      in
+      Tensor.(tmp1 - tmp2)
+    in
+    E (D (y_final, Explicit dy))
+
 let cholesky x = make_unary Ops.cholesky x
 
 let linsolve_triangular ?left ?upper x =
   make_binary (Ops.linsolve_triangular ?left ?upper) x
+
+let linsolve ~left x = make_binary (Ops.linsolve ~left) x
+let kron x = make_binary Ops.kron x
+
+let conv2d ?padding ?dilation ?groups ~bias stride x w =
+  make_binary (Ops.conv2d ?padding ?dilation ?groups ~bias stride) x w
 
 (* ----------------------------------------------------
    -- Operations on [`const] t
@@ -918,8 +1196,11 @@ module C = struct
   let ( * ) = make_binary Ops.( * )
   let ( / ) = make_binary Ops.( / )
   let ( $+ ) z = make_unary Ops.(( $+ ) z)
+  let ( $- ) z = make_unary Ops.(( $- ) z)
+  let ( -$ ) z = make_unary Ops.(( -$ ) z)
   let ( $* ) z = make_unary Ops.(( $* ) z)
   let ( $/ ) z = make_unary Ops.(( $/ ) z)
+  let ( /$ ) z = make_unary Ops.(( /$ ) z)
   let ( *@ ) = make_binary Ops.(( *@ ))
 
   let einsum (operands : ([ `const ] t * string) list) return : [ `const ] t =
@@ -952,6 +1233,47 @@ module C = struct
     in
     if all_const then E (C y) else raise Not_const
 
+  let block_diag x_list =
+    let y = Tensor.block_diag (List.map x_list ~f:to_tensor) in
+    let all_const =
+      List.fold_until
+        x_list
+        ~init:true
+        ~f:(fun _ (E x) ->
+          match x with
+          | C _ -> Continue true
+          | D _ -> Stop false)
+        ~finish:Fn.id
+    in
+    if all_const then E (C y) else raise Not_const
+
+  let gumbel_softmax ~tau ~with_noise ~discrete (E x) =
+    match x with
+    | C x ->
+      let gumbel_noise =
+        if with_noise
+        then (
+          let uniform_noise = Tensor.uniform x ~from:0. ~to_:1. in
+          Some Tensor.(neg_ (log_ (neg_ (log_ uniform_noise)))))
+        else None
+      in
+      let logits =
+        match gumbel_noise with
+        | None -> Tensor.(div_scalar x (Scalar.f tau))
+        | Some gumbel_noise -> Tensor.(div_scalar (x + gumbel_noise) (Scalar.f tau))
+      in
+      let reduce_dim_list = List.tl_exn (Tensor.shape x) in
+      let num_classes = List.nth_exn (Tensor.shape x) 1 in
+      let y =
+        Tensor.(exp (logits - logsumexp ~dim:reduce_dim_list ~keepdim:true logits))
+      in
+      if discrete
+      then (
+        let pos = Tensor.argmax y ~dim:1 ~keepdim:true in
+        Tensor.one_hot pos ~num_classes |> Tensor.squeeze |> of_tensor)
+      else of_tensor y
+    | _ -> raise Not_const
+
   let svd (E x) =
     match x with
     | C x ->
@@ -970,4 +1292,10 @@ module C = struct
 
   let linsolve_triangular ?left ?upper x =
     make_binary (Ops.linsolve_triangular ?left ?upper) x
+
+  let linsolve ~left x = make_binary (Ops.linsolve ~left) x
+  let kron = make_binary Ops.kron
+
+  let conv2d ?padding ?dilation ?groups ~bias stride x w =
+    make_binary (Ops.conv2d ?padding ?dilation ?groups ~bias stride) x w
 end

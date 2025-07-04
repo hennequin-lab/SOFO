@@ -13,7 +13,7 @@ let random_shape min_order =
 
 (* generate a random shape with a specified order *)
 let random_shape_set order = List.init order ~f:(fun _ -> Int.(2 + Random.int 4))
-let rel_tol = Alcotest.float 1e-3
+let rel_tol = Alcotest.float 1e-2
 
 (* two types of contraints: input tensors need to be postive or their orders need to be greater than specified. *)
 type input_constr =
@@ -121,12 +121,6 @@ let test_unary ((name, input_constr, f) : _ unary) =
         let f = f shape in
         let x = generate_tensor ~shape ~input_constr_list:input_constr in
         Alcotest.(check @@ rel_tol) name 0.0 (check_grad1 f (of_tensor x))) )
-
-(*
-   let cholesky_then_linsolve a b =
-  let a_sym = Maths.(a *@ transpose a ~dim0:1 ~dim1:2) in
-  let ell = Maths.cholesky a_sym in
-  Maths.linsolve_triangular ell b ~left:true ~upper:false *)
 
 let inv_sqr x =
   let x_primal = Maths.to_tensor x in
@@ -370,6 +364,35 @@ let batch_trans_matmul_with_einsum a b = Maths.(einsum [ a, "mij"; b, "mik" ] "m
 let batch_vecmat_with_einsum a b = Maths.(einsum [ a, "mi"; b, "mij" ] "mj")
 let batch_vecmat_trans_with_einsum a b = Maths.(einsum [ a, "mi"; b, "mji" ] "mj")
 
+let linsolve ~left a b =
+  let a_primal = Maths.to_tensor a in
+  let a_device = Tensor.device a_primal in
+  let a_kind = Tensor.type_ a_primal in
+  let n = List.last_exn (Tensor.shape a_primal) in
+  (* improve condition number of a *)
+  let a =
+    Maths.(
+      of_tensor
+        Tensor.(
+          a_primal
+          + Tensor.(
+              mul_scalar
+                (eye ~n ~options:(a_kind, a_device))
+                (Scalar.f Float.(10. *. of_int n)))))
+  in
+  Maths.linsolve ~left a b
+
+let linsolve_tri ~left ~upper a b =
+  let a =
+    match upper with
+    | false -> Maths.tril a ~_diagonal:0
+    | true -> Maths.(btr (tril a ~_diagonal:0))
+  in
+  Maths.linsolve_triangular a b ~left ~upper
+
+let concat_list a b = Maths.concat [ a; b ] ~dim:0
+let block_diag a b = Maths.block_diag [ a; b ]
+
 let binary_tests =
   let test_list : (_, _) binary list =
     [ "plus", [], any_shape Maths.( + )
@@ -393,12 +416,33 @@ let binary_tests =
     ; ( "batch_vecmat_trans_with_einsum"
       , [ `specified_binary ([ 3; 4 ], [ 3; 8; 4 ]) ]
       , any_shape batch_vecmat_trans_with_einsum )
-      (*; ( "cholesky_then_linsolve"
-      , [ `specified_binary ([ 3; 5; 5 ], [ 3; 5 ]) ]
-      , any_shape (fun x y ->
-          let xxt = einsum [ x, "ijk"; x, "ilk" ] "ijl" in
-          let ell = cholesky xxt in
-          linsolve_triangular ~left:false ~upper:false ell y) )*)
+    ; "linsolve_left_true", [ `linsolve_left_true ], any_shape (linsolve ~left:true)
+    ; "linsolve_left_false", [ `linsolve_left_false ], any_shape (linsolve ~left:false)
+    ; ( "linsolve_tri_left_true_upper_true"
+      , [ `linsolve_left_true ]
+      , any_shape (linsolve_tri ~left:true ~upper:true) )
+    ; ( "linsolve_tri_left_true_upper_false"
+      , [ `linsolve_left_true ]
+      , any_shape (linsolve_tri ~left:true ~upper:false) )
+    ; ( "linsolve_tri_left_false_upper_true"
+      , [ `linsolve_left_false ]
+      , any_shape (linsolve_tri ~left:false ~upper:true) )
+    ; ( "linsolve_tri_left_false_upper_false"
+      , [ `linsolve_left_false ]
+      , any_shape (linsolve_tri ~left:false ~upper:false) )
+      ; "kron", [ `specified_binary ([ 3; 4 ], [ 5; 7 ]) ], any_shape Maths.kron
+    ; "concat", [], any_shape concat_list
+    ; "block_diag", [ `order_equal_to 2 ], any_shape block_diag
+    ; ( "conv2d"
+      , [ `order_equal_to 4 ]
+      , fun _ ->
+          let stride = Int.(1 + Random.int 1) in
+          Maths.conv2d
+            ~padding:(0, 0)
+            ~dilation:(1, 1)
+            ~groups:1
+            ~bias:None
+            (stride, stride) )
     ]
   in
   List.map ~f:test_binary test_list

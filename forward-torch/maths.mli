@@ -123,13 +123,30 @@ val ( - ) : _ some t -> _ some t -> any t
 val ( * ) : _ some t -> _ some t -> any t
 val ( / ) : _ some t -> _ some t -> any t
 val ( $+ ) : float -> 'a some t -> 'a t
+val ( $- ) : float -> 'a some t -> 'a t
+val ( -$ ) : float -> 'a some t -> 'a t
 val ( $* ) : float -> 'a some t -> 'a t
 val ( $/ ) : float -> 'a some t -> 'a t
+val ( /$ ) : float -> 'a some t -> 'a t
 val ( *@ ) : _ some t -> _ some t -> any t
 val einsum : (_ some t * string) list -> string -> any t
 val concat : dim:int -> _ some t list -> any t
+val block_diag : _ some t list -> any t
+val gumbel_softmax : tau:float -> with_noise:bool -> discrete:bool -> 'a some t -> any t
 val cholesky : 'a some t -> 'a some t
 val linsolve_triangular : ?left:bool -> ?upper:bool -> _ some t -> _ some t -> any t
+val linsolve : left:bool -> _ some t -> _ some t -> any t
+val kron : _ some t -> _ some t -> any t
+
+val conv2d
+  :  ?padding:int * int
+  -> ?dilation:int * int
+  -> ?groups:int
+  -> bias:'a some t option
+  -> int * int
+  -> 'a some t
+  -> 'a some t
+  -> any t
 
 (* ---------------------------------------------------
    -- Type-preserving ops on constants
@@ -185,13 +202,30 @@ module C : sig
   val ( * ) : const t -> const t -> const t
   val ( / ) : const t -> const t -> const t
   val ( $+ ) : float -> const t -> const t
+  val ( $- ) : float -> const t -> const t
+  val ( -$ ) : float -> const t -> const t
   val ( $* ) : float -> const t -> const t
   val ( $/ ) : float -> const t -> const t
+  val ( /$ ) : float -> const t -> const t
   val ( *@ ) : const t -> const t -> const t
   val einsum : (const t * string) list -> string -> const t
   val concat : dim:int -> const t list -> const t
+  val block_diag : const t list -> const t
+  val gumbel_softmax : tau:float -> with_noise:bool -> discrete:bool -> const t -> const t
   val svd : const t -> const t * const t * const t
   val qr : const t -> const t * const t
   val cholesky : const t -> const t
   val linsolve_triangular : ?left:bool -> ?upper:bool -> const t -> const t -> const t
+  val linsolve : left:bool -> const t -> const t -> const t
+  val kron : const t -> const t -> const t
+
+  val conv2d
+    :  ?padding:int * int
+    -> ?dilation:int * int
+    -> ?groups:int
+    -> bias:const t option
+    -> int * int
+    -> const t
+    -> const t
+    -> const t
 end
