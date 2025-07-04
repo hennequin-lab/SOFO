@@ -83,6 +83,10 @@ val permute : dims:int list -> 'a some t -> 'a t
 val squeeze : dim:int -> 'a some t -> 'a t
 val unsqueeze : dim:int -> 'a some t -> 'a t
 val transpose : ?dims:int list -> 'a some t -> 'a t
+val btr : 'a some t -> 'a t
+val diagonal : offset:int -> 'a some t -> 'a t
+val diag_embed : offset:int -> dim1:int -> dim2:int -> 'a some t -> 'a t
+val tril : _diagonal:int -> 'a some t -> 'a t
 val neg : 'a some t -> 'a t
 val abs : 'a some t -> 'a t
 val trace : 'a some t -> 'a t
@@ -96,12 +100,24 @@ val tanh : 'a some t -> 'a t
 val inv_sqr : 'a some t -> 'a t
 val inv_rectangle : rcond:float -> 'a some t -> 'a t
 val relu : 'a some t -> 'a t
+val soft_relu : 'a some t -> 'a t
 val sigmoid : 'a some t -> 'a t
 val softplus : 'a some t -> 'a t
 val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> 'a some t -> 'a t
 val sum : ?keepdim:bool -> ?dim:int list -> 'a some t -> 'a t
 val mean : ?keepdim:bool -> ?dim:int list -> 'a some t -> 'a t
 val logsumexp : ?keepdim:bool -> dim:int list -> 'a some t -> 'a t
+val max_2d_dim1 : keepdim:bool -> 'a some t -> 'a t
+
+val maxpool2d
+  :  ?padding:int * int
+  -> ?dilation:int * int
+  -> ?ceil_mode:bool
+  -> ?stride:int * int
+  -> int * int
+  -> 'a some t
+  -> 'a t
+
 val ( + ) : _ some t -> _ some t -> any t
 val ( - ) : _ some t -> _ some t -> any t
 val ( * ) : _ some t -> _ some t -> any t
@@ -128,7 +144,12 @@ module C : sig
   val squeeze : dim:int -> const t -> const t
   val unsqueeze : dim:int -> const t -> const t
   val transpose : ?dims:int list -> const t -> const t
+  val btr : const t -> const t
+  val diagonal : offset:int -> const t -> const t
+  val diag_embed : offset:int -> dim1:int -> dim2:int -> const t -> const t
+  val tril : _diagonal:int -> const some t -> const t
   val neg : const t -> const t
+  val abs : const t -> const t
   val trace : const t -> const t
   val sin : const t -> const t
   val cos : const t -> const t
@@ -137,7 +158,10 @@ module C : sig
   val log : const t -> const t
   val exp : const t -> const t
   val tanh : const t -> const t
+  val inv_sqr : const t -> const t
+  val inv_rectangle : rcond:float -> const some t -> const t
   val relu : const t -> const t
+  val soft_relu : const t -> const t
   val sigmoid : const t -> const t
   val softplus : const t -> const t
   val sign : const t -> const t
@@ -145,6 +169,17 @@ module C : sig
   val sum : ?keepdim:bool -> ?dim:int list -> const t -> const t
   val mean : ?keepdim:bool -> ?dim:int list -> const t -> const t
   val logsumexp : ?keepdim:bool -> dim:int list -> const t -> const t
+  val max_2d_dim1 : keepdim:bool -> const t -> const t
+
+  val maxpool2d
+    :  ?padding:int * int
+    -> ?dilation:int * int
+    -> ?ceil_mode:bool
+    -> ?stride:int * int
+    -> int * int
+    -> const t
+    -> const t
+
   val ( + ) : const t -> const t -> const t
   val ( - ) : const t -> const t -> const t
   val ( * ) : const t -> const t -> const t

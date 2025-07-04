@@ -252,6 +252,33 @@ module Ops = struct
     in
     { f; df }
 
+  let btr =
+    let f x =
+      let n = List.length (Tensor.shape x) in
+      assert (n > 1);
+      Tensor.transpose ~dim0:(-2) ~dim1:(-1) x
+    in
+    let df ~f:_ ~x:_ ~dx = Tensor.transpose ~dim0:(-2) ~dim1:(-1) dx in
+    { f; df }
+
+  let diagonal ~offset =
+    let f = Tensor.diagonal ~offset ~dim1:(-2) ~dim2:(-1) in
+    let df ~f:_ ~x:_ ~dx = Tensor.diagonal dx ~offset ~dim1:(-2) ~dim2:(-1) in
+    { f; df }
+
+  let diag_embed ~offset ~dim1 ~dim2 =
+    let f = Tensor.diag_embed ~offset ~dim1 ~dim2 in
+    let df ~f:_ ~x:_ ~dx =
+      let dim1_tan, dim2_tan = if dim1 < 0 then dim1, dim2 else dim1 + 1, dim2 + 1 in
+      Tensor.diag_embed dx ~offset ~dim1:dim1_tan ~dim2:dim2_tan
+    in
+    { f; df }
+
+  let tril ~_diagonal =
+    let f = Tensor.tril ~diagonal:_diagonal in
+    let df ~f:_ ~x:_ ~dx = Tensor.tril ~diagonal:_diagonal dx in
+    { f; df }
+
   (* y = -x, dy = -dx *)
   let neg =
     let f = Tensor.neg in
@@ -362,6 +389,22 @@ module Ops = struct
     in
     { f; df }
 
+  let soft_relu =
+    let f x =
+      let tmp = Tensor.(square x + f 4.) in
+      let num = Tensor.(sqrt tmp + x) in
+      Tensor.((num / f 2.) - f 1.)
+    in
+    let df ~f:_ ~x ~dx =
+      let values =
+        let tmp = Tensor.(square x + f 4.) in
+        let tmp2 = Tensor.(f 1. / sqrt tmp) in
+        Tensor.(div_scalar ((tmp2 * x) + f 1.) (Scalar.f 2.))
+      in
+      Tensor.mul dx values
+    in
+    { f; df }
+
   let sigmoid =
     let f = Tensor.sigmoid in
     let df ~f:y ~x:_ ~dx = Tensor.(mul dx (mul y (ones_like y - y))) in
@@ -427,6 +470,125 @@ module Ops = struct
       (* make sure to preserve the batch dimension in dx *)
       let dim = List.map dim ~f:Int.succ in
       Tensor.(sum_dim_intlist ~dim:(Some dim) ~keepdim ~dtype:(type_ x) tmp)
+    in
+    { f; df }
+
+  let max_2d_dim1 ~keepdim =
+    let f x =
+      let y, _ = Tensor.(max_dim x ~dim:1 ~keepdim) in
+      y
+    in
+    let df ~f:_ ~x ~dx =
+      let y, y_indices = Tensor.(max_dim x ~dim:1 ~keepdim) in
+      let[@warning "-8"] (bs :: n :: _) = Tensor.shape x in
+      let num_tangents = List.hd_exn (Tensor.shape dx) in
+      let device = Tensor.device x in
+      let kind = Tensor.type_ x in
+      let y_shape = Tensor.shape y in
+      let indices_offset =
+        let offset_block =
+          Tensor.arange_start
+            ~start:(Scalar.int 0)
+            ~end_:(Scalar.int bs)
+            ~options:(kind, device)
+          |> Tensor.reshape ~shape:[ 1; -1 ]
+        in
+        let second_dim_offset = Tensor.mul_scalar offset_block (Scalar.int n) in
+        Tensor.(second_dim_offset + Tensor.view y_indices ~size:[ 1; -1 ])
+      in
+      (* cast as integer and collapse to one long vector. *)
+      let indices_offset =
+        Tensor._cast_int indices_offset ~non_blocking:true
+        |> Tensor.view ~size:[ 1; -1 ]
+        |> Tensor.squeeze
+      in
+      let dx_collapsed = Tensor.reshape dx ~shape:[ num_tangents; -1 ] in
+      let dy = Tensor.index_select dx_collapsed ~dim:1 ~index:indices_offset in
+      Tensor.reshape dy ~shape:(num_tangents :: y_shape)
+    in
+    { f; df }
+
+  let maxpool2d ?(padding = 0, 0) ?(dilation = 1, 1) ?(ceil_mode = false) ?stride ksize =
+    let stride =
+      match stride with
+      | None -> ksize
+      | Some stride -> stride
+    in
+    let pair_to_list (a, b) = [ a; b ] in
+    let f x =
+      let y, _ =
+        Tensor.max_pool2d_with_indices
+          ~padding:(pair_to_list padding)
+          ~dilation:(pair_to_list dilation)
+          ~ceil_mode
+          ~stride:(pair_to_list stride)
+          x
+          ~kernel_size:(pair_to_list ksize)
+      in
+      y
+    in
+    let df ~f:_ ~x ~dx =
+      let[@warning "-8"] (bs :: nc :: rest_in) = Tensor.shape x in
+      let num_rest_in = List.fold rest_in ~init:1 ~f:(fun acc i -> acc * i) in
+      let y, indices =
+        Tensor.max_pool2d_with_indices
+          ~padding:(pair_to_list padding)
+          ~dilation:(pair_to_list dilation)
+          ~ceil_mode
+          ~stride:(pair_to_list stride)
+          x
+          ~kernel_size:(pair_to_list ksize)
+      in
+      let y_shape = Tensor.shape y in
+      let[@warning "-8"] (_ :: _ :: rest_out) = y_shape in
+      let num_tangents = List.hd_exn (Tensor.shape dx) in
+      (* collapse last two *)
+      let indices_collapse_last_two = Tensor.reshape indices ~shape:[ bs; nc; -1 ] in
+      let num_rest_out = List.fold rest_out ~init:1 ~f:(fun acc i -> acc * i) in
+      let device = Tensor.device x in
+      let kind = Tensor.type_ x in
+      (* m1[i, j, k] = i; m1 and m2 has the same shape as indices *)
+      let m1 =
+        let m1_a =
+          Tensor.arange_start
+            ~start:(Scalar.int 0)
+            ~end_:(Scalar.int bs)
+            ~options:(kind, device)
+          |> Tensor.reshape ~shape:[ -1; 1 ]
+        in
+        let m1_a_b =
+          Tensor.repeat m1_a ~repeats:[ 1; nc ] |> Tensor.reshape ~shape:[ bs; nc; 1 ]
+        in
+        Tensor.repeat m1_a_b ~repeats:[ 1; 1; num_rest_out ]
+      in
+      (* m2[i, j, k] = j *)
+      let m2 =
+        let m2_a =
+          Tensor.arange_start
+            ~start:(Scalar.int 0)
+            ~end_:(Scalar.int nc)
+            ~options:(kind, device)
+          |> Tensor.reshape ~shape:[ 1; -1 ]
+        in
+        let m2_a_b =
+          Tensor.repeat m2_a ~repeats:[ bs; 1 ] |> Tensor.reshape ~shape:[ bs; nc; 1 ]
+        in
+        Tensor.repeat m2_a_b ~repeats:[ 1; 1; num_rest_out ]
+      in
+      (* indices_offset[i, j, k] = i * (nc * num_rest_in) + j * num_rest_in + indices [i, j, k]. *)
+      let indices_offset =
+        let first_dim_offset = Tensor.mul_scalar m1 (Scalar.int (nc * num_rest_in)) in
+        let second_dim_offset = Tensor.mul_scalar m2 (Scalar.int num_rest_in) in
+        Tensor.(first_dim_offset + second_dim_offset + indices_collapse_last_two)
+      in
+      (* cast as integer and collapse to one long vector. *)
+      let indices_offset = Tensor._cast_int indices_offset ~non_blocking:true in
+      let indices_collapsed =
+        Tensor.reshape indices_offset ~shape:[ 1; -1 ] |> Tensor.squeeze
+      in
+      let dx_collapsed = Tensor.reshape dx ~shape:[ num_tangents; -1 ] in
+      let dy = Tensor.index_select dx_collapsed ~dim:1 ~index:indices_collapsed in
+      Tensor.reshape dy ~shape:(num_tangents :: y_shape)
     in
     { f; df }
 
@@ -587,7 +749,12 @@ let permute ~dims = make_unary (Ops.permute ~dims)
 let squeeze ~dim = make_unary (Ops.squeeze ~dim)
 let unsqueeze ~dim = make_unary (Ops.unsqueeze ~dim)
 let transpose ?dims x = make_unary Ops.(transpose ?dims) x
+let btr x = make_unary Ops.(btr) x
+let diagonal ~offset x = make_unary Ops.(diagonal ~offset) x
+let diag_embed ~offset ~dim1 ~dim2 x = make_unary Ops.(diag_embed ~offset ~dim1 ~dim2) x
+let tril ~_diagonal = make_unary Ops.(tril ~_diagonal)
 let neg x = make_unary Ops.neg x
+let abs x = make_unary Ops.abs x
 let trace x = make_unary Ops.trace x
 let sin x = make_unary Ops.sin x
 let cos x = make_unary Ops.cos x
@@ -596,13 +763,21 @@ let sqrt x = make_unary Ops.sqrt x
 let log x = make_unary Ops.log x
 let exp x = make_unary Ops.exp x
 let tanh x = make_unary Ops.tanh x
+let inv_sqr x = make_unary Ops.inv_sqr x
+let inv_rectangle ~rcond x = make_unary Ops.(inv_rectangle ~rcond) x
 let relu x = make_unary Ops.relu x
+let soft_relu x = make_unary Ops.soft_relu x
 let sigmoid x = make_unary Ops.sigmoid x
 let softplus x = make_unary Ops.softplus x
 let slice ?start ?end_ ?step ~dim = make_unary Ops.(slice ?start ?end_ ?step ~dim)
 let mean ?keepdim ?dim x = make_unary (Ops.mean ?keepdim ?dim) x
 let sum ?keepdim ?dim x = make_unary (Ops.sum ?keepdim ?dim) x
 let logsumexp ?keepdim ~dim = make_unary (Ops.logsumexp ?keepdim ~dim)
+let max_2d_dim1 ~keepdim = make_unary (Ops.max_2d_dim1 ~keepdim)
+
+let maxpool2d ?padding ?dilation ?ceil_mode ?stride ksize =
+  make_unary (Ops.maxpool2d ?padding ?dilation ?ceil_mode ?stride ksize)
+
 let ( + ) x = make_binary Ops.( + ) x
 let ( - ) x = make_binary Ops.( - ) x
 let ( * ) x = make_binary Ops.( * ) x
@@ -708,7 +883,12 @@ module C = struct
   let squeeze ~dim = make_unary (Ops.squeeze ~dim)
   let unsqueeze ~dim = make_unary (Ops.unsqueeze ~dim)
   let transpose ?dims x = make_unary Ops.(transpose ?dims) x
+  let btr = make_unary Ops.btr
+  let diagonal ~offset = make_unary (Ops.diagonal ~offset)
+  let diag_embed ~offset ~dim1 ~dim2 x = make_unary Ops.(diag_embed ~offset ~dim1 ~dim2) x
+  let tril ~_diagonal = make_unary Ops.(tril ~_diagonal)
   let neg = make_unary Ops.neg
+  let abs x = make_unary Ops.abs x
   let trace = make_unary Ops.trace
   let sin = make_unary Ops.sin
   let cos = make_unary Ops.cos
@@ -717,7 +897,10 @@ module C = struct
   let log = make_unary Ops.log
   let exp = make_unary Ops.exp
   let tanh = make_unary Ops.tanh
+  let inv_sqr x = make_unary Ops.inv_sqr x
+  let inv_rectangle ~rcond x = make_unary Ops.(inv_rectangle ~rcond) x
   let relu = make_unary Ops.relu
+  let soft_relu x = make_unary Ops.soft_relu x
   let sigmoid = make_unary Ops.sigmoid
   let softplus = make_unary Ops.softplus
   let sign = direct_unary Tensor.sign
@@ -725,6 +908,11 @@ module C = struct
   let sum ?keepdim ?dim = make_unary (Ops.sum ?keepdim ?dim)
   let mean ?keepdim ?dim = make_unary (Ops.mean ?keepdim ?dim)
   let logsumexp ?keepdim ~dim = make_unary (Ops.logsumexp ?keepdim ~dim)
+  let max_2d_dim1 ~keepdim = make_unary (Ops.max_2d_dim1 ~keepdim)
+
+  let maxpool2d ?padding ?dilation ?ceil_mode ?stride ksize =
+    make_unary (Ops.maxpool2d ?padding ?dilation ?ceil_mode ?stride ksize)
+
   let ( + ) = make_binary Ops.( + )
   let ( - ) = make_binary Ops.( - )
   let ( * ) = make_binary Ops.( * )
