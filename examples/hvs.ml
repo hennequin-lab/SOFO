@@ -7,7 +7,8 @@ module Mat = Owl.Dense.Matrix.S
 module Arr = Owl.Dense.Ndarray.S
 
 let _ =
-  Random.init 1999;
+  (* Random.init 1999; *)
+  Random.self_init ();
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
@@ -140,7 +141,11 @@ let m = 3
 (* observation dim *)
 let o = 16 * 16
 let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ]
-let _b_0_true = Tensor.eye ~n ~options:(base.kind, base.device) |> Maths.const
+
+let _b_0_true =
+  Tensor.(
+    f Float.(1. /. sqrt (of_int n)) * randn ~device:base.device ~kind:base.kind [ n; n ])
+  |> Maths.const
 
 let _b_true =
   Tensor.(
@@ -149,15 +154,15 @@ let _b_true =
 
 let to_device = Tensor.of_bigarray ~device:base.device
 
-let sample_data ~sampling_state_data bs =
+let sample_data ~sampling_state_data:_ bs =
   (* cycle through the data points *)
-  let indices =
+  (* let indices =
     List.init bs ~f:(fun i -> ((sampling_state_data * bs) + i) % full_batch_size)
-  in
-  (* let indices = List.permute (List.range 0 full_batch_size) |> List.sub ~pos:0 ~len:bs in *)
+  in *)
+  let indices = List.permute (List.range 0 full_batch_size) |> List.sub ~pos:0 ~len:bs in
   let bs_of_data = List.map indices ~f:(fun idx -> List.nth_exn data idx |> to_device) in
   let tmax = Tensor.shape (List.hd_exn bs_of_data) |> List.hd_exn in
-  (* list of length tmax of shape [bs  x n_channels] *)
+  (* list of length tmax of shape [bs x n_channels] *)
   List.init tmax ~f:(fun i ->
     List.map bs_of_data ~f:(fun data ->
       Tensor.slice data ~dim:0 ~start:(Some i) ~end_:(Some (i + 1)) ~step:1)
@@ -175,7 +180,7 @@ module PP = struct
     ; _b : 'a
     ; _b_0 : 'a (* b at time step 0 has same dimension as state *)
     ; _c : 'a
-    ; _d : 'a (* o ~ N(cx + d, log_obs_var^{-1/2}) *)
+    ; _d : 'a (* o ~ N(cx + d, obs_var *)
     ; _log_prior_var_0 : 'a (* log of cov over input at step 0 *)
     ; _log_prior_var : 'a (* log of cov over input *)
     ; _log_obs_var : 'a (* log of covariance of emission noise *)
@@ -216,9 +221,8 @@ module LGS = struct
           List.mapi o_list_tmp ~f:(fun i o ->
             let _cx =
               Maths.(
-                einsum
-                  [ theta._d - const o, "mb"; _obs_precision, "b"; theta._c, "cb" ]
-                  "mc")
+                einsum [ theta._d, "mb"; _obs_precision, "b"; theta._c, "cb" ] "mc"
+                - einsum [ const o, "mb"; _obs_precision, "b"; theta._c, "cb" ] "mc")
             in
             Lds_data.Temp.
               { _f = None
@@ -266,7 +270,6 @@ module LGS = struct
         o_list
     =
     let open Maths in
-    let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ] |> Maths.const in
     let btrinv_0 = einsum [ _Fu_0, "ij"; _c, "jo"; obs_precision, "o" ] "io" in
     let btrinv = einsum [ _Fu, "ij"; _c, "jo"; obs_precision, "o" ] "io" in
     (* posterior precision of filtered covariance of u *)
@@ -276,7 +279,8 @@ module LGS = struct
         |> Maths.diag_embed ~offset:0 ~dim1:0 ~dim2:1
       in
       let tmp =
-        scaling_factor * const (Tensor.ones ~device:base.device ~kind:base.kind [ 1; n ])
+        scaling_factor * const (Tensor.ones ~device:base.device ~kind:base.kind [ n ])
+        |> unsqueeze ~dim:0
       in
       (_prior_precision_0 + einsum [ btrinv_0, "io"; _c, "jo"; _Fu_0, "kj" ] "ik"
        |> cholesky)
@@ -287,7 +291,8 @@ module LGS = struct
         precision_of_log_var _log_prior_var |> Maths.diag_embed ~offset:0 ~dim1:0 ~dim2:1
       in
       let tmp =
-        scaling_factor * const (Tensor.ones ~device:base.device ~kind:base.kind [ 1; m ])
+        scaling_factor * const (Tensor.ones ~device:base.device ~kind:base.kind [ m ])
+        |> unsqueeze ~dim:0
       in
       (_prior_precision + einsum [ btrinv, "io"; _c, "jo"; _Fu, "kj" ] "ik" |> cholesky)
       * tmp
@@ -297,7 +302,7 @@ module LGS = struct
     let _, kl, us =
       List.foldi
         ustars_o_list
-        ~init:(z0, f 0., [])
+        ~init:(const z0, f 0., [])
         ~f:(fun i (z, kl, us) (ustar, o) ->
           Stdlib.Gc.major ();
           let _Fu = if i = 0 then _Fu_0 else _Fu in
@@ -936,7 +941,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = 10000 in
+  let max_iter = 3000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->
