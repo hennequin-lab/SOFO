@@ -7,8 +7,7 @@ module Mat = Owl.Dense.Matrix.S
 module Arr = Owl.Dense.Ndarray.S
 
 let _ =
-  (* Random.init 1999; *)
-  Random.self_init ();
+  Random.init 1999;
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
@@ -934,14 +933,15 @@ module Do_with_Adam : Do_with_T = struct
 
   module O = Optimizer.Adam (LGS)
 
-  let config ~iter:_ =
-    Optimizer.Config.Adam.{ default with base; learning_rate = Some 0.001 }
+  let config ~iter:t =
+    Optimizer.Config.Adam.
+      { default with base; learning_rate = Some Float.(0.001 / sqrt ((of_int (t) + 1.) / 10.))  }
 
   let init = O.init LGS.init
 end
 
 let _ =
-  let max_iter = 3000 in
+  let max_iter = 10000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->
