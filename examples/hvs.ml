@@ -7,7 +7,7 @@ module Mat = Owl.Dense.Matrix.S
 module Arr = Owl.Dense.Ndarray.S
 
 let _ =
-  Random.init 1999;
+  Random.init 1998;
   Owl_stats_prng.init (Random.int 100000);
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
@@ -124,8 +124,13 @@ let data =
          | Some lst -> Some lst
          | None -> None)
        chunk_lst)
+  |> List.permute
 
-let full_batch_size = List.length data
+let data_train, data_test =
+  let full_batch_size = List.length data in
+  List.split_n data Float.(to_int (of_int full_batch_size * 0.8))
+
+let data_train_size = List.length data_train
 
 (* -----------------------------------------
    -- Problem Definition ---
@@ -139,7 +144,6 @@ let m = 3
 
 (* observation dim *)
 let o = 16 * 16
-let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ]
 
 let _b_0_true =
   Tensor.(
@@ -154,18 +158,29 @@ let _b_true =
 let to_device = Tensor.of_bigarray ~device:base.device
 
 let sample_data ~sampling_state_data:_ bs =
-  (* cycle through the data points *)
-  (* let indices =
+  (* list (length bs) of tensor of shape [tmax x n_channels] to list (length tmax) of shape [bs x n_channels] *)
+  let to_list bs_of_data =
+    List.init tmax ~f:(fun i ->
+      List.map bs_of_data ~f:(fun data ->
+        Tensor.slice data ~dim:0 ~start:(Some i) ~end_:(Some (i + 1)) ~step:1)
+      |> Tensor.concat ~dim:0)
+  in
+  if bs > 0
+  then (
+    (* cycle through the data points *)
+    (* let indices =
     List.init bs ~f:(fun i -> ((sampling_state_data * bs) + i) % full_batch_size)
   in *)
-  let indices = List.permute (List.range 0 full_batch_size) |> List.sub ~pos:0 ~len:bs in
-  let bs_of_data = List.map indices ~f:(fun idx -> List.nth_exn data idx |> to_device) in
-  let tmax = Tensor.shape (List.hd_exn bs_of_data) |> List.hd_exn in
-  (* list of length tmax of shape [bs x n_channels] *)
-  List.init tmax ~f:(fun i ->
-    List.map bs_of_data ~f:(fun data ->
-      Tensor.slice data ~dim:0 ~start:(Some i) ~end_:(Some (i + 1)) ~step:1)
-    |> Tensor.concat ~dim:0)
+    let indices =
+      List.permute (List.range 0 data_train_size) |> List.sub ~pos:0 ~len:bs
+    in
+    let bs_of_data =
+      List.map indices ~f:(fun idx -> List.nth_exn data idx |> to_device)
+    in
+    to_list bs_of_data)
+  else (
+    let bs_of_data = List.map data_test ~f:to_device in
+    to_list bs_of_data)
 
 (* -----------------------------------------
    -- Model setup and optimizer
@@ -236,7 +251,7 @@ module LGS = struct
       }
 
   (* rollout y (clean observation) list under sampled u (u_0, ..., u_{T-1}) *)
-  let rollout ~u_list (theta : P.M.t) =
+  let rollout ~z0 ~u_list (theta : P.M.t) =
     let tmp_einsum a b = Maths.einsum [ a, "ma"; b, "ab" ] "mb" in
     let _Fx_prod = theta._a in
     let _, y_list_rev =
@@ -256,6 +271,7 @@ module LGS = struct
   (* approximate kalman filtered distribution of u *)
   (* TODO: check this function after going through the derivation again *)
   let sample_and_kl
+        ~z0
         ~_Fx
         ~_Fu
         ~_Fu_0
@@ -325,7 +341,7 @@ module LGS = struct
                  (Tensor.randn
                     ~device:base.device
                     ~kind:base.kind
-                    [ bs; (if i = 0 then n else m) ]))
+                    [ (List.hd_exn (Tensor.shape z0)); (if i = 0 then n else m) ]))
           in
           let u_sample = mu + u_diff_elbo in
           (* u_final used to propagate dynamics *)
@@ -355,8 +371,12 @@ module LGS = struct
     kl, List.rev us
 
   let elbo ~data:(o_list : Tensor.t list) (theta : P.M.t) =
-    let obs_precision = Maths.(precision_of_log_var theta._log_obs_var) in
+    let obs_precision =(precision_of_log_var theta._log_obs_var) in
     (* use lqr to obtain the optimal u *)
+    let z0 =
+      let bs = List.hd_exn (Tensor.shape (List.hd_exn o_list)) in
+      Tensor.zeros ~device:base.device ~kind:base.kind [ bs; n ]
+    in
     let p =
       params_from_f ~x0:(Maths.const z0) ~theta ~o_list |> Lds_data.map_naive ~batch_const
     in
@@ -365,6 +385,7 @@ module LGS = struct
     let scaling_factor = Maths.exp theta._log_scaling_factor in
     let kl, u_sampled =
       sample_and_kl
+        ~z0
         ~_Fx:theta._a
         ~_Fu:_b_true
         ~_Fu_0:_b_0_true
@@ -377,9 +398,9 @@ module LGS = struct
         ustars
         o_list
     in
-    let y_pred = rollout ~u_list:u_sampled theta in
+    let y_pred = rollout ~z0 ~u_list:u_sampled theta in
     let lik_term =
-      let inv_std_o = Maths.(sqrt_precision_of_log_var theta._log_obs_var) in
+      let inv_std_o = (sqrt_precision_of_log_var theta._log_obs_var) in
       List.fold2_exn
         o_list
         y_pred
@@ -480,7 +501,10 @@ module LGS = struct
         in
         Maths.(tmp * std_of_log_var log_cov_u))
     in
-    let y = rollout ~u_list theta in
+    let y = 
+      let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs_sim; n ] in
+
+      rollout ~z0 ~u_list theta in
     let o_list =
       List.map y ~f:(fun y ->
         let eps =
@@ -861,6 +885,10 @@ module Make (D : Do_with_T) = struct
       let loss, new_state = O.step ~config:(config ~iter) ~state ~data () in
       let t1 = Unix.gettimeofday () in
       let time_elapsed = Float.(time_elapsed + t1 - t0) in
+      (* let n_params =
+        let params = LGS.P.value (O.params state) in
+        O.W.P.T.numel params
+      in *)
       let running_avg =
         let loss_avg =
           match running_avg with
@@ -876,12 +904,22 @@ module Make (D : Do_with_T) = struct
             ~out:(in_dir name ^ "_params");
           (* avg error *)
           Convenience.print [%message (iter : int) (loss_avg : float)];
+          (* test elbo *)
+          let test_loss =
+            let data_test = sample_data ~sampling_state_data:iter (-1) in
+            let neg_elbo, _ =
+              LGS.elbo
+                ~data:data_test
+                (LGS.P.map ~f:Maths.const (LGS.P.value (O.params state)))
+            in
+            neg_elbo |> Maths.mean|> Maths.primal |> Tensor.to_float0_exn
+          in
           let t = iter in
           Owl.Mat.(
             save_txt
               ~append:true
               ~out:(in_dir name)
-              (of_array [| Float.of_int t; time_elapsed; loss_avg |] 1 3)));
+              (of_array [| Float.of_int t; time_elapsed; loss_avg; test_loss |] 1 4)));
         []
       in
       if iter < max_iter
@@ -935,13 +973,16 @@ module Do_with_Adam : Do_with_T = struct
 
   let config ~iter:t =
     Optimizer.Config.Adam.
-      { default with base; learning_rate = Some Float.(0.001 / sqrt ((of_int (t) + 1.) / 10.))  }
+      { default with
+        base
+      ; learning_rate = Some Float.(0.001 / sqrt ((of_int t + 1.) / 50.))
+      }
 
   let init = O.init LGS.init
 end
 
 let _ =
-  let max_iter = 10000 in
+  let max_iter = 100000 in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->
