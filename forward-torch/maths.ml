@@ -84,10 +84,20 @@ let tangent_exn (E x : _ some t) : const t =
   | D (x, dx) -> E (C (tangent_tensor_of x dx))
   | _ -> raise Not_dual
 
+let tangent (E x : _ some t) : const t option =
+  match x with
+  | D (x, dx) -> Some (E (C (tangent_tensor_of x dx)))
+  | _ -> None
+
 let tangent_tensor_exn (E x : _ some t) : Tensor.t =
   match x with
   | D (x, dx) -> tangent_tensor_of x dx
   | _ -> raise Not_dual
+
+let tangent_tensor (E x : _ some t) : Tensor.t option =
+  match x with
+  | D (x, dx) -> Some (tangent_tensor_of x dx)
+  | _ -> None
 
 let dual : tangent:const t -> const t -> dual t =
   fun ~tangent (E x) ->

@@ -40,6 +40,9 @@ val device : _ some t -> Device.t
 val kind : _ some t -> Torch_core.Kind.packed
 val numel : _ some t -> int
 val tangent_exn : _ some t -> const t
+val tangent : _ some t -> const t option
+val tangent_tensor_exn : _ some t -> Tensor.t
+val tangent_tensor : _ some t -> Tensor.t option
 val dual : tangent:const t -> const t -> dual t
 val dual_on_demand : tangent:(Device.t -> const t) -> const t -> dual t
 val first_dim : _ some t -> int

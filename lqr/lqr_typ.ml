@@ -1,15 +1,15 @@
-(** Types used in linear quadratic regulator (LQR) function. conventions is, for each batch element:
-   x_(t+1) = x_t A + u_t B + f_t. *)
 open Base
 open Forward_torch
 
-(** Type of all elements in LQR pass. This can be lazily evaluated. *)
+(* conventions is, for each batch element:
+   x_(t+1) = x_t A + u_t B *)
+
 type 'a prod =
   { primal : 'a -> 'a
   ; tangent : ('a -> 'a) option
   }
 
-(** Everything has to be optional, because
+(* everything has to be optional, because
    perhaps none of those input parameters will have tangents *)
 type ('a, 'prod) momentary_params_common =
   { _Fx_prod : 'prod option (* Av product *)
@@ -26,7 +26,7 @@ type ('a, 'prod) momentary_params_common =
   ; _Cuu : 'a option
   }
 
-(** common refers to what is commoro both primal and tangent LQR problems. *)
+(* common refers to what is common both primal and tangent LQR problems. *)
 type ('a, 'prod) momentary_params =
   { common : ('a, 'prod) momentary_params_common
   ; _f : 'a option
@@ -34,6 +34,7 @@ type ('a, 'prod) momentary_params =
   ; _cu : 'a option
   }
 
+(* params starts at time idx 0 and ends at time index T. Note that at time index T only _Cxx and _cx is used *)
 module Params = struct
   type ('a, 'p) p =
     { x0 : 'a
@@ -42,7 +43,7 @@ module Params = struct
   [@@deriving prms]
 end
 
-(** In Solution u indexes from 0 to T-1 while x indexes from 1 to T. *)
+(* u_0 has the same size as x_0 as we force _Fu_0 to be the identity. *)
 module Solution = struct
   type 'a p =
     { u : 'a
@@ -54,25 +55,27 @@ end
 open Maths
 
 type backward_common_info =
-  { _Quu_chol : t option
-  ; _Quu_chol_T : t option
-  ; _V : t option
-  ; _K : t option
+  { _Quu_chol : any t option
+  ; _Quu_chol_T : any t option
+  ; _Quu_inv : any t option
+  ; _V : any t option
+  ; _K : any t option
   }
 
 type backward_info =
-  { _K : t option
-  ; _k : t option
+  { _K : any t option
+  ; _k : any t option
+  ; _Quu_chol : any t option
   }
 
 type backward_info_f =
-  { _K : t option
-  ; _k : t option
-  ; _f : t option
+  { _K : any t option
+  ; _k : any t option
+  ; _f : any t option
   }
 
 type backward_surrogate =
-  { x : t option
-  ; u : t option
-  ; params : (t, t prod) momentary_params
+  { x : any t option
+  ; u : any t option
+  ; params : (any t, any t prod) momentary_params
   }

@@ -5,7 +5,7 @@ open Maths
 let print s = Stdio.print_endline (Sexp.to_string_hum s)
 
 module Make (P : Prms.T) (O : Prms.T) = struct
-  let run (p : const P.t) ~(f : [< `const | `dual ] P.t -> [ `const | `dual ] O.t) =
+  let run (p : const P.t) ~(f : [< `const | `dual ] P.t -> any O.t) =
     let open Torch in
     (* batched JVP tests *)
     let k = 7 in
