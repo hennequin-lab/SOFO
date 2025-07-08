@@ -6,7 +6,7 @@ open Sofo
 module Mat = Owl.Dense.Matrix.S
 module Arr = Owl.Dense.Ndarray.S
 
-(* let in_dir = Cmdargs.in_dir "-d" *)
+let base = Optimizer.Config.Base.default
 
 let _ =
   Random.init 1999;
@@ -16,7 +16,6 @@ let _ =
 (* -----------------------------------------
    -- Define Control Problem          ------
    ----------------------------------------- *)
-
 
 module Dims = struct
   let n = 5
@@ -46,7 +45,7 @@ let _Cxx =
   Maths.(of_tensor pri)
 
 (* control cost set by alpha *)
-let alpha = 0.0001
+let alpha = 1e-5
 
 let _Cuu =
   let pri = q_id_of Dims.m in
@@ -162,7 +161,16 @@ let check_quality common_params u_targets =
     List.fold2_exn result u_targets ~init:0. ~f:(fun acc res u_target ->
       let u_res = res.u in
       (* let u_res = res.u |> Option.value_exn in *)
-      let error = Tensor.(norm Maths.(to_tensor (u_res - u_target)) |> to_float0_exn) in
+      let error =
+        Tensor.(
+          norm
+            (mean_dim
+               ~dtype:base.kind
+               ~dim:(Some [ 0 ])
+               ~keepdim:false
+               Maths.(to_tensor (u_res - u_target)))
+          |> to_float0_exn)
+      in
       acc +. error)
   in
   u_error
