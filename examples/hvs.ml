@@ -46,7 +46,7 @@ let gaussian_llh ?mu ~inv_std x =
   in
   let cov_term = Maths.(neg (sum (log (sqr inv_std))) |> reshape ~shape:[ 1 ]) in
   let const_term = Float.(log (2. * pi) * of_int d) in
-  Maths.(0.5 $* (const_term $+ error_term + cov_term)) |> Maths.neg
+  Maths.(-0.5 $* (const_term $+ error_term + cov_term)) 
 
 let gaussian_llh_chol ?mu ~precision_chol:ell x =
   let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
@@ -269,7 +269,6 @@ module LGS = struct
     List.rev y_list_rev
 
   (* approximate kalman filtered distribution of u *)
-  (* TODO: check this function after going through the derivation again *)
   let sample_and_kl
         ~z0
         ~_Fx
@@ -341,7 +340,7 @@ module LGS = struct
                  (Tensor.randn
                     ~device:base.device
                     ~kind:base.kind
-                    [ (List.hd_exn (Tensor.shape z0)); (if i = 0 then n else m) ]))
+                    [ List.hd_exn (Tensor.shape z0); (if i = 0 then n else m) ]))
           in
           let u_sample = mu + u_diff_elbo in
           (* u_final used to propagate dynamics *)
@@ -371,7 +370,7 @@ module LGS = struct
     kl, List.rev us
 
   let elbo ~data:(o_list : Tensor.t list) (theta : P.M.t) =
-    let obs_precision =(precision_of_log_var theta._log_obs_var) in
+    let obs_precision = precision_of_log_var theta._log_obs_var in
     (* use lqr to obtain the optimal u *)
     let z0 =
       let bs = List.hd_exn (Tensor.shape (List.hd_exn o_list)) in
@@ -400,7 +399,7 @@ module LGS = struct
     in
     let y_pred = rollout ~z0 ~u_list:u_sampled theta in
     let lik_term =
-      let inv_std_o = (sqrt_precision_of_log_var theta._log_obs_var) in
+      let inv_std_o = sqrt_precision_of_log_var theta._log_obs_var in
       List.fold2_exn
         o_list
         y_pred
@@ -501,10 +500,10 @@ module LGS = struct
         in
         Maths.(tmp * std_of_log_var log_cov_u))
     in
-    let y = 
+    let y =
       let z0 = Tensor.zeros ~device:base.device ~kind:base.kind [ bs_sim; n ] in
-
-      rollout ~z0 ~u_list theta in
+      rollout ~z0 ~u_list theta
+    in
     let o_list =
       List.map y ~f:(fun y ->
         let eps =
@@ -912,7 +911,7 @@ module Make (D : Do_with_T) = struct
                 ~data:data_test
                 (LGS.P.map ~f:Maths.const (LGS.P.value (O.params state)))
             in
-            neg_elbo |> Maths.mean|> Maths.primal |> Tensor.to_float0_exn
+            neg_elbo |> Maths.mean |> Maths.primal |> Tensor.to_float0_exn
           in
           let t = iter in
           Owl.Mat.(
@@ -975,7 +974,7 @@ module Do_with_Adam : Do_with_T = struct
     Optimizer.Config.Adam.
       { default with
         base
-      ; learning_rate = Some Float.(0.001 / sqrt ((of_int t + 1.) / 50.))
+      ; learning_rate = Some Float.(0.0001 / sqrt ((of_int t + 1.) / 50.))
       }
 
   let init = O.init LGS.init
