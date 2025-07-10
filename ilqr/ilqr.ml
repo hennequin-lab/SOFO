@@ -20,11 +20,6 @@ let ( -? ) a b =
   | None, Some b -> Some b
   | Some a, Some b -> Some (a - b)
 
-let ( *? ) f v =
-  match f, v with
-  | Some f, Some v -> Some (f v)
-  | _ -> None
-
 let maybe_scalar_mul a s =
   match a with
   | None -> None
@@ -63,32 +58,50 @@ let forward
     then tau_prev
     else (
       let x0 = p.x0 in
-      let u0 =
-        let _k0 =
-          let tmp = List.hd_exn bck in
-          tmp._k
-        in
-        maybe_scalar_mul _k0 alpha
+      let u0 = maybe_scalar_mul (List.hd_exn bck)._k alpha in
+      (* in tau_opt x goes from 1 to T but u goes from 0 to T-1. bck goes from 0 to T-1. *)
+      (* in tau_opt_trunc and bck_trunc x,u and bck_info goes from 1 to T-1 *)
+      let tau_opt_trunc =
+        let x_opt = List.map tau_opt ~f:(fun tau -> tau.x) in
+        let u_opt = List.map tau_opt ~f:(fun tau -> tau.u) in
+        let x_opt_trunc = List.drop_last_exn x_opt in
+        let u_opt_trunc = List.tl_exn u_opt in
+        List.map2_exn x_opt_trunc u_opt_trunc ~f:(fun x u -> Solution.{ x; u })
       in
-      let _, _, solution =
-        List.fold2_exn bck tau_opt ~init:(x0, u0, []) ~f:(fun (x, u, accu) b tau ->
-          cleanup ();
-          (* fold into the state update *)
-          let x_new = f_theta ~x:(Option.value_exn x) ~u:(Option.value_exn u) in
-          let u_new =
-            let x_opt = tau.x in
-            _u
-              ~tangent:false
-              ~batch_const
-              ~_k:b._k
-              ~_K:b._K
-              ~x:(Some x_new -? x_opt)
-              ~alpha
-          in
-          Some x_new, u_new, Solution.{ u; x = Some x_new } :: accu)
+      let bck_trunc = List.tl_exn bck in
+      let x_f, u_f, solution =
+        List.fold2_exn
+          bck_trunc
+          tau_opt_trunc
+          ~init:(x0, u0, [])
+          ~f:(fun (x_prev, u_prev, accu) b tau ->
+            cleanup ();
+            (* calculate x_t and u_t and fold into the state update *)
+            let x_new =
+              f_theta ~x:(Option.value_exn x_prev) ~u:(Option.value_exn u_prev)
+            in
+            let u_new =
+              let x_opt = tau.x in
+              _u
+                ~tangent:false
+                ~batch_const
+                ~_k:b._k
+                ~_K:b._K
+                ~x:(Some x_new -? x_opt)
+                ~alpha
+            in
+            Some x_new, u_new, Solution.{ u = u_prev; x = Some x_new } :: accu)
+      in
+      (* append x_T and u_T-1 at the back *)
+      let tau_curr =
+        List.rev solution
+        @ [ Solution.
+              { u = u_f
+              ; x = Some (f_theta ~x:(Option.value_exn x_f) ~u:(Option.value_exn u_f))
+              }
+          ]
       in
       let alpha = gamma *. alpha in
-      let tau_curr = List.rev solution in
       let cost_curr = cost_func ~batch_const tau_curr p in
       let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
       if Float.(is_nan cost_curr)
@@ -98,6 +111,7 @@ let forward
         let stop = Float.(pct_change < conv_threshold) || i = max_iter in
         fwd_loop ~stop ~i:Int.(i + 1) ~alpha ~tau_prev:tau_curr ~cost_prev:cost_curr))
   in
+  (* start with alpha set to 1 *)
   let alpha = 1. in
   let cost_init = cost_func ~batch_const tau_opt p in
   fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt ~cost_prev:cost_init
@@ -113,67 +127,34 @@ let ilqr_loop
       ~cost_init
       ~(tau_init : t option Solution.p list)
   =
-  let rec ilqr_rec ~stop ~i ~tau_prev ~cost_prev ~common_info_prev ~info_prev =
+  let rec loop i tau_prev cost_prev =
+    let p_curr = params_func tau_prev in
+    let common_info =
+      List.map p_curr.Params.params ~f:(fun p -> p.common) |> backward_common ~batch_const
+    in
+    cleanup ();
+    let bck = backward ~batch_const common_info p_curr in
+    let tau_curr =
+      forward
+        ~batch_const
+        ~gamma
+        ~cost_func
+        ~f_theta
+        ~p:p_curr
+        ~tau_opt:tau_prev
+        ~bck
+        ~conv_threshold
+        ~max_iter
+    in
+    let cost_curr = cost_func ~batch_const tau_curr p_curr in
+    let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
+    let stop = Float.(pct_change < conv_threshold) || i = max_iter in
+    cleanup ();
     if stop
-    then tau_prev, common_info_prev, info_prev
-    else (
-      let p_curr : (t option, (t, t -> t) momentary_params list) Params.p =
-        params_func tau_prev
-      in
-      (* batch const is false since fx and fu now has batch dimension in front *)
-      let common_info =
-        backward_common
-          ~batch_const
-          (List.map p_curr.Params.params ~f:(fun x -> x.common))
-      in
-      cleanup ();
-      let bck = backward ~batch_const common_info p_curr in
-      let tau_curr =
-        forward
-          ~batch_const
-          ~gamma
-          ~cost_func
-          ~f_theta
-          ~p:p_curr
-          ~tau_opt:tau_prev
-          ~bck
-          ~conv_threshold
-          ~max_iter
-      in
-      let cost_curr = cost_func ~batch_const tau_curr p_curr in
-      let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
-      let stop = Float.(pct_change < conv_threshold) || i = max_iter in
-      cleanup ();
-      ilqr_rec
-        ~stop
-        ~i:Int.(i + 1)
-        ~tau_prev:tau_curr
-        ~cost_prev:cost_curr
-        ~common_info_prev:(Some common_info)
-        ~info_prev:(Some bck))
+    then tau_curr, Some common_info, Some bck
+    else loop Int.(i + 1) tau_curr cost_curr
   in
-  ilqr_rec
-    ~stop:false
-    ~i:0
-    ~tau_prev:tau_init
-    ~cost_prev:cost_init
-    ~common_info_prev:None
-    ~info_prev:None
-
-let rollout
-      ~u_init
-      ~(p_init : (t option, (t, t -> t) momentary_params list) Params.p)
-      ~f_theta
-  =
-  (* x0 is 0; u goes from 0 to T-1, x goes from 1 to T *)
-  let _, solution =
-    List.fold u_init ~init:(p_init.x0, []) ~f:(fun (x, accu) u ->
-      cleanup ();
-      (* fold into the state update *)
-      let x_new = f_theta ~x:(Option.value_exn x) ~u:(Option.value_exn u) in
-      Some x_new, Solution.{ u; x = Some x_new } :: accu)
-  in
-  List.rev solution
+  loop 0 tau_init cost_init
 
 (* when batch_const is true, _Fx_prods, _Fu_prods, _Cxx, _Cxu, _Cuu has no leading batch dimension and special care needs to be taken to deal with these *)
 let _isolve
@@ -184,7 +165,7 @@ let _isolve
       ~params_func
       ~conv_threshold
       ~tau_init
-      ~max_iter
+      max_iter
   =
   (* step 1: init params and cost *)
   let p_init = params_func tau_init in
