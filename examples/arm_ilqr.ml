@@ -717,7 +717,7 @@ let ilqr ~targets_batched =
       ~params_func
       ~conv_threshold
       ~tau_init
-      ~max_iter:200
+      200
   in
   sol
 

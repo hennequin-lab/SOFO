@@ -98,7 +98,6 @@ let backward_common
           , maybe_btr z._Cxu +? (z._Fu_prod *? maybe_btr tmp) ))
       in
       (* compute LQR gain parameters to be used in the subsequent fwd pass *)
-      (* Torch.Tensor.print (Maths.primal (Option.value_exn _Quu));  *)
       let _Quu_inv = Option.map _Quu ~f:inv_sqr in
       let _Quu_chol = Option.map _Quu ~f:cholesky in
       let _Quu_chol_T = maybe_btr _Quu_chol in

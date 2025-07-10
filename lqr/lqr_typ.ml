@@ -43,7 +43,8 @@ module Params = struct
   [@@deriving prms]
 end
 
-(* u_0 has the same size as x_0 as we force _Fu_0 to be the identity. *)
+(* u_0 has the same size as x_0 as we force _Fu_0 to be the identity. u goes from 0 to T-1, 
+  x goes from 1 to T *)
 module Solution = struct
   type 'a p =
     { u : 'a
@@ -54,6 +55,7 @@ end
 
 open Maths
 
+(* goes from 0 to T-1 *)
 type backward_common_info =
   { _Quu_chol : any t option
   ; _Quu_chol_T : any t option
@@ -62,6 +64,7 @@ type backward_common_info =
   ; _K : any t option
   }
 
+(* goes from 0 to T-1 *)
 type backward_info =
   { _K : any t option
   ; _k : any t option

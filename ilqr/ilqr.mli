@@ -23,10 +23,7 @@ val _isolve
                  momentary_params
                  list )
              Params.p)
-  -> (* -> u_init:Maths.any Maths.t option list *)
-     conv_threshold:
-       float
-       (* -> p_init:(Maths.any Maths.t option, (Maths.any Maths.t, Maths.any Maths.t -> Maths.any Maths.t) momentary_params list) Params.p *)
+  -> conv_threshold:float
   -> tau_init:Maths.any Maths.t option Solution.p list
-  -> max_iter:int
+  -> int
   -> Maths.any Maths.t option Solution.p list * backward_info list option
