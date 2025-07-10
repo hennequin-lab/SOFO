@@ -57,8 +57,17 @@ let forward
     if stop
     then tau_prev
     else (
+      (* M1: use true x0 when it is known *)
       let x0 = p.x0 in
-      let u0 = maybe_scalar_mul (List.hd_exn bck)._k alpha in
+      let u0 =
+        _u
+          ~tangent:false
+          ~batch_const:false
+          ~_k:(List.hd_exn bck)._k
+          ~_K:(List.hd_exn bck)._K
+          ~x:x0
+          ~alpha
+      in
       (* in tau_opt x goes from 1 to T but u goes from 0 to T-1. bck goes from 0 to T-1. *)
       (* in tau_opt_trunc and bck_trunc x,u and bck_info goes from 1 to T-1 *)
       let tau_opt_trunc =
@@ -102,7 +111,7 @@ let forward
           ]
       in
       let alpha = gamma *. alpha in
-      let cost_curr = cost_func ~batch_const tau_curr p in
+      let cost_curr = cost_func tau_curr in
       let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
       if Float.(is_nan cost_curr)
       then failwith "current cost value is nan"
@@ -113,7 +122,7 @@ let forward
   in
   (* start with alpha set to 1 *)
   let alpha = 1. in
-  let cost_init = cost_func ~batch_const tau_opt p in
+  let cost_init = cost_func tau_opt in
   fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt ~cost_prev:cost_init
 
 let ilqr_loop
@@ -146,7 +155,7 @@ let ilqr_loop
         ~conv_threshold
         ~max_iter
     in
-    let cost_curr = cost_func ~batch_const tau_curr p_curr in
+    let cost_curr = cost_func tau_curr in
     let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
     let stop = Float.(pct_change < conv_threshold) || i = max_iter in
     cleanup ();
@@ -168,8 +177,7 @@ let _isolve
       max_iter
   =
   (* step 1: init params and cost *)
-  let p_init = params_func tau_init in
-  let cost_init = cost_func ~batch_const tau_init p_init in
+  let cost_init = cost_func tau_init in
   (*step 2: loop to find the best controls and states *)
   let tau_final, _, info_final =
     ilqr_loop
