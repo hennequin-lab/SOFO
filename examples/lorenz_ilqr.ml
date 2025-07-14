@@ -17,7 +17,7 @@ let _ =
 
 let in_dir = Cmdargs.in_dir "-d"
 let base = Optimizer.Config.Base.default
-let conv_threshold = 0.0001
+let conv_threshold = 0.00001
 
 (* -----------------------------------------
    -- Generate Lorenz data            ------
@@ -75,7 +75,7 @@ let u_array =
     let input =
       Array.init (tmax * 3) ~f:(fun _ ->
         if Float.(Random.float 1.0 < u_threshold)
-        then Float.(Owl_stats_prng.rand_gaussian ())
+        then Float.(1. * Owl_stats_prng.rand_gaussian ())
         else 0.)
     in
     Arr.of_array input [| tmax; 3 |])
@@ -100,7 +100,7 @@ let _Cxx_batched =
 
 let _Cuu_batched =
   let _Cuu =
-    Maths.(any (of_tensor (Tensor.(f 1. * eye ~options:(base.kind, base.device) ~n:m))))
+    Maths.(any (of_tensor Tensor.(f 1e-4 * eye ~options:(base.kind, base.device) ~n:m)))
   in
   Maths.broadcast_to _Cuu ~size:[ bs; m; m ]
 
@@ -243,12 +243,12 @@ let ilqr ~observation =
     let tmp_list =
       (* TODO: should we assume x0=0 as in the original paper? *)
       Lqr.Params.
-        { 
-          x0 = Some (Maths.(any (zeros_like x0_maths)))
-          (* x0 = Some x0_maths *)
+        { x0 =
+            (* Some Maths.(any (zeros_like x0_maths)) *)
+            Some x0_maths
         ; params =
             List.map2_exn tau_extended observation ~f:(fun tau o ->
-              let _cx = Maths.(neg o) in
+              let _cx = Maths.(neg (einsum [ o, "ma"; _Cxx_batched, "mab" ] "mb")) in
               Lds_data.Temp.
                 { _f = None
                 ; _Fx_prod = _Fx ~x:tau.x
@@ -265,7 +265,7 @@ let ilqr ~observation =
   in
   let u_init =
     List.init tmax ~f:(fun _ ->
-      let rand = Tensor.(f 0. * randn ~device:base.device ~kind:base.kind [ bs; 3 ]) in
+      let rand = Tensor.(zeros ~device:base.device ~kind:base.kind [ bs; 3 ]) in
       Maths.any (Maths.of_tensor rand))
   in
   let tau_init = rollout_sol ~u_list:u_init ~x0:x0_maths in
@@ -273,12 +273,12 @@ let ilqr ~observation =
     Ilqr._isolve
       ~f_theta
       ~batch_const:false
-      ~gamma:1.
+      ~gamma:0.9
       ~cost_func
       ~params_func
       ~conv_threshold
       ~tau_init
-      1000
+      2000
   in
   sol
 

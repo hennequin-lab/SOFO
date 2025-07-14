@@ -50,26 +50,16 @@ let forward
       ~(p : (any t option, (any t, any t -> any t) momentary_params list) Params.p)
       ~(tau_opt : any t option Solution.p list)
       ~(bck : backward_info list)
-      ~conv_threshold
-      ~max_iter
   =
-  let rec fwd_loop ~stop ~i ~alpha ~tau_prev ~cost_prev =
+  let cost_init = cost_func tau_opt in
+  let rec fwd_loop ~stop ~i ~alpha ~tau_prev =
     if stop
     then tau_prev
     else (
-      (* M1: use true x0 when it is known *)
       let x0 = p.x0 in
-      let u0 =
-        _u
-          ~tangent:false
-          ~batch_const:false
-          ~_k:(List.hd_exn bck)._k
-          ~_K:(List.hd_exn bck)._K
-          ~x:x0
-          ~alpha
-      in
+      let u0 = maybe_scalar_mul (List.hd_exn bck)._k alpha in
       (* in tau_opt x goes from 1 to T but u goes from 0 to T-1. bck goes from 0 to T-1. *)
-      (* in tau_opt_trunc and bck_trunc x,u and bck_info goes from 1 to T-1 *)
+      (* in tau_opt_trunc and bck_trunc x,u and bck_trunc goes from 1 to T-1 *)
       let tau_opt_trunc =
         let x_opt = List.map tau_opt ~f:(fun tau -> tau.x) in
         let u_opt = List.map tau_opt ~f:(fun tau -> tau.u) in
@@ -110,20 +100,15 @@ let forward
               }
           ]
       in
-      let alpha = gamma *. alpha in
       let cost_curr = cost_func tau_curr in
-      let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
-      if Float.(is_nan cost_curr)
-      then failwith "current cost value is nan"
-      else (
-        cleanup ();
-        let stop = Float.(pct_change < conv_threshold) || i = max_iter in
-        fwd_loop ~stop ~i:Int.(i + 1) ~alpha ~tau_prev:tau_curr ~cost_prev:cost_curr))
+      cleanup ();
+      print [%message "fwd loop" (cost_init : float) (cost_curr : float)];
+      let stop = Float.(cost_curr < cost_init) in
+      fwd_loop ~stop ~i:Int.(i + 1) ~alpha:(alpha *. gamma) ~tau_prev:tau_curr)
   in
   (* start with alpha set to 1 *)
   let alpha = 1. in
-  let cost_init = cost_func tau_opt in
-  fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt ~cost_prev:cost_init
+  fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt
 
 let ilqr_loop
       ~batch_const
@@ -144,19 +129,12 @@ let ilqr_loop
     cleanup ();
     let bck = backward ~batch_const common_info p_curr in
     let tau_curr =
-      forward
-        ~batch_const
-        ~gamma
-        ~cost_func
-        ~f_theta
-        ~p:p_curr
-        ~tau_opt:tau_prev
-        ~bck
-        ~conv_threshold
-        ~max_iter
+      forward ~batch_const ~gamma ~cost_func ~f_theta ~p:p_curr ~tau_opt:tau_prev ~bck
     in
     let cost_curr = cost_func tau_curr in
     let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
+    print
+      [%message "ilqr loop" (cost_prev : float) (cost_curr : float) (pct_change : float)];
     let stop = Float.(pct_change < conv_threshold) || i = max_iter in
     cleanup ();
     if stop
