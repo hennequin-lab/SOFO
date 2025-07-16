@@ -15,7 +15,7 @@ let base = Optimizer.Config.Base.default
 module Model = struct
   module P = Prms.Single
 
-  let f ~theta:w input = input *@ w
+  let f ~(theta : _ some P.t) input = Maths.(input *@ theta)
 
   let init ~d_in ~d_out : P.param =
     let sigma = Float.(1. / sqrt (of_int d_in)) in
