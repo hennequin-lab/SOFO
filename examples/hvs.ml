@@ -46,7 +46,7 @@ let gaussian_llh ?mu ~inv_std x =
   in
   let cov_term = Maths.(neg (sum (log (sqr inv_std))) |> reshape ~shape:[ 1 ]) in
   let const_term = Float.(log (2. * pi) * of_int d) in
-  Maths.(-0.5 $* (const_term $+ error_term + cov_term)) 
+  Maths.(-0.5 $* (const_term $+ error_term + cov_term))
 
 let gaussian_llh_chol ?mu ~precision_chol:ell x =
   let d = x |> Maths.primal |> Tensor.shape |> List.last_exn in
@@ -81,6 +81,16 @@ let detach x = x |> Maths.primal_tensor_detach |> Maths.const
 (* -----------------------------------------
    -- Data Read In ---
    ----------------------------------------- *)
+
+(* state dim *)
+let n = Option.value (Cmdargs.get_int "-n") ~default:8
+
+(* control dim *)
+let m = 3
+
+(* observation dim *)
+let o = 16 * 16
+
 let load_npy_data hvs_folder =
   let folder_path = "_data/hvs_npy/" ^ hvs_folder in
   (* get array of .npy files, each contains a mat of shape [T x n_channels] *)
@@ -132,18 +142,61 @@ let data_train, data_test =
 
 let data_train_size = List.length data_train
 
+(* use artificially generated data; test that cross-validation makes sense *)
+let generate_aritificial_data ~n ~m bs () =
+  let a_matrix = make_a_prms ~n 0.8 |> Tensor.of_bigarray ~device:base.device in
+  let _b_0_true =
+    Tensor.(
+      f Float.(1. /. sqrt (of_int n)) * randn ~device:base.device ~kind:base.kind [ n; n ])
+  in
+  let _b_true =
+    Tensor.(
+      f Float.(1. /. sqrt (of_int m)) * randn ~device:base.device ~kind:base.kind [ m; n ])
+  in
+  let c_mat =
+    Tensor.(
+      f Float.(1. /. sqrt (of_int n)) * randn ~device:base.device ~kind:base.kind [ n; o ])
+  in
+  let d_mat = Tensor.(randn ~device:base.device ~kind:base.kind [ 1; o ]) in
+  let obs_var_chol = Tensor.(randn ~device:base.device ~kind:base.kind [ o ]) in
+  let x0 = Tensor.randn ~device:base.device ~kind:base.kind [ bs; n ] in
+  let u_list =
+    List.init tmax ~f:(fun i ->
+      Tensor.(
+        randn
+          ~device:base.device
+          ~kind:base.kind
+          (if Int.(i = 0) then [ bs; n ] else [ bs; m ])))
+  in
+  let _, x_list_rev =
+    List.foldi u_list ~init:(x0, []) ~f:(fun i accu u ->
+      let x_prev, x_accu = accu in
+      let x_new =
+        Tensor.(
+          matmul x_prev a_matrix + matmul u (if Int.(i = 0) then _b_0_true else _b_true))
+      in
+      x_new, x_new :: x_accu)
+  in
+  let x_list = List.rev x_list_rev in
+  let o_list =
+    List.map x_list ~f:(fun x ->
+      let noise = Tensor.randn ~device:base.device ~kind:base.kind [ bs; o ] in
+      Tensor.(matmul x c_mat + d_mat + (noise * obs_var_chol)))
+  in
+  o_list
+
+let data_train_af, data_test_af =
+  let data = generate_aritificial_data ~n:6 ~m:3 2000 () in
+  let data_train_test =
+    List.map data ~f:(fun mat ->
+      ( Tensor.slice mat ~dim:0 ~start:(Some 0) ~end_:(Some 1600) ~step:1
+      , Tensor.slice mat ~dim:0 ~start:(Some 1600) ~end_:(Some 2000) ~step:1 ))
+  in
+  List.map data_train_test ~f:fst, List.map data_train_test ~f:snd
+
 (* -----------------------------------------
    -- Problem Definition ---
    ----------------------------------------- *)
-
-(* state dim *)
-let n = Option.value (Cmdargs.get_int "-n") ~default:8
-
-(* control dim *)
-let m = 3
-
-(* observation dim *)
-let o = 16 * 16
 
 let _b_0_true =
   Tensor.(
@@ -876,9 +929,14 @@ module Make (D : Do_with_T) = struct
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
     let rec loop ~iter ~state ~time_elapsed running_avg =
       Stdlib.Gc.major ();
-      let data =
+      (* let data =
         let o_list = sample_data ~sampling_state_data:iter bs in
         o_list
+      in *)
+      let data =
+        List.map data_train_af ~f:(fun mat ->
+          let start = Random.int (1600 - bs) in
+          Tensor.slice mat ~start:(Some start) ~end_:(Some (start + bs)) ~step:1 ~dim:0)
       in
       let t0 = Unix.gettimeofday () in
       let loss, new_state = O.step ~config:(config ~iter) ~state ~data () in
@@ -905,7 +963,8 @@ module Make (D : Do_with_T) = struct
           Convenience.print [%message (iter : int) (loss_avg : float)];
           (* test elbo *)
           let test_loss =
-            let data_test = sample_data ~sampling_state_data:iter (-1) in
+            (* let data_test = sample_data ~sampling_state_data:iter (-1) in *)
+            let data_test = data_test_af in
             let neg_elbo, _ =
               LGS.elbo
                 ~data:data_test
@@ -974,7 +1033,9 @@ module Do_with_Adam : Do_with_T = struct
     Optimizer.Config.Adam.
       { default with
         base
-      ; learning_rate = Some Float.(0.0001 / sqrt ((of_int t + 1.) / 50.))
+      (* ; learning_rate = Some Float.(0.0001 / sqrt ((of_int t + 1.) / 50.)) *)
+      ; learning_rate = Some Float.(0.001 / sqrt ((of_int t + 1.) / 50.))
+
       }
 
   let init = O.init LGS.init
