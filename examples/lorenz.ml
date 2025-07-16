@@ -34,7 +34,7 @@ module RNN = struct
 
   type input = unit
 
-  let f ~(theta : _ Maths.some P.t) ~input:_ y =
+  let forward ~(theta : _ Maths.some P.t) ~input:_ y =
     let bs = Maths.shape y |> List.hd_exn in
     let y_tmp =
       Maths.concat
@@ -42,6 +42,35 @@ module RNN = struct
         ~dim:1
     in
     Maths.((y *@ theta.a) + (relu (y_tmp *@ theta.c) *@ theta.w))
+
+  (* here data is a list of (x, optional labels) *)
+  let f ~data ~y0 theta =
+    let result, _ =
+      List.foldi
+        data
+        ~init:(None, Maths.(any (of_tensor y0)))
+        ~f:(fun t (accu, y) (x, labels) ->
+          if t % 1 = 0 then Stdlib.Gc.major ();
+          let y = forward ~theta ~input:x y in
+          let accu =
+            match labels with
+            | None -> accu
+            | Some labels ->
+              let ell = Loss.mse ~average_over:[ 0; 1 ] Maths.(of_tensor labels - y) in
+              let delta_ggn =
+                let yt = Maths.tangent_exn y in
+                let hyt = Loss.mse_hv_prod ~average_over:[ 0; 1 ] (Maths.const y) ~v:yt in
+                Maths.C.einsum [ yt, "kab"; hyt, "lab" ] "kl"
+              in
+              (match accu with
+               | None -> Some (ell, delta_ggn)
+               | Some accu ->
+                 let ell_accu, ggn_accu = accu in
+                 Some (Maths.(ell_accu + ell), Maths.C.(ggn_accu + delta_ggn)))
+          in
+          accu, y)
+    in
+    Option.value_exn result
 
   let init ~d ~dh : P.param =
     let w =
@@ -61,39 +90,12 @@ module RNN = struct
 
   let simulate ~(theta : _ Maths.some P.t) ~horizon y0 =
     let rec iter t accu y =
-      if t = 0 then List.rev accu else iter (t - 1) (y :: accu) (f ~theta ~input:() y)
+      if t = 0
+      then List.rev accu
+      else iter (t - 1) (y :: accu) (forward ~theta ~input:() y)
     in
     iter horizon [] Maths.(any (of_tensor y0))
 end
-
-(* here data is a list of (x, optional labels) *)
-let rnn_f ~data ~y0 theta =
-  let result, _ =
-    List.foldi
-      data
-      ~init:(None, Maths.(any (of_tensor y0)))
-      ~f:(fun t (accu, y) (x, labels) ->
-        if t % 1 = 0 then Stdlib.Gc.major ();
-        let y = RNN.f ~theta ~input:x y in
-        let accu =
-          match labels with
-          | None -> accu
-          | Some labels ->
-            let ell = Loss.mse ~average_over:[ 0; 1 ] Maths.(of_tensor labels - y) in
-            let delta_ggn =
-              let yt = Maths.tangent_exn y in
-              let hyt = Loss.mse_hv_prod ~average_over:[ 0; 1 ] (Maths.const y) ~v:yt in
-              Maths.C.einsum [ yt, "kab"; hyt, "lab" ] "kl"
-            in
-            (match accu with
-             | None -> Some (ell, delta_ggn)
-             | Some accu ->
-               let ell_accu, ggn_accu = accu in
-               Some (Maths.(ell_accu + ell), Maths.C.(ggn_accu + delta_ggn)))
-        in
-        accu, y)
-  in
-  Option.value_exn result
 
 (* -----------------------------------------
    -- Generate Lorenz data            ------
@@ -162,7 +164,7 @@ let rec loop ~t ~out ~state =
         else (), None) )
   in
   let theta, tangents = O.prepare ~config state in
-  let loss, ggn = rnn_f ~data ~y0:init_cond theta in
+  let loss, ggn = RNN.f ~data ~y0:init_cond theta in
   let new_state = O.step ~config ~info:{ loss; ggn; tangents } state in
   if t % 10 = 0
   then (
