@@ -1,6 +1,18 @@
 (executables
- (names linear_regression lqr_eg lorenz_ilqr arm_ilqr delayed_addition lorenz)
- (libraries cmdargs domainslib bos sofo owl owl-ode lqr ilqr) 
+ (names
+  linear_regression
+  lqr_eg
+  lorenz_ilqr
+  arm_ilqr
+  delayed_addition
+  lorenz
+  bit_flipflop_force
+  bit_flipflop_small_net
+  kalman_rnn
+  mlp_classification
+  mlp_mixer
+  random_class)
+ (libraries cmdargs domainslib bos sofo owl owl-ode lqr ilqr)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))
 

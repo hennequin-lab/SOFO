@@ -1136,7 +1136,7 @@ let linsolve_triangular ?left ?upper x =
 let linsolve ~left x = make_binary (Ops.linsolve ~left) x
 let kron x = make_binary Ops.kron x
 
-let conv2d ?padding ?dilation ?groups ~bias stride x w =
+let conv2d ?padding ?dilation ?groups ~bias ~stride ~w x =
   make_binary (Ops.conv2d ?padding ?dilation ?groups ~bias stride) x w
 
 (* ----------------------------------------------------
@@ -1166,6 +1166,7 @@ module C = struct
 
   let view ~size = make_unary (Ops.view ~size)
   let broadcast_to ~size = make_unary (Ops.broadcast_to ~size)
+  let shape x = shape x
   let reshape ~shape = make_unary (Ops.reshape ~shape)
   let permute ~dims = make_unary (Ops.permute ~dims)
   let squeeze ~dim = make_unary (Ops.squeeze ~dim)
@@ -1306,6 +1307,6 @@ module C = struct
   let linsolve ~left x = make_binary (Ops.linsolve ~left) x
   let kron = make_binary Ops.kron
 
-  let conv2d ?padding ?dilation ?groups ~bias stride x w =
+  let conv2d ?padding ?dilation ?groups ~bias ~stride ~w x =
     make_binary (Ops.conv2d ?padding ?dilation ?groups ~bias stride) x w
 end

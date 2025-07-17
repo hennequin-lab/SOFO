@@ -89,9 +89,6 @@ module RNN = struct
     in
     { c; b; o }
 
-  type data = Tensor.t * Tensor.t
-  type args = unit
-
   (* here data is a list of (x_t, optional labels). labels is x_t. *)
   let f ~data theta =
     let result, _ =
@@ -109,24 +106,25 @@ module RNN = struct
         (* loss only calculated at the final timestep *)
         let labels = if t = Settings.n_steps - 1 then Some labels_all else None in
         let z = forward ~theta ~input z in
-        let pred = prediction ~theta z in
         let accu =
           match labels with
           | None -> accu
           | Some labels ->
-            let ell = Loss.mse ~average_over:[ 0; 1 ] Maths.(of_tensor labels - pred) in
+            let pred = prediction ~theta z in
+            let delta_ell =
+              Loss.mse ~average_over:[ 0; 1 ] Maths.(of_tensor labels - pred)
+            in
             let delta_ggn =
-              let yt = Maths.tangent_exn pred in
-              let hyt =
-                Loss.mse_hv_prod ~average_over:[ 0; 1 ] (Maths.const pred) ~v:yt
-              in
-              Maths.C.einsum [ yt, "kab"; hyt, "lab" ] "kl"
+              Loss.mse_ggn
+                ~average_over:[ 0; 1 ]
+                (Maths.const pred)
+                ~vtgt:(Maths.tangent_exn pred)
             in
             (match accu with
-             | None -> Some (ell, delta_ggn)
+             | None -> Some (delta_ell, delta_ggn)
              | Some accu ->
                let ell_accu, ggn_accu = accu in
-               Some (Maths.(ell_accu + ell), Maths.C.(ggn_accu + delta_ggn)))
+               Some (Maths.(ell_accu + delta_ell), Maths.C.(ggn_accu + delta_ggn)))
         in
         accu, Some z)
     in
@@ -162,11 +160,19 @@ let sample_data batch_size =
   let to_device = Tensor.of_bigarray ~device:base.device in
   to_device input_tensor, to_device target_mat
 
+(* -----------------------------------------
+   -- Optimization with SOFO    ------
+   ----------------------------------------- *)
+
 module O = Optimizer.SOFO (RNN.P)
 
 let config =
   Optimizer.Config.SOFO.
-    { base; learning_rate = Some 0.1; n_tangents = 128; damping = `relative_from_top 1e-5 }
+    { base
+    ; learning_rate = Some 0.1
+    ; n_tangents = 128
+    ; damping = `relative_from_top 1e-5
+    }
 
 let rec loop ~t ~out ~state =
   Stdlib.Gc.major ();

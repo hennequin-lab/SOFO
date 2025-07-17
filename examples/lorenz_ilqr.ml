@@ -1,7 +1,5 @@
 (* Test whether ilqr is correct with the Lorenz attractor. *)
-open Printf
 open Base
-open Domainslib
 open Owl
 open Torch
 open Forward_torch
@@ -127,7 +125,7 @@ let _Fx ~(x : Maths.any Maths.t option) =
   let row2 =
     let row21 = Maths.(dt $* f rho - z_t) in
     let row22 =
-      Tensor.of_bigarray ~device:base.device (Mat.of_array [| Float.(1. -. dt) |] 1 1)
+      Tensor.of_bigarray ~device:base.device (Mat.of_array [| 1. -. dt |] 1 1)
       |> Maths.of_tensor
       |> Maths.broadcast_to ~size:[ bs; 1 ]
       |> Maths.any
@@ -139,9 +137,7 @@ let _Fx ~(x : Maths.any Maths.t option) =
     let row31 = Maths.(dt $* y_t) in
     let row32 = Maths.(dt $* x_t) in
     let row33 =
-      Tensor.of_bigarray
-        ~device:base.device
-        (Mat.of_array [| Float.(1. -. (beta *. dt)) |] 1 1)
+      Tensor.of_bigarray ~device:base.device (Mat.of_array [| 1. -. (beta *. dt) |] 1 1)
       |> Maths.of_tensor
       |> Maths.broadcast_to ~size:[ bs; 1 ]
       |> Maths.any

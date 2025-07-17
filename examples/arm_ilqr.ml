@@ -17,32 +17,18 @@ let dt = 0.001
 let conv_threshold = 0.0001
 
 (* -----------------------------------------
-   ----- Utilitiy Functions ------
+   ----- Arm Model ------
    ----------------------------------------- *)
-let ( +? ) a b =
-  match a, b with
-  | None, None -> None
-  | Some a, None -> Some a
-  | None, Some b -> Some b
-  | Some a, Some b -> Some Maths.(a + b)
 
 type 'a pair =
   { x1 : 'a
   ; x2 : 'a
   }
 
-(* -----------------------------------------
-   ----- Arm Model ------
-   ----------------------------------------- *)
 (* angular or hand state *)
 type 'a state =
   { pos : 'a pair
   ; vel : 'a pair
-  }
-
-let map s ~f =
-  { pos = { x1 = f s.pos.x1; x2 = f s.pos.x2 }
-  ; vel = { x1 = f s.vel.x1; x2 = f s.vel.x2 }
   }
 
 (* ----------------------------------------------------------------------------
@@ -109,20 +95,20 @@ let hand_pos_of pos_x1 pos_x2 =
   joint_x + (_L2 $* cos z), joint_y + (_L2 $* sin z)
 
 (* compute hand vel given angular pos and angular vel *)
-let hand_vel_of pos_x1 pos_x2 vel_x1 vel_x2 =
+(* let hand_vel_of pos_x1 pos_x2 vel_x1 vel_x2 =
   let open Maths in
   let joint_x_dot = neg (_L1 $* vel_x1 * sin pos_x1) in
   let joint_y_dot = _L1 $* vel_x1 * cos pos_x1 in
   let z = pos_x1 + pos_x2 in
   let zdot = vel_x1 + vel_x2 in
-  joint_x_dot - (_L2 $* zdot * sin z), joint_y_dot + (_L2 $* zdot * cos z)
+  joint_x_dot - (_L2 $* zdot * sin z), joint_y_dot + (_L2 $* zdot * cos z) *)
 
 (* compute hand pos and velocity given angular state *)
-let hand_of theta =
+(* let hand_of theta =
   let open Maths in
   let pos_x1, pos_x2 = hand_pos_of theta.pos.x1 theta.pos.x2 in
   let vel_x1, vel_x2 = hand_vel_of theta.pos.x1 theta.pos.x2 theta.vel.x1 theta.vel.x2 in
-  pos_x1, pos_x2, vel_x1, vel_x2
+  pos_x1, pos_x2, vel_x1, vel_x2 *)
 
 (* ----------------------------------------------------------------------------
     ---     KINEMATICS MATH FUNCTIONS                                        ---

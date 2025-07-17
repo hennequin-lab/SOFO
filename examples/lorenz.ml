@@ -56,17 +56,20 @@ module RNN = struct
             match labels with
             | None -> accu
             | Some labels ->
-              let ell = Loss.mse ~average_over:[ 0; 1 ] Maths.(of_tensor labels - y) in
+              let delta_ell =
+                Loss.mse ~average_over:[ 0; 1 ] Maths.(of_tensor labels - y)
+              in
               let delta_ggn =
-                let yt = Maths.tangent_exn y in
-                let hyt = Loss.mse_hv_prod ~average_over:[ 0; 1 ] (Maths.const y) ~v:yt in
-                Maths.C.einsum [ yt, "kab"; hyt, "lab" ] "kl"
+                Loss.mse_ggn
+                  ~average_over:[ 0; 1 ]
+                  (Maths.const y)
+                  ~vtgt:(Maths.tangent_exn y)
               in
               (match accu with
-               | None -> Some (ell, delta_ggn)
+               | None -> Some (delta_ell, delta_ggn)
                | Some accu ->
                  let ell_accu, ggn_accu = accu in
-                 Some (Maths.(ell_accu + ell), Maths.C.(ggn_accu + delta_ggn)))
+                 Some (Maths.(ell_accu + delta_ell), Maths.C.(ggn_accu + delta_ggn)))
           in
           accu, y)
     in

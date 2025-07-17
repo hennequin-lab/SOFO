@@ -53,7 +53,7 @@ let _Cuu =
 
 let x0 = Data.sample_x0 () |> Maths.any
 
-let map_implicit
+(* let map_implicit
       (x :
         ( Maths.any Maths.t option
           , (Maths.any Maths.t, Maths.any Maths.t option) Lds_data.Temp.p list )
@@ -81,7 +81,7 @@ let map_implicit
         ; _cu = p._cu
         })
   in
-  Lqr.Params.{ x with params }
+  Lqr.Params.{ x with params } *)
 
 let map_naive
       (x :

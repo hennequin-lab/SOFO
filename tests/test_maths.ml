@@ -430,19 +430,22 @@ let binary_tests =
     ; ( "linsolve_tri_left_false_upper_false"
       , [ `linsolve_left_false ]
       , any_shape (linsolve_tri ~left:false ~upper:false) )
-      ; "kron", [ `specified_binary ([ 3; 4 ], [ 5; 7 ]) ], any_shape Maths.kron
+    ; "kron", [ `specified_binary ([ 3; 4 ], [ 5; 7 ]) ], any_shape Maths.kron
     ; "concat", [], any_shape concat_list
     ; "block_diag", [ `order_equal_to 2 ], any_shape block_diag
     ; ( "conv2d"
       , [ `order_equal_to 4 ]
       , fun _ ->
           let stride = Int.(1 + Random.int 1) in
-          Maths.conv2d
-            ~padding:(0, 0)
-            ~dilation:(1, 1)
-            ~groups:1
-            ~bias:None
-            (stride, stride) )
+          fun w x ->
+            Maths.conv2d
+              ~padding:(0, 0)
+              ~dilation:(1, 1)
+              ~groups:1
+              ~bias:None
+              ~stride:(stride, stride)
+              ~w
+              x )
     ]
   in
   List.map ~f:test_binary test_list

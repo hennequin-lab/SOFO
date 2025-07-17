@@ -145,10 +145,10 @@ val conv2d
   :  ?padding:int * int
   -> ?dilation:int * int
   -> ?groups:int
-  -> bias:'a some t option
-  -> int * int
-  -> 'a some t
-  -> 'a some t
+  -> bias:_ some t option
+  -> stride:int * int
+  -> w:_ some t
+  -> _ some t
   -> any t
 
 (* ---------------------------------------------------
@@ -159,6 +159,7 @@ module C : sig
   val make_binary : binary_info -> const t -> const t -> const t
   val view : size:int list -> const t -> const t
   val broadcast_to : size:int list -> const t -> const t
+  val shape : const t -> int list
   val reshape : shape:int list -> const t -> const t
   val permute : dims:int list -> const t -> const t
   val squeeze : dim:int -> const t -> const t
@@ -227,8 +228,8 @@ module C : sig
     -> ?dilation:int * int
     -> ?groups:int
     -> bias:const t option
-    -> int * int
-    -> const t
+    -> stride:int * int
+    -> w:const t
     -> const t
     -> const t
 end
