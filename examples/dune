@@ -11,8 +11,10 @@
   kalman_rnn
   mlp_classification
   mlp_mixer
-  random_class)
- (libraries cmdargs domainslib bos sofo owl owl-ode lqr ilqr)
+  random_class
+  svgp_regression
+  )
+ (libraries cmdargs domainslib bos sofo owl owl-ode lqr ilqr svgp)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))
 

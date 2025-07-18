@@ -182,20 +182,28 @@ let sim_traj theta_prev =
   let err = Mat.(mean' (sqr (network - targets))) in
   Mat.(save_txt ~append:true ~out:(in_dir "true_err") (create 1 1 err))
 
-let rec sofo_loop ~t ~out ~state =
+let rec sofo_loop ~t ~out ~state running_avg =
   Stdlib.Gc.major ();
   let data = sample_batch_train batch_size in
   let theta, tangents = O.prepare ~config state in
   let loss, ggn = RNN.f ~data theta in
   let new_state = O.step ~config ~info:{ loss; ggn; tangents } state in
-  if t % 10 = 0
-  then (
-    (* simulate trajectory *)
-    sim_traj theta;
-    let loss = Maths.to_float_exn (Maths.const loss) in
-    print [%message (t : int) (loss : float)];
-    Owl.Mat.(save_txt ~append:true ~out (of_array [| Float.of_int t; loss |] 1 2)));
-  if t < max_iter then sofo_loop ~t:Int.(t + 1) ~out ~state:new_state
+  let loss = Maths.to_float_exn (Maths.const loss) in
+  let running_avg =
+    let loss_avg =
+      match running_avg with
+      | [] -> loss
+      | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
+    in
+    if t % 10 = 0
+    then (
+      (* simulate trajectory *)
+      sim_traj theta;
+      print [%message (t : int) (loss_avg : float)];
+      Owl.Mat.(save_txt ~append:true ~out (of_array [| Float.of_int t; loss_avg |] 1 2)));
+    []
+  in
+  if t < max_iter then sofo_loop ~t:Int.(t + 1) ~out ~state:new_state (loss :: running_avg)
 
 let id_bs =
   Tensor.of_bigarray ~device:base.device Mat.(Float.(of_int batch_size) $* eye batch_size)
@@ -313,4 +321,4 @@ let _ =
   else (
     let out = in_dir "loss" in
     Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
-    sofo_loop ~t:0 ~out ~state:(O.init (RNN.init ())))
+    sofo_loop ~t:0 ~out ~state:(O.init (RNN.init ())) [])

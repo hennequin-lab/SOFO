@@ -1,0 +1,10 @@
+(library
+ (name svgp)
+ (libraries forward-torch sofo base owl stdio prms)
+ (preprocess
+  (pps ppx-forward-torch ppx_sexp_message ppx_jane)))
+
+(env
+ (dev
+  (flags
+   (:standard -warn-error -A))))

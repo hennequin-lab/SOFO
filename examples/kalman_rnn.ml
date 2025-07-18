@@ -232,29 +232,37 @@ let config =
     ; damping = `relative_from_top 1e-3
     }
 
-let rec loop ~t ~out ~state =
+let rec loop ~t ~out ~state running_avg =
   Stdlib.Gc.major ();
   let data = sample_data batch_size in
   let theta, tangents = O.prepare ~config state in
   let loss, ggn = RNN.f ~data theta in
   let new_state = O.step ~config ~info:{ loss; ggn; tangents } state in
-  if t % 10 = 0
-  then (
-    (* save params *)
-    O.P.C.save
-      (RNN.P.value (O.params new_state))
-      ~kind:base.ba_kind
-      ~out:(in_dir "sofo_params");
-    let loss = Maths.to_float_exn (Maths.const loss) in
-    print [%message (t : int) (loss : float)];
-    Owl.Mat.(save_txt ~append:true ~out (of_array [| Float.of_int t; loss |] 1 2)));
-  if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state
+  let loss = Maths.to_float_exn (Maths.const loss) in
+  let running_avg =
+    let loss_avg =
+      match running_avg with
+      | [] -> loss
+      | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
+    in
+    if t % 10 = 0
+    then (
+      (* save params *)
+      O.P.C.save
+        (RNN.P.value (O.params new_state))
+        ~kind:base.ba_kind
+        ~out:(in_dir "sofo_params");
+      print [%message (t : int) (loss_avg : float)];
+      Owl.Mat.(save_txt ~append:true ~out (of_array [| Float.of_int t; loss_avg |] 1 2)));
+    []
+  in
+  if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state (loss :: running_avg)
 
 (* Start the sofo loop. *)
 let _ =
   let out = in_dir "loss" in
   Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out ~state:(O.init RNN.init)
+  loop ~t:0 ~out ~state:(O.init RNN.init) []
 
 (* let _ =
       let f_name = "sofo" in

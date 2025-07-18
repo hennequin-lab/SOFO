@@ -190,37 +190,45 @@ let config =
     ; damping = `relative_from_top 1e-3
     }
 
-let rec loop ~t ~out ~state =
+let rec loop ~t ~out ~state running_avg =
   Stdlib.Gc.major ();
   let data = sample_data train_set batch_size in
   let theta, tangents = O.prepare ~config state in
   let loss, ggn = MLP.f ~data theta in
   let new_state = O.step ~config ~info:{ loss; ggn; tangents } state in
-  if t % 10 = 0
-  then (
-    (* save params *)
-    O.P.C.save
-      (MLP.P.value (O.params new_state))
-      ~kind:base.ba_kind
-      ~out:(in_dir "sofo_params");
-    let loss = Maths.to_float_exn (Maths.const loss) in
-    let e = epoch_of t in
-    let test_acc =
-      test_eval ~train_data:None MLP.P.(const (value (O.params new_state)))
+  let loss = Maths.to_float_exn (Maths.const loss) in
+  let running_avg =
+    let loss_avg =
+      match running_avg with
+      | [] -> loss
+      | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
     in
-    let train_acc =
-      test_eval ~train_data:(Some data) MLP.P.(const (value (O.params new_state)))
-    in
-    print [%message (e : float) (loss : float)];
-    Owl.Mat.(
-      save_txt
-        ~append:true
-        ~out
-        (of_array [| Float.of_int t; loss; test_acc; train_acc |] 1 4)));
-  if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state
+    if t % 10 = 0
+    then (
+      (* save params *)
+      O.P.C.save
+        (MLP.P.value (O.params new_state))
+        ~kind:base.ba_kind
+        ~out:(in_dir "sofo_params");
+      let e = epoch_of t in
+      let test_acc =
+        test_eval ~train_data:None MLP.P.(const (value (O.params new_state)))
+      in
+      let train_acc =
+        test_eval ~train_data:(Some data) MLP.P.(const (value (O.params new_state)))
+      in
+      print [%message (e : float) (loss_avg : float)];
+      Owl.Mat.(
+        save_txt
+          ~append:true
+          ~out
+          (of_array [| Float.of_int t; loss_avg; test_acc; train_acc |] 1 4)));
+    []
+  in
+  if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state (loss :: running_avg)
 
 (* Start the sofo loop. *)
 let _ =
   let out = in_dir "loss" in
   Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out ~state:(O.init MLP.init)
+  loop ~t:0 ~out ~state:(O.init MLP.init) []
