@@ -10,7 +10,7 @@ module Mat = Dense.Matrix.S
 let in_dir = Cmdargs.in_dir "-d"
 let _ = Bos.Cmd.(v "rm" % "-f" % in_dir "info") |> Bos.OS.Cmd.run
 let base = Optimizer.Config.Base.default
-let max_iter = 20000
+let max_iter = 2000
 
 (* make up some data *)
 let n = 100
@@ -156,17 +156,21 @@ let rec iter t state running_avg =
 let theta = iter 0 (O.init theta) []
 
 (* test my posterior on a bunch of regularly spaced x_star *)
-let x_star =
-  Mat.linspace (-4.) 10. 200 |> Mat.transpose |> Maths.of_bigarray ~device:base.device
-
-let mu, sigma = V.infer ~theta x_star
+let x_star = Mat.linspace (-4.) 10. 200 |> Mat.transpose
+let x_star_maths = x_star |> Maths.of_bigarray ~device:base.device
+let y_star = Mat.(x_star * sin x_star /$ 2.)
+let mu, sigma = V.infer ~theta x_star_maths
 
 let _ =
   let ans =
     Maths.(
       concat
         ~dim:1
-        [ any x_star; mu; transpose ~dims:[ 1; 0 ] (diagonal ~offset:0 sigma) ])
+        [ any x_star_maths
+        ; any (Maths.of_bigarray ~device:base.device y_star)
+        ; mu
+        ; unsqueeze ~dim:1 (diagonal ~offset:0 sigma)
+        ])
     |> Maths.const
   in
   Mat.(save_txt ~out:(in_dir "posterior") (Maths.to_bigarray ~kind:base.ba_kind ans))
