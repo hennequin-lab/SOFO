@@ -32,8 +32,6 @@ module P = PP.Make (Prms.Single)
 module RNN = struct
   module P = P
 
-  type input = unit
-
   let forward ~(theta : _ Maths.some P.t) ~input:_ y =
     let bs = Maths.shape y |> List.hd_exn in
     let y_tmp =

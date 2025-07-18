@@ -20,7 +20,7 @@ let n_total = n * 10
 let n_ind = 40
 let noise_scale = 0.2
 
-(* y = w x, x of shape [n_total x 1], y of shape [n_total x 1], 10 data points in total *)
+(* y = w x, x of shape [n_total x 1], y of shape [n_total x 1] *)
 let x = Mat.gaussian ~mu:Const.pi ~sigma:1.5 n_total 1
 let y = Mat.((x * sin x /$ 2.) + (noise_scale $* gaussian n_total 1))
 let _ = Mat.(save_txt ~out:(in_dir "data") (x @|| y))

@@ -13,7 +13,7 @@
   mlp_mixer
   random_class
   svgp_regression
-  )
+  bayes_opt)
  (libraries cmdargs domainslib bos sofo owl owl-ode lqr ilqr svgp)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))

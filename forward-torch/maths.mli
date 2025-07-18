@@ -100,6 +100,9 @@ val sqrt : 'a some t -> 'a t
 val log : 'a some t -> 'a t
 val exp : 'a some t -> 'a t
 val tanh : 'a some t -> 'a t
+val pdf : 'a some t -> 'a t
+(* val cdf : 'a some t -> 'a t *)
+val erf : 'a some t -> 'a t
 val inv_sqr : 'a some t -> 'a t
 val inv_rectangle : rcond:float -> 'a some t -> 'a t
 val relu : 'a some t -> 'a t
@@ -179,6 +182,9 @@ module C : sig
   val log : const t -> const t
   val exp : const t -> const t
   val tanh : const t -> const t
+  val pdf : const t -> const t
+  (* val cdf : const t -> const t *)
+  val erf : const t -> const t
   val inv_sqr : const t -> const t
   val inv_rectangle : rcond:float -> const some t -> const t
   val relu : const t -> const t

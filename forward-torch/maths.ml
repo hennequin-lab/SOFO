@@ -370,6 +370,25 @@ module Ops = struct
     in
     { f; df }
 
+  (* pdf of standard normal *)
+  let pdf =
+    let f x = Tensor.(exp (neg (square x / f 2.)) / f Float.(sqrt 2. * pi)) in
+    let df ~f:y ~x ~dx = Tensor.(neg x * y * dx) in
+    { f; df }
+
+  (* TODO: keep getting gradient errors about cdf *)
+  (* let cdf =
+    let f x = Tensor.((f 1. + erf (x / f Float.(sqrt 2.))) / f 2.) in
+    let df ~f:_ ~x ~dx =
+      Tensor.(dx * exp (neg (square x / f 2.)) / f Float.(sqrt 2. * pi))
+    in
+    { f; df } *)
+
+  let erf =
+    let f = Tensor.erf in
+    let df ~f:_ ~x ~dx = Tensor.(f Float.(2. / sqrt pi) * exp (neg (square x)) * dx) in
+    { f; df }
+
   (* invert a square matrix; y = x^-1, dy = - x^-1 dx x^-1 *)
   let inv_sqr =
     let f x =
@@ -959,6 +978,9 @@ let sqrt x = make_unary Ops.sqrt x
 let log x = make_unary Ops.log x
 let exp x = make_unary Ops.exp x
 let tanh x = make_unary Ops.tanh x
+let pdf x = make_unary Ops.pdf x
+(* let cdf x = make_unary Ops.cdf x *)
+let erf x = make_unary Ops.erf x
 let inv_sqr x = make_unary Ops.inv_sqr x
 let inv_rectangle ~rcond x = make_unary Ops.(inv_rectangle ~rcond) x
 let relu x = make_unary Ops.relu x
@@ -1186,6 +1208,9 @@ module C = struct
   let log = make_unary Ops.log
   let exp = make_unary Ops.exp
   let tanh = make_unary Ops.tanh
+  let pdf = make_unary Ops.pdf
+  (* let cdf = make_unary Ops.cdf *)
+  let erf = make_unary Ops.erf
   let inv_sqr x = make_unary Ops.inv_sqr x
   let inv_rectangle ~rcond x = make_unary Ops.(inv_rectangle ~rcond) x
   let relu = make_unary Ops.relu

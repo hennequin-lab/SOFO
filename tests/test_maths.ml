@@ -170,6 +170,8 @@ let unary_tests =
     ; "sigmoid", [], any_shape sigmoid
     ; "softplus", [], any_shape softplus
     ; "tanh", [], any_shape tanh
+    ; "pdf", [], any_shape pdf (* ; "cdf", [], any_shape cdf *)
+    ; "erf", [], any_shape erf
     ; "inv_sqr", [ `specified_unary [ 4; 4 ] ], any_shape inv_sqr
     ; "relu", [ `positive ], any_shape relu
     ; "soft_relu", [], any_shape soft_relu
