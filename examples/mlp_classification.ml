@@ -70,15 +70,11 @@ module MLP = struct
   let f ~data:(input, labels) theta =
     let pred = forward ~theta ~input in
     let ell =
-      Loss.cross_entropy
-        ~average_over:[ 0; 1 ]
-        ~logit_dim:1
-        ~labels:(Maths.of_tensor labels)
-        pred
+      Loss.cross_entropy ~output_dims:[ 1 ] ~labels:(Maths.of_tensor labels) pred
     in
     let ggn =
       Loss.cross_entropy_ggn
-        ~average_over:[ 0; 1 ]
+        ~output_dims:[ 1 ]
         (Maths.const pred)
         ~vtgt:(Maths.tangent_exn pred)
     in

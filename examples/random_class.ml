@@ -133,15 +133,11 @@ module RNN = struct
           | Some labels ->
             let pred = prediction ~theta z in
             let delta_ell =
-              Loss.cross_entropy
-                ~average_over:[ 0; 1 ]
-                ~logit_dim:1
-                ~labels:(Maths.of_tensor labels)
-                pred
+              Loss.cross_entropy ~output_dims:[ 1 ] ~labels:(Maths.of_tensor labels) pred
             in
             let delta_ggn =
               Loss.cross_entropy_ggn
-                ~average_over:[ 0; 1 ]
+                ~output_dims:[ 1 ]
                 (Maths.const pred)
                 ~vtgt:(Maths.tangent_exn pred)
             in

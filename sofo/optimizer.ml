@@ -48,6 +48,18 @@ module SOFO (P : Prms.T) = struct
   let params state = state.theta
   let init theta = { theta }
 
+  let clone_state (state : state) : state =
+    let open Prms in
+    let theta_cloned =
+      P.map state.theta ~f:(fun theta ->
+        match theta with
+        | Pinned x -> Pinned Tensor.(x + f 0.)
+        | Free x -> Free Tensor.(x + f 0.)
+        | Bounded { v = x; lb; ub } ->
+          Bounded { v = Prms.enforce_bounds ?lb ?ub Tensor.(x + f 0.); lb; ub })
+    in
+    { theta = theta_cloned }
+
   (* orthonormalize tangents *)
   let orthonormalise vs =
     let vtv =
@@ -140,6 +152,18 @@ module SGDm (P : Prms.T) = struct
   let params state = state.theta
   let init theta = { theta; g_avg = None; beta_t = 1. }
 
+  let clone_state (state : state) : state =
+    let open Prms in
+    let theta_cloned =
+      P.map state.theta ~f:(fun theta ->
+        match theta with
+        | Pinned x -> Pinned Tensor.(x + f 0.)
+        | Free x -> Free Tensor.(x + f 0.)
+        | Bounded { v = x; lb; ub } ->
+          Bounded { v = Prms.enforce_bounds ?lb ?ub Tensor.(x + f 0.); lb; ub })
+    in
+    { theta = theta_cloned; g_avg = state.g_avg; beta_t = state.beta_t }
+
   module M = Momentum (P)
   module U = Update_params (P)
 
@@ -177,6 +201,23 @@ module Adam (P : Prms.T) = struct
 
   let params state = state.theta
   let init theta = { theta; m = None; v = None; beta1_t = 1.; beta2_t = 1. }
+
+  let clone_state (state : state) : state =
+    let open Prms in
+    let theta_cloned =
+      P.map state.theta ~f:(fun theta ->
+        match theta with
+        | Pinned x -> Pinned Tensor.(x + f 0.)
+        | Free x -> Free Tensor.(x + f 0.)
+        | Bounded { v = x; lb; ub } ->
+          Bounded { v = Prms.enforce_bounds ?lb ?ub Tensor.(x + f 0.); lb; ub })
+    in
+    { theta = theta_cloned
+    ; m = state.m
+    ; v = state.v
+    ; beta1_t = state.beta1_t
+    ; beta2_t = state.beta2_t
+    }
 
   module M = Momentum (P)
   module U = Update_params (P)

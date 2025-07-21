@@ -54,12 +54,10 @@ module RNN = struct
             match labels with
             | None -> accu
             | Some labels ->
-              let delta_ell =
-                Loss.mse ~average_over:[ 0; 1 ] Maths.(of_tensor labels - y)
-              in
+              let delta_ell = Loss.mse ~output_dims:[ 1 ] Maths.(of_tensor labels - y) in
               let delta_ggn =
                 Loss.mse_ggn
-                  ~average_over:[ 0; 1 ]
+                  ~output_dims:[ 1 ]
                   (Maths.const y)
                   ~vtgt:(Maths.tangent_exn y)
               in

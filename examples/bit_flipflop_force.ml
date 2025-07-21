@@ -108,12 +108,10 @@ module RNN = struct
         let z = forward ~theta ~input z in
         let pred = Maths.(phi z *@ theta.w) in
         let accu =
-          let delta_ell =
-            Loss.mse ~average_over:[ 0; 1 ] Maths.(of_tensor target - pred)
-          in
+          let delta_ell = Loss.mse ~output_dims:[ 1 ] Maths.(of_tensor target - pred) in
           let delta_ggn =
             Loss.mse_ggn
-              ~average_over:[ 0; 1 ]
+              ~output_dims:[ 1 ]
               (Maths.const pred)
               ~vtgt:(Maths.tangent_exn pred)
           in

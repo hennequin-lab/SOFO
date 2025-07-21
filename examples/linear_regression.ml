@@ -63,8 +63,8 @@ let rec loop ~t ~out ~state =
   let x, y = data_minibatch batch_size in
   let theta, tangents = O.prepare ~config state in
   let y_pred = Model.f ~theta x in
-  let loss = Loss.mse ~average_over:[ 0; 1 ] (y - y_pred) in
-  let ggn = Loss.mse_ggn ~average_over:[ 0; 1 ] (const y) ~vtgt:(tangent_exn y_pred) in
+  let loss = Loss.mse ~output_dims:[ 1 ] (y - y_pred) in
+  let ggn = Loss.mse_ggn ~output_dims:[ 1 ] (const y) ~vtgt:(tangent_exn y_pred) in
   let new_state = O.step ~config ~info:{ loss; ggn; tangents } state in
   if t % 100 = 0
   then (

@@ -1,5 +1,5 @@
 (executables
- (names linear_regression)
+ (names linear_regression delayed_addition bit_flipflop_small_net)
  (libraries cmdargs domainslib bos sofo owl owl-ode lqr ilqr svgp)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))

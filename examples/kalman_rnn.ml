@@ -138,12 +138,12 @@ module RNN = struct
           | None -> accu
           | Some labels ->
             let delta_ell =
-              Loss.mse ~average_over:[ 0; 1 ] Maths.(of_tensor labels - pred)
+              Loss.mse ~output_dims:[ 1 ] Maths.(of_tensor labels - pred)
               |> fun x -> Maths.(x / f (Float.of_int tmax))
             in
             let delta_ggn =
               Loss.mse_ggn
-                ~average_over:[ 0; 1 ]
+                ~output_dims:[ 1 ]
                 (Maths.const pred)
                 ~vtgt:(Maths.tangent_exn pred)
             in

@@ -80,7 +80,6 @@ let rec loop k wallclock state =
     let theta, tangents = O.prepare ~config state in
     let tic = Unix.gettimeofday () in
     let loss, ggn = W.f ~data theta in
-    (* Sofo.print [%message (Maths.shape loss : int list) (Maths.shape ggn : int list)]; *)
     let new_state = O.step ~config ~info:{ loss; ggn; tangents } state in
     let toc = Unix.gettimeofday () in
     let it_took = Float.(toc - tic) in

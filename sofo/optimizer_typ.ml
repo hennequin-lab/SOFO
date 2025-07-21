@@ -12,6 +12,7 @@ module type T = sig
 
   val params : state -> P.param
   val init : ('a, 'b, state) init_opts
+  val clone_state : state -> state
   val step : config:('a, 'b) config -> info:info -> state -> state
 
   val manual_state_update
