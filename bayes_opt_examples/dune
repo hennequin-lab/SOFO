@@ -1,0 +1,10 @@
+(executables
+ (names linear_regression)
+ (libraries cmdargs domainslib bos sofo owl owl-ode lqr ilqr svgp)
+ (preprocess
+  (pps ppx_sexp_message ppx-forward-torch)))
+
+(env
+ (dev
+  (flags
+   (:standard -warn-error -A))))

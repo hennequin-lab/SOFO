@@ -179,27 +179,10 @@ let gp_opt data =
 (* -----------------------------------------
    -- Wolfe-unaware line search
    ----------------------------------------- *)
-(* let c1 = 0.05
-let c2 = 0.8 *)
 let alpha_range = Mat.linspace alpha_low alpha_high n_alpha |> Mat.exp10 |> Mat.to_array
 let cdf x = Maths.((f 1. + erf (x / f Float.(sqrt 2.))) / f 2.)
 
-(* expected improvement, eqn 9 of [Mahsereci and Hennig, 2015] *)
-(* let ei ~mu ~sigma f_best =
-  let z = Maths.((f_best - mu) / (1e-8 $+ sigma)) in
-  let tmp1 = Maths.((f_best - mu) / f 2. * (1. $+ erf (z / sqrt (f 2.)))) in
-  let tmp2 = Maths.(sigma / f Float.(sqrt (2. * pi)) * exp (neg (sqr z / f 2.))) in
-  Maths.(tmp1 + tmp2) 
-
-(* expected improvement, eqn 8. *)
-let ei ~mu ~sigma f_best =
-  let delta = Maths.(mu - f_best) in
-  let tmp1 = Maths.(relu delta) in
-  let tmp2 = Maths.(sigma * pdf (delta / sigma)) in
-  let tmp3 = Maths.(abs delta * cdf (delta / sigma)) in
-  Maths.(tmp1 + tmp2 - tmp3)  *)
-
-(* expected improvement, blog *)
+(* expected improvement *)
 let ei ~mu ~sigma f_best =
   let z = Maths.((mu - f_best) / sigma) in
   let tmp1 = Maths.((mu - f_best) * cdf z) in
@@ -319,7 +302,10 @@ let rec loop ~t ~out ~state ~alpha_opt =
 
 (* Start the loop. *)
 let _ =
-  let out = in_dir "loss_lr_bayes." in
+  let out =
+    let loss_name = if bayes_opt then "loss_bayes" else "loss" in
+    in_dir loss_name
+  in
   Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
   Bos.Cmd.(v "rm" % "-f" % in_dir "gp_info") |> Bos.OS.Cmd.run |> ignore;
   loop ~t:0 ~out ~state:(O.init (Model.init ~d_in ~d_out)) ~alpha_opt:100.
