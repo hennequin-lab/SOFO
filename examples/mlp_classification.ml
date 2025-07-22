@@ -37,6 +37,32 @@ let num_train_loops =
 
 let epoch_of t = Convenience.epoch_of ~full_batch_size ~batch_size t
 
+(* for w of shape [n_in, n_out], dw_i = eps_i activation_i *)
+let sample_rand_tensor_activation ~k ~param_shape ~activation ~next_weight =
+  let n_out = List.last_exn param_shape in
+  let activation_sliced =
+    Tensor.slice ~dim:0 ~start:(Some 0) ~end_:(Some k) ~step:1 activation
+  in
+  let from_act =
+    match next_weight with
+    | Some w ->
+      (* eps of shape [n_out_next x k], activation of shape [k x n_in], w of shape [n_out x n_out_next] *)
+      let n_out_next = List.last_exn (Tensor.shape w) in
+      let eps = Tensor.randn ~device:base.device ~kind:base.kind [ n_out_next; k ] in
+      Tensor.einsum ~path:None [ w; eps; activation_sliced ] ~equation:"oa,ab,bi->bio"
+    | None ->
+      (* eps of shape [n_out x k], activation of shape [k x n_in] *)
+      let eps = Tensor.randn ~device:base.device ~kind:base.kind [ n_out; k ] in
+      Tensor.einsum ~path:None [ eps; activation_sliced ] ~equation:"ob,bi->bio"
+  in
+  if k < n_tangents
+  then (
+    let from_gauss =
+      Tensor.randn ~device:base.device ~kind:base.kind ((n_tangents - k) :: param_shape)
+    in
+    Tensor.concat [ from_act; from_gauss ] ~dim:0)
+  else from_act
+
 module MLP_Layer = struct
   type 'a t =
     { id : int
@@ -53,32 +79,6 @@ module MLP = struct
   module P = P
 
   type input = Tensor.t
-
-  (* for w of shape [n_in, n_out], dw_i = eps_i activation_i *)
-  let sample_rand_tensor_activation ~k ~param_shape ~activation ~next_weight =
-    let n_out = List.last_exn param_shape in
-    let activation_sliced =
-      Tensor.slice ~dim:0 ~start:(Some 0) ~end_:(Some k) ~step:1 activation
-    in
-    let from_act =
-      match next_weight with
-      | Some w ->
-        (* eps of shape [n_out_next x k], activation of shape [k x n_in], w of shape [n_out x n_out_next] *)
-        let n_out_next = List.last_exn (Tensor.shape w) in
-        let eps = Tensor.randn ~device:base.device ~kind:base.kind [ n_out_next; k ] in
-        Tensor.einsum ~path:None [ w; eps; activation_sliced ] ~equation:"oa,ab,bi->bio"
-      | None ->
-        (* eps of shape [n_out x k], activation of shape [k x n_in] *)
-        let eps = Tensor.randn ~device:base.device ~kind:base.kind [ n_out; k ] in
-        Tensor.einsum ~path:None [ eps; activation_sliced ] ~equation:"ob,bi->bio"
-    in
-    if k < n_tangents
-    then (
-      let from_gauss =
-        Tensor.randn ~device:base.device ~kind:base.kind ((n_tangents - k) :: param_shape)
-      in
-      Tensor.concat [ from_act; from_gauss ] ~dim:0)
-    else from_act
 
   let f ~(theta : P.M.t) ~(input : input) =
     Array.foldi theta ~init:(Maths.const input) ~f:(fun i accu wb ->

@@ -1,5 +1,5 @@
 (executables
- (names linear_regression lqr_eg lorenz mlp_classification)
+ (names linear_regression lorenz mlp_classification delayed_addition)
  (libraries cmdargs bos sofo owl domainslib owl-ode lqr)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))
