@@ -177,12 +177,29 @@ module RNN = struct
           ~activation:input
           ~weight:(Maths.primal theta.c)
       in
+      let new_tangents_e =
+        Tensor.randn
+          ~device:base.device
+          ~kind:base.kind
+          (n_tangents :: Maths.shape theta.e)
+      in
+      let new_tangents_o =
+        Tensor.(
+          f Float.(1. / of_int n)
+          * randn ~device:base.device ~kind:base.kind (n_tangents :: Maths.shape theta.o))
+      in
       (* set new tangents for c and b *)
       (match snd theta.c with
        | Some (Deferred dc) -> Maths.Deferred.set_exn dc new_tangents_c
        | _ -> ());
-      match snd theta.b with
-      | Some (Deferred db) -> Maths.Deferred.set_exn db new_tangents_b
+      (match snd theta.b with
+       | Some (Deferred db) -> Maths.Deferred.set_exn db new_tangents_b
+       | _ -> ());
+      (match snd theta.e with
+       | Some (Deferred de) -> Maths.Deferred.set_exn de new_tangents_e
+       | _ -> ());
+      match snd theta.o with
+      | Some (Deferred d_o) -> Maths.Deferred.set_exn d_o new_tangents_o
       | _ -> ());
     result
 end
