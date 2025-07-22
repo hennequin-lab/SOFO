@@ -68,8 +68,8 @@ let init_config =
    -- Optimization loop       ------
    ----------------------------------------- *)
 (* alpha_low and alpha_high in log(10) space *)
-let alpha_low = 1.
-let alpha_high = 2.3
+let alpha_low = 0.
+let alpha_high = 2.5
 let n_alpha = 5
 let batch_size = 256
 let max_iter = 10_000
@@ -121,7 +121,7 @@ let rec loop ~t ~out ~state ~alpha_opt =
 (* Start the loop. *)
 let _ =
   let out =
-    let loss_name = if bayes_opt then "loss_bayes" else "loss" in
+    let loss_name = if bayes_opt then "loss_bayes2" else "loss" in
     in_dir loss_name
   in
   Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
