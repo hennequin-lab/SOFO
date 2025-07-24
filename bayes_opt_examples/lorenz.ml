@@ -155,7 +155,7 @@ let simulate ~f_name n_trials =
    -- Optimization with SOFO    ------
    ----------------------------------------- *)
 let alpha_low = -2.
-let alpha_high = 0.
+let alpha_high = 0.5
 let n_alpha = 5
 let max_iter_alpha_opt = 5
 
@@ -219,7 +219,7 @@ let rec loop ~t ~out ~state ~alpha_opt running_avg =
         (RNN.P.value (O.params new_state))
         ~kind:base.ba_kind
         ~out:(in_dir "sofo_params");
-      print [%message (t : int) (loss_avg : float)];
+      print [%message (t : int) (loss_avg : float) (alpha_opt:float)];
       Owl.Mat.(
         save_txt
           ~append:true
@@ -238,4 +238,4 @@ let _ =
   in
   Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
   Bos.Cmd.(v "rm" % "-f" % in_dir "gp_info") |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out ~state:(O.init (RNN.init ~d ~dh)) ~alpha_opt:0.1 []
+  loop ~t:0 ~out ~state:(O.init (RNN.init ~d ~dh)) ~alpha_opt:0.3 []
