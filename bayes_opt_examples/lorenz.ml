@@ -45,8 +45,7 @@ module RNN = struct
 
   (* here data is a list of (x, optional labels) *)
   let f ~data ~y0 theta =
-    let tmax = List.length data in
-    let scaling = Float.(1. / of_int tmax) in
+    let scaling = Float.(1. / of_int (List.length data)) in
     let result, _ =
       List.foldi
         data
@@ -219,7 +218,7 @@ let rec loop ~t ~out ~state ~alpha_opt running_avg =
         (RNN.P.value (O.params new_state))
         ~kind:base.ba_kind
         ~out:(in_dir "sofo_params");
-      print [%message (t : int) (loss_avg : float) (alpha_opt:float)];
+      print [%message (t : int) (loss_avg : float) (alpha_opt : float)];
       Owl.Mat.(
         save_txt
           ~append:true

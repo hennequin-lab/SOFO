@@ -124,6 +124,7 @@ module RNN = struct
     { w; c; b; a; o }
 
   let f ~data theta =
+    let scaling = Float.(1. / of_int (List.length data)) in
     let result, _ =
       List.fold data ~init:(None, None) ~f:(fun (accu, z) (input, labels) ->
         let z = forward ~theta ~input z in
@@ -133,13 +134,20 @@ module RNN = struct
           | Some labels ->
             let pred = prediction ~theta z in
             let delta_ell =
-              Loss.cross_entropy ~output_dims:[ 1 ] ~labels:(Maths.of_tensor labels) pred
+              Maths.(
+                scaling
+                $* Loss.cross_entropy
+                     ~output_dims:[ 1 ]
+                     ~labels:(Maths.of_tensor labels)
+                     pred)
             in
             let delta_ggn =
-              Loss.cross_entropy_ggn
-                ~output_dims:[ 1 ]
-                (Maths.const pred)
-                ~vtgt:(Maths.tangent_exn pred)
+              Maths.(
+                scaling
+                $* Loss.cross_entropy_ggn
+                     ~output_dims:[ 1 ]
+                     (Maths.const pred)
+                     ~vtgt:(Maths.tangent_exn pred))
             in
             (match accu with
              | None -> Some (delta_ell, delta_ggn)

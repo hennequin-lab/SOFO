@@ -6,7 +6,8 @@
   lorenz
   random_class
   mlp_classification
-  mlp_mixer)
+  mlp_mixer
+  kalman_rnn)
  (libraries cmdargs domainslib bos sofo owl owl-ode lqr ilqr svgp)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))

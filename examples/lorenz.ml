@@ -43,6 +43,7 @@ module RNN = struct
 
   (* here data is a list of (x, optional labels) *)
   let f ~data ~y0 theta =
+    let scaling = Float.(1. / of_int (List.length data)) in
     let result, _ =
       List.foldi
         data
@@ -54,12 +55,17 @@ module RNN = struct
             match labels with
             | None -> accu
             | Some labels ->
-              let delta_ell = Loss.mse ~output_dims:[ 1 ] Maths.(of_tensor labels - y) in
+              let delta_ell =
+                Maths.(
+                  scaling $* Loss.mse ~output_dims:[ 1 ] Maths.(of_tensor labels - y))
+              in
               let delta_ggn =
-                Loss.mse_ggn
-                  ~output_dims:[ 1 ]
-                  (Maths.const y)
-                  ~vtgt:(Maths.tangent_exn y)
+                Maths.C.(
+                  scaling
+                  $* Loss.mse_ggn
+                       ~output_dims:[ 1 ]
+                       (Maths.const y)
+                       ~vtgt:(Maths.tangent_exn y))
               in
               (match accu with
                | None -> Some (delta_ell, delta_ggn)
