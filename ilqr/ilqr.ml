@@ -40,7 +40,7 @@ let _u ~tangent ~batch_const ~_k ~_K ~x ~alpha =
   in
   maybe_scalar_mul _k alpha +? tmp
 
-(* TODO: need Guillaume to proof-read this *)
+(* TODO: need Guillaume to proof-read this: sometimes the cost does not fall below prev value? *)
 (* calculate the new u w.r.t. the difference between x_t and x_opt_t *)
 let forward
       ~batch_const
@@ -52,7 +52,7 @@ let forward
       ~(bck : backward_info list)
   =
   let cost_init = cost_func tau_opt in
-  let rec fwd_loop ~stop ~i ~alpha ~tau_prev =
+  let rec fwd_loop ~stop ~i ~alpha ~tau_prev cost_prev =
     if stop
     then tau_prev
     else (
@@ -103,12 +103,21 @@ let forward
       let cost_curr = cost_func tau_curr in
       cleanup ();
       print [%message "fwd loop" (cost_init : float) (cost_curr : float)];
-      let stop = Float.(cost_curr < cost_init) in
-      fwd_loop ~stop ~i:Int.(i + 1) ~alpha:(alpha *. gamma) ~tau_prev:tau_curr)
+      let pct_change = Float.((cost_curr - cost_prev) / cost_prev) in
+      let lower_than_init = Float.(cost_curr < cost_init) in
+      (* TODO: stop if cost increasing. *)
+      let higher_than_prev = i > 10 && Float.(pct_change > 0.) in
+      let stop = lower_than_init || higher_than_prev in
+      fwd_loop
+        ~stop
+        ~i:Int.(i + 1)
+        ~alpha:(alpha *. gamma)
+        ~tau_prev:(if higher_than_prev then tau_opt else tau_curr)
+        cost_curr)
   in
   (* start with alpha set to 1 *)
   let alpha = 1. in
-  fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt
+  fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt cost_init
 
 let ilqr_loop
       ~batch_const
