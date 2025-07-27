@@ -20,6 +20,7 @@ let base =
 
 (* batch size. *)
 let bs = 32
+let bs_sim = 1
 let in_dir = Cmdargs.in_dir "-d"
 let data_folder = Option.value (Cmdargs.get_string "-data") ~default:"DH1"
 
@@ -143,22 +144,24 @@ let data_train, data_test =
 let data_train_size = List.length data_train
 
 (* use artificially generated data; test that cross-validation makes sense *)
+let a_matrix_af = make_a_prms ~n 0.8 |> Tensor.of_bigarray ~device:base.device
+
+let _b_0_true_af =
+  Tensor.(
+    f Float.(1. /. sqrt (of_int n)) * randn ~device:base.device ~kind:base.kind [ n; n ])
+
+let _b_true_af =
+  Tensor.(
+    f Float.(1. /. sqrt (of_int m)) * randn ~device:base.device ~kind:base.kind [ m; n ])
+
+let c_mat_af =
+  Tensor.(
+    f Float.(1. /. sqrt (of_int n)) * randn ~device:base.device ~kind:base.kind [ n; o ])
+
+let d_mat_af = Tensor.(randn ~device:base.device ~kind:base.kind [ 1; o ])
+let obs_var_chol_af = Tensor.(randn ~device:base.device ~kind:base.kind [ o ])
+
 let generate_aritificial_data ~n ~m bs () =
-  let a_matrix = make_a_prms ~n 0.8 |> Tensor.of_bigarray ~device:base.device in
-  let _b_0_true =
-    Tensor.(
-      f Float.(1. /. sqrt (of_int n)) * randn ~device:base.device ~kind:base.kind [ n; n ])
-  in
-  let _b_true =
-    Tensor.(
-      f Float.(1. /. sqrt (of_int m)) * randn ~device:base.device ~kind:base.kind [ m; n ])
-  in
-  let c_mat =
-    Tensor.(
-      f Float.(1. /. sqrt (of_int n)) * randn ~device:base.device ~kind:base.kind [ n; o ])
-  in
-  let d_mat = Tensor.(randn ~device:base.device ~kind:base.kind [ 1; o ]) in
-  let obs_var_chol = Tensor.(randn ~device:base.device ~kind:base.kind [ o ]) in
   let x0 = Tensor.randn ~device:base.device ~kind:base.kind [ bs; n ] in
   let u_list =
     List.init tmax ~f:(fun i ->
@@ -173,7 +176,8 @@ let generate_aritificial_data ~n ~m bs () =
       let x_prev, x_accu = accu in
       let x_new =
         Tensor.(
-          matmul x_prev a_matrix + matmul u (if Int.(i = 0) then _b_0_true else _b_true))
+          matmul x_prev a_matrix_af
+          + matmul u (if Int.(i = 0) then _b_0_true_af else _b_true_af))
       in
       x_new, x_new :: x_accu)
   in
@@ -181,18 +185,18 @@ let generate_aritificial_data ~n ~m bs () =
   let o_list =
     List.map x_list ~f:(fun x ->
       let noise = Tensor.randn ~device:base.device ~kind:base.kind [ bs; o ] in
-      Tensor.(matmul x c_mat + d_mat + (noise * obs_var_chol)))
+      Tensor.(matmul x c_mat_af + d_mat_af + (noise * obs_var_chol_af)))
   in
   o_list
 
-let data_train_af, data_test_af =
+(* let data_train_af, data_test_af =
   let data = generate_aritificial_data ~n:6 ~m:3 2000 () in
   let data_train_test =
     List.map data ~f:(fun mat ->
       ( Tensor.slice mat ~dim:0 ~start:(Some 0) ~end_:(Some 1600) ~step:1
       , Tensor.slice mat ~dim:0 ~start:(Some 1600) ~end_:(Some 2000) ~step:1 ))
   in
-  List.map data_train_test ~f:fst, List.map data_train_test ~f:snd
+  List.map data_train_test ~f:fst, List.map data_train_test ~f:snd *)
 
 (* -----------------------------------------
    -- Problem Definition ---
@@ -255,6 +259,20 @@ module PP = struct
     }
   [@@deriving prms]
 end
+
+(* ground truth params for artificial data *)
+let theta_trur_af =
+  PP.
+    { _a = a_matrix_af
+    ; _b = _b_true_af
+    ; _b_0 = _b_0_true_af
+    ; _c = c_mat_af
+    ; _d = d_mat_af
+    ; _log_prior_var = Tensor.zeros ~device:base.device ~kind:base.kind [ m ]
+    ; _log_prior_var_0 = Tensor.zeros ~device:base.device ~kind:base.kind [ n ]
+    ; _log_obs_var = Tensor.(log (square obs_var_chol_af))
+    ; _log_scaling_factor = Tensor.ones ~device:base.device ~kind:base.kind [ 1 ]
+    }
 
 module P = PP.Make (Prms.P)
 
@@ -929,23 +947,19 @@ module Make (D : Do_with_T) = struct
     Bos.Cmd.(v "rm" % "-f" % in_dir name) |> Bos.OS.Cmd.run |> ignore;
     let rec loop ~iter ~state ~time_elapsed running_avg =
       Stdlib.Gc.major ();
-      (* let data =
+      let data =
         let o_list = sample_data ~sampling_state_data:iter bs in
         o_list
-      in *)
-      let data =
+      in
+      (* let data =
         List.map data_train_af ~f:(fun mat ->
           let start = Random.int (1600 - bs) in
           Tensor.slice mat ~start:(Some start) ~end_:(Some (start + bs)) ~step:1 ~dim:0)
-      in
+      in *)
       let t0 = Unix.gettimeofday () in
       let loss, new_state = O.step ~config:(config ~iter) ~state ~data () in
       let t1 = Unix.gettimeofday () in
       let time_elapsed = Float.(time_elapsed + t1 - t0) in
-      (* let n_params =
-        let params = LGS.P.value (O.params state) in
-        O.W.P.T.numel params
-      in *)
       let running_avg =
         let loss_avg =
           match running_avg with
@@ -963,8 +977,8 @@ module Make (D : Do_with_T) = struct
           Convenience.print [%message (iter : int) (loss_avg : float)];
           (* test elbo *)
           let test_loss =
-            (* let data_test = sample_data ~sampling_state_data:iter (-1) in *)
-            let data_test = data_test_af in
+            let data_test = sample_data ~sampling_state_data:iter (-1) in
+            (* let data_test = data_test_af in *)
             let neg_elbo, _ =
               LGS.elbo
                 ~data:data_test
@@ -972,6 +986,13 @@ module Make (D : Do_with_T) = struct
             in
             neg_elbo |> Maths.mean |> Maths.primal |> Tensor.to_float0_exn
           in
+          (* ground truth test elbo if using artificial data *)
+          (* let test_loss_ground_truth =
+            let data_test = data_test_af in
+            let true_theta = P.map theta_trur_af ~f:Maths.const in
+            let neg_elbo, _ = LGS.elbo ~data:data_test true_theta in
+            neg_elbo |> Maths.mean |> Maths.primal |> Tensor.to_float0_exn
+          in *)
           let t = iter in
           Owl.Mat.(
             save_txt
@@ -1032,10 +1053,8 @@ module Do_with_Adam : Do_with_T = struct
   let config ~iter:t =
     Optimizer.Config.Adam.
       { default with
-        base
-      (* ; learning_rate = Some Float.(0.0001 / sqrt ((of_int t + 1.) / 50.)) *)
+        base (* ; learning_rate = Some Float.(0.0001 / sqrt ((of_int t + 1.) / 50.)) *)
       ; learning_rate = Some Float.(0.001 / sqrt ((of_int t + 1.) / 50.))
-
       }
 
   let init = O.init LGS.init
@@ -1056,5 +1075,15 @@ let _ =
   optimise max_iter
 
 (* let _ =
-  let adam_params = LGS.P.T.load ~device:base.device (in_dir "adam_params") in
-  LGS.P.T.save_npy adam_params ~kind:base.ba_kind ~out:(in_dir "adam_params") *)
+  let adam_name = "adam_n_" ^ Int.to_string n ^ "_m_" ^ Int.to_string m in
+  let adam_params =
+    LGS.P.T.load ~device:base.device (in_dir adam_name ^"_params") |> LGS.P.map ~f:Maths.const
+  in
+  let rollout = LGS.simulate ~bs_sim adam_params in
+  let rollout_ba =
+    List.map rollout ~f:(fun r ->
+      r |> Maths.primal |> Tensor.to_bigarray ~kind:base.ba_kind)
+    |> List.to_array
+    |> Mat.concatenate ~axis:0
+  in
+  Mat.(save_txt ~out:(in_dir adam_name ^ "_rollout") rollout_ba) *)
