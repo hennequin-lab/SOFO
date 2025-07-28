@@ -94,7 +94,8 @@ let o = 16 * 16
 
 let load_npy_data hvs_folder =
   let folder_path = "_data/hvs_npy/" ^ hvs_folder in
-  (* get array of .npy files, each contains a mat of shape [T x n_channels] *)
+  (* get array of .npy files, each contains a mat of shape [T x n_channels]. n_channels
+    are organized as [AP x ML]. *)
   let files = Stdlib.Sys.readdir folder_path |> List.of_array in
   let npy_files = List.filter ~f:(fun f -> Stdlib.Filename.check_suffix f ".npy") files in
   let full_paths =
