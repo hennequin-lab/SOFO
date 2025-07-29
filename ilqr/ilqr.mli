@@ -2,7 +2,8 @@ open Forward_torch
 open Lqr
 
 val _isolve
-  :  ?batch_const:bool
+  :  ?linesearch:bool
+  -> ?batch_const:bool
   -> gamma:float
   -> f_theta:(x:Maths.any Maths.t -> u:Maths.any Maths.t -> Maths.any Maths.t)
   -> cost_func:(Maths.any Maths.t option Solution.p list -> float)

@@ -15,14 +15,14 @@ let _ =
 
 let in_dir = Cmdargs.in_dir "-d"
 let base = Optimizer.Config.Base.default
-let conv_threshold = 1e-5
+let conv_threshold = 1e-7
 
 (* -----------------------------------------
    -- Generate Lorenz data            ------
    ----------------------------------------- *)
 
-let bs = 4
-let tmax = 50
+let bs = 1
+let tmax = 1000
 let dt = 0.01
 let n, m = 3, 3
 let sigma, rho, beta = 10., 28., 8. /. 3.
@@ -41,7 +41,9 @@ let lorenz_step ?(u = Mat.zeros 1 3) ~dt x =
 
 (* [lorenz_flow] has shape [tmax x bs x 3] *)
 let gen_lorenz ~dt x0 u_array =
-  let x0_array = Mat.to_rows x0 in
+  (* let x0_array = Mat.to_rows x0 in *)
+  (* TODO: this is only when bs=1 *)
+  let x0_array = [| Arr.reshape x0 [| bs; 3 |] |] in
   let lorenz_flow =
     Array.map2_exn x0_array u_array ~f:(fun x0 u ->
       (* x0 has shape [1 x 3], u of shape [tmax x 3] *)
@@ -76,30 +78,23 @@ let x0, data =
   let data =
     gen_lorenz ~dt x0 u_array
     |> get_batch
-    |> List.map ~f:(fun x -> x |> Maths.of_tensor |> Maths.any)
+    |> List.map ~f:(fun x ->
+      x |> Maths.of_tensor |> Maths.any |> Maths.reshape ~shape:[ bs; 3 ])
   in
   x0, data
-
-let _ =
-  let x_mat =
-    let tmp = Maths.concat (List.map data ~f:(Maths.unsqueeze ~dim:0)) ~dim:0 in
-    tmp |> Maths.to_tensor |> Tensor.to_bigarray ~kind:base.ba_kind
-  in
-  Mat.(save_npy ~out:(in_dir "x_1000") x_mat)
 
 let x0_maths = Maths.zeros ~device:base.device ~kind:base.kind [ bs; 3 ] |> Maths.any
 
 (* -----------------------------------------
    -- iLQR params         ------
    ----------------------------------------- *)
+
 let _Cxx_batched =
   let _Cxx = Maths.(any (of_tensor (Tensor.eye ~options:(base.kind, base.device) ~n))) in
   Maths.broadcast_to _Cxx ~size:[ bs; n; n ]
 
 let _Cuu_batched =
-  let _Cuu =
-    Maths.(any (of_tensor Tensor.(eye ~options:(base.kind, base.device) ~n:m)))
-  in
+  let _Cuu = Maths.(f 1e-5 * eye ~device:base.device ~kind:base.kind m) in
   Maths.broadcast_to _Cuu ~size:[ bs; m; m ]
 
 (* _Fu is partial f/ partial u *)
@@ -147,7 +142,7 @@ let _Fx ~(x : Maths.any Maths.t option) =
   (* transpose since notation follows x = x Fx + u Fu *)
   Maths.concat [ row1; row2; row3 ] ~dim:1 |> Maths.transpose ~dims:[ 0; 2; 1 ]
 
-(* rollout x list under u in batch mode *)
+(* rollout x list under u in batch mode; CHECKED that this gives same trajectory if given proper u_0. *)
 let rollout_one_step ~x ~u =
   let x_t = Maths.slice ~start:0 ~end_:1 ~dim:1 x
   and y_t = Maths.slice ~start:1 ~end_:2 ~dim:1 x
@@ -194,10 +189,7 @@ let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
       ~f:(fun accu u ->
         Maths.(accu + einsum [ u, "ma"; _Cuu_batched, "mab"; u, "mb" ] "m"))
   in
-  Maths.(f Float.(1. / of_int tmax) * (x_cost + u_cost))
-  |> Maths.to_tensor
-  |> Tensor.mean
-  |> Tensor.to_float0_exn
+  Maths.(x_cost + u_cost) |> Maths.to_tensor |> Tensor.mean |> Tensor.to_float0_exn
 
 let map_naive
       (x :
@@ -245,13 +237,21 @@ let ilqr ~observation =
         { x0 = Some x0_maths
         ; params =
             List.map2_exn tau_extended observations_x0 ~f:(fun tau o ->
-              let _cx = Maths.(neg (einsum [ o, "ma"; _Cxx_batched, "mab" ] "mb")) in
+              let _cx =
+                Maths.(
+                  einsum [ Option.value_exn tau.x - o, "ma"; _Cxx_batched, "mab" ] "mb")
+              in
+              let _cu =
+                match tau.u with
+                | None -> None
+                | Some u -> Some Maths.(einsum [ u, "ma"; _Cuu_batched, "mab" ] "mb")
+              in
               Lds_data.Temp.
                 { _f = None
                 ; _Fx_prod = _Fx ~x:tau.x
                 ; _Fu_prod = _Fu
                 ; _cx = Some _cx
-                ; _cu = None
+                ; _cu
                 ; _Cxx = _Cxx_batched
                 ; _Cxu = None
                 ; _Cuu = _Cuu_batched
@@ -268,14 +268,15 @@ let ilqr ~observation =
   let tau_init = rollout_sol ~u_list:u_init ~x0:x0_maths in
   let sol, _ =
     Ilqr._isolve
-      ~f_theta
+      ~linesearch:true
       ~batch_const:false
+      ~f_theta
       ~gamma:0.5
       ~cost_func
       ~params_func
       ~conv_threshold
       ~tau_init
-      2000
+      10000
   in
   sol
 

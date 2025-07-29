@@ -40,16 +40,18 @@ let _u ~tangent ~batch_const ~_k ~_K ~x ~u ~alpha =
   in
   maybe_scalar_mul _k alpha +? tmp +? u
 
-(* TODO: need Guillaume to proof-read this: sometimes the cost does not fall below prev value? *)
 (* calculate the new u w.r.t. the difference between x_t and x_opt_t *)
 let forward
+      ?(beta = 0.1)
       ~batch_const
       ~gamma
       ~cost_func
       ~f_theta
       ~(p : (any t option, (any t, any t -> any t) momentary_params list) Params.p)
       ~(tau_opt : any t option Solution.p list)
-      ~(bck : backward_info list)
+      ~_dC1
+      ~_dC2
+      (bck : backward_info list)
   =
   let cost_init = cost_func tau_opt in
   let rec fwd_loop ~stop ~i ~alpha ~tau_prev =
@@ -104,8 +106,23 @@ let forward
       let cost_curr = cost_func tau_curr in
       cleanup ();
       print [%message "fwd loop" (alpha : float) (cost_init : float) (cost_curr : float)];
-      let lower_than_init = Float.(cost_curr <= cost_init) in
-      if Float.(alpha < 1e-8) then failwith "linesearch did not converge";
+      let lower_than_init =
+        let cost_change = Float.(cost_curr - cost_init) in
+        match _dC1, _dC2 with
+        | None, None -> Float.(cost_change <= 0.)
+        | Some _dC1, Some _dC2 ->
+          (* if regularization on Quu: need to use both dC2 and dC2 *)
+          (* let _dC = Maths.((f alpha * _dC2) + (f Float.(0.5 * alpha * alpha) * _dC1)) in *)
+          (* if NO regularization on Quu: TODO: how to regularize Quu in batch *)
+          let _dV = Maths.(f Float.(0.5 * alpha) * _dC2) in
+          let _dV_f =
+            _dV |> Maths.mean ~keepdim:false |> Maths.const |> Maths.to_float_exn
+          in
+          print [%message (cost_change : float) (_dV_f : float)];
+          Float.(cost_change <= neg beta * _dV_f)
+        | _ -> failwith "only dC1/dC2 defined (but not both)"
+      in
+      if Float.(alpha < 1e-10) then failwith "linesearch did not converge";
       let stop = lower_than_init in
       fwd_loop ~stop ~i:Int.(i + 1) ~alpha:(alpha *. gamma) ~tau_prev:tau_curr)
   in
@@ -114,6 +131,7 @@ let forward
   fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt
 
 let ilqr_loop
+      ~linesearch
       ~batch_const
       ~gamma
       ~conv_threshold
@@ -130,9 +148,20 @@ let ilqr_loop
       List.map p_curr.Params.params ~f:(fun p -> p.common) |> backward_common ~batch_const
     in
     cleanup ();
-    let bck = backward ~batch_const common_info p_curr in
+    let bck, _dC1, _dC2 =
+      backward ~ilqr_linesearch:linesearch ~batch_const common_info p_curr
+    in
     let tau_curr =
-      forward ~batch_const ~gamma ~cost_func ~f_theta ~p:p_curr ~tau_opt:tau_prev ~bck
+      forward
+        ~batch_const
+        ~gamma
+        ~cost_func
+        ~f_theta
+        ~p:p_curr
+        ~tau_opt:tau_prev
+        ~_dC1
+        ~_dC2
+        bck
     in
     let cost_curr = cost_func tau_curr in
     let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
@@ -148,6 +177,7 @@ let ilqr_loop
 
 (* when batch_const is true, _Fx_prods, _Fu_prods, _Cxx, _Cxu, _Cuu has no leading batch dimension and special care needs to be taken to deal with these *)
 let _isolve
+      ?(linesearch = true)
       ?(batch_const = false)
       ~gamma
       ~f_theta
@@ -162,6 +192,7 @@ let _isolve
   (*step 2: loop to find the best controls and states *)
   let tau_final, _, info_final =
     ilqr_loop
+      ~linesearch
       ~batch_const
       ~gamma
       ~conv_threshold

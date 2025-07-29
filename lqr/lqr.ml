@@ -79,7 +79,7 @@ let backward_common
             (* let reg =
               let _Cuu = Option.value_exn z._Cuu in
               let m = shape _Cuu |> List.last_exn in
-              f 1e-6
+              f 1e-4
               * eye
                   m
                   ~kind:(Torch.Tensor.kind (to_tensor _Cuu))
@@ -91,7 +91,8 @@ let backward_common
           in
           let _Qxx =
             let tmp2 = z._Fx_prod *? maybe_btr tmp |> maybe_squeeze ~dim:0 in
-            z._Cxx +? tmp2
+            let _Qxx = Option.value_exn (z._Cxx +? tmp2) in
+            Some ((_Qxx + transpose _Qxx ~dims:[ 1; 0 ]) / f 2.)
           in
           let _Qux =
             let tmp2 = z._Fu_prod *? maybe_btr tmp |> maybe_squeeze ~dim:0 in
@@ -104,7 +105,7 @@ let backward_common
             let _Cuu = Option.value_exn z._Cuu in
             let m = shape _Cuu |> List.last_exn in
             let eye_m =
-              f 1e-6
+              f 1e-4
               * eye
                   m
                   ~kind:(Torch.Tensor.kind (to_tensor _Cuu))
@@ -117,8 +118,9 @@ let backward_common
           let _Quu =
             Option.value_exn (z._Cuu +? (z._Fu_prod *? maybe_btr (z._Fu_prod *? _V)))
           in
+          let _Qxx = Option.value_exn (z._Cxx +? (z._Fx_prod *? maybe_btr tmp)) in
           ( Some ((_Quu + transpose _Quu ~dims:[ 0; 2; 1 ]) / f 2.)
-          , z._Cxx +? (z._Fx_prod *? maybe_btr tmp)
+          , Some ((_Qxx + transpose _Qxx ~dims:[ 0; 2; 1 ]) / f 2.)
           , maybe_btr z._Cxu +? (z._Fu_prod *? maybe_btr tmp) ))
       in
       (* compute LQR gain parameters to be used in the subsequent fwd pass *)
@@ -214,6 +216,7 @@ let v ~tangent ~batch_const ~_K ~_qx ~_qu =
    computed *)
 let backward
       ?(tangent = false)
+      ~ilqr_linesearch
       ~batch_const
       common_info
       (params : (any t option, (any t, any t -> any t) momentary_params list) Params.p)
@@ -224,13 +227,13 @@ let backward
     | Some z -> z._cx
   in
   (* info (k/K) goes from 0 to T-1 *)
-  let _, info =
+  let _, info, _dC1, _dC2 =
     let params_except_last = List.drop_last_exn params.params in
     List.fold2_exn
       (List.rev common_info)
       (List.rev params_except_last)
-      ~init:(_v, [])
-      ~f:(fun (_v, info_list) z p ->
+      ~init:(_v, [], Some Maths.(any (f 0.)), Some Maths.(any (f 0.)))
+      ~f:(fun (_v, info_list, _dC1_accu, _dC2_accu) z p ->
         cleanup ();
         let _qu, _qx =
           let _Fu_prod, _Fx_prod =
@@ -253,9 +256,28 @@ let backward
         let _k = _k ~tangent ~batch_const ~z ~_f:p._f _qu in
         (* update the value function *)
         let _v = v ~tangent ~batch_const ~_K:z._K ~_qx ~_qu in
-        _v, { _k; _K = z._K; _Quu_chol = z._Quu_chol } :: info_list)
+        let _dC1, _dC2 =
+          if ilqr_linesearch
+          then (
+            let _dC1 =
+              let tmp =
+                maybe_einsum
+                  (_k, "mb")
+                  (z._Quu_chol, if batch_const then "ba" else "mba")
+                  "ma"
+              in
+              maybe_einsum (tmp, "ma") (tmp, "ma") "m"
+            in
+            let _dC2 = maybe_einsum (_k, "mb") (_qu, "mb") "m" in
+            _dC1, _dC2)
+          else None, None
+        in
+        ( _v
+        , { _k; _K = z._K; _Quu_chol = z._Quu_chol } :: info_list
+        , _dC1_accu +? _dC1
+        , _dC2_accu +? _dC2 ))
   in
-  info
+  info, _dC1, _dC2
 
 (* compute control _u *)
 let _u ~tangent ~batch_const ~_k ~_K ~x =
@@ -300,12 +322,12 @@ let forward ?(tangent = false) ~batch_const params (backward_info : backward_inf
 
 (* when batch_const is true, _Fx_prods, _Fu_prods, _Cxx, _Cxu, _Cuu has no leading batch dimension and special care needs to be taken to deal with these *)
 (* given parameters, run backward and forward passes in LQR to compute optimal u and x *)
-let _solve ?(batch_const = false) p =
+let _solve ?(ilqr_linesearch = false) ?(batch_const = false) p =
   let common_info =
     backward_common ~batch_const (List.map p.Params.params ~f:(fun x -> x.common))
   in
   cleanup ();
-  let bck = backward ~batch_const common_info p in
+  let bck, _, _ = backward ~ilqr_linesearch ~batch_const common_info p in
   cleanup ();
   let sol =
     bck
@@ -475,7 +497,7 @@ let tangent_solve
 
 (* implicitly differentiate through LQR by solving the primal problem before solving the tangent
   problem; return optimal u and x *)
-let solve ?(batch_const = false) p =
+let solve ?(ilqr_linesearch = false) ?(batch_const = false) p =
   (* solve the primal problem first *)
   let _p = Option.map ~f:(fun x -> any (of_tensor (to_tensor x))) in
   let _p_implicit = Option.map ~f:(fun x -> x.primal) in
@@ -509,7 +531,7 @@ let solve ?(batch_const = false) p =
   cleanup ();
   (* SOLVE THE PRIMAL PROBLEM *)
   let s =
-    let bck = backward common_info ~batch_const p_primal in
+    let bck, _, _ = backward common_info ~ilqr_linesearch ~batch_const p_primal in
     cleanup ();
     bck |> forward ~batch_const p_primal
   in
