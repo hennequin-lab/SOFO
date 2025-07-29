@@ -30,7 +30,7 @@ let maybe_einsum (a, opsA) (b, opsB) opsC =
   | Some a, Some b -> Some (einsum [ a, opsA; b, opsB ] opsC)
   | _ -> None
 
-let _u ~tangent ~batch_const ~_k ~_K ~x ~alpha =
+let _u ~tangent ~batch_const ~_k ~_K ~x ~u ~alpha =
   let tmp =
     match tangent, batch_const with
     | true, true -> maybe_einsum (x, "kma") (_K, "ba") "kmb"
@@ -38,7 +38,7 @@ let _u ~tangent ~batch_const ~_k ~_K ~x ~alpha =
     | false, true -> maybe_einsum (x, "ma") (_K, "ba") "mb"
     | false, false -> maybe_einsum (x, "ma") (_K, "mba") "mb"
   in
-  maybe_scalar_mul _k alpha +? tmp
+  maybe_scalar_mul _k alpha +? tmp +? u
 
 (* TODO: need Guillaume to proof-read this: sometimes the cost does not fall below prev value? *)
 (* calculate the new u w.r.t. the difference between x_t and x_opt_t *)
@@ -52,12 +52,12 @@ let forward
       ~(bck : backward_info list)
   =
   let cost_init = cost_func tau_opt in
-  let rec fwd_loop ~stop ~i ~alpha ~tau_prev cost_prev =
+  let rec fwd_loop ~stop ~i ~alpha ~tau_prev =
     if stop
     then tau_prev
     else (
       let x0 = p.x0 in
-      let u0 = maybe_scalar_mul (List.hd_exn bck)._k alpha in
+      let u0 = maybe_scalar_mul (List.hd_exn bck)._k alpha +? (List.hd_exn tau_opt).u in
       (* in tau_opt x goes from 1 to T but u goes from 0 to T-1. bck goes from 0 to T-1. *)
       (* in tau_opt_trunc and bck_trunc x,u and bck_trunc goes from 1 to T-1 *)
       let tau_opt_trunc =
@@ -87,6 +87,7 @@ let forward
                 ~_k:b._k
                 ~_K:b._K
                 ~x:(Some x_new -? x_opt)
+                ~u:tau.u
                 ~alpha
             in
             Some x_new, u_new, Solution.{ u = u_prev; x = Some x_new } :: accu)
@@ -102,22 +103,15 @@ let forward
       in
       let cost_curr = cost_func tau_curr in
       cleanup ();
-      print [%message "fwd loop" (cost_init : float) (cost_curr : float)];
-      let pct_change = Float.((cost_curr - cost_prev) / cost_prev) in
-      let lower_than_init = Float.(cost_curr < cost_init) in
-      (* TODO: stop if cost increasing. *)
-      let higher_than_prev = i > 10 && Float.(pct_change > 0.) in
-      let stop = lower_than_init || higher_than_prev in
-      fwd_loop
-        ~stop
-        ~i:Int.(i + 1)
-        ~alpha:(alpha *. gamma)
-        ~tau_prev:(if higher_than_prev then tau_opt else tau_curr)
-        cost_curr)
+      print [%message "fwd loop" (alpha : float) (cost_init : float) (cost_curr : float)];
+      let lower_than_init = Float.(cost_curr <= cost_init) in
+      if Float.(alpha < 1e-8) then failwith "linesearch did not converge";
+      let stop = lower_than_init in
+      fwd_loop ~stop ~i:Int.(i + 1) ~alpha:(alpha *. gamma) ~tau_prev:tau_curr)
   in
   (* start with alpha set to 1 *)
   let alpha = 1. in
-  fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt cost_init
+  fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt
 
 let ilqr_loop
       ~batch_const

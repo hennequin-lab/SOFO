@@ -54,11 +54,7 @@ let neg_inv_symm ~is_vector _b (ell, ell_T) =
 (* backward recursion: all the (most expensive) common bits. common goes from 0 to T *)
 let backward_common
       ~batch_const
-      (common :
-        ( Maths.any Maths.t
-          , Maths.any Maths.t -> Maths.any Maths.t )
-          momentary_params_common
-          list)
+      (common : (any t, any t -> any t) momentary_params_common list)
   =
   let _V =
     match List.last common with
@@ -80,7 +76,18 @@ let backward_common
               z._Fu_prod *? maybe_btr (z._Fu_prod *? _V_unsqueezed)
               |> maybe_squeeze ~dim:0
             in
-            z._Cuu +? tmp2
+            (* let reg =
+              let _Cuu = Option.value_exn z._Cuu in
+              let m = shape _Cuu |> List.last_exn in
+              f 1e-6
+              * eye
+                  m
+                  ~kind:(Torch.Tensor.kind (to_tensor _Cuu))
+                  ~device:(Torch.Tensor.device (to_tensor _Cuu))
+              |> any
+            in *)
+            let _Quu = Option.value_exn (z._Cuu +? tmp2) in
+            Some ((_Quu + transpose _Quu ~dims:[ 1; 0 ]) / f 2.)
           in
           let _Qxx =
             let tmp2 = z._Fx_prod *? maybe_btr tmp |> maybe_squeeze ~dim:0 in
@@ -93,7 +100,24 @@ let backward_common
           _Quu, _Qxx, _Qux)
         else (
           let tmp = z._Fx_prod *? _V in
-          ( z._Cuu +? (z._Fu_prod *? maybe_btr (z._Fu_prod *? _V))
+          (* let reg =
+            let _Cuu = Option.value_exn z._Cuu in
+            let m = shape _Cuu |> List.last_exn in
+            let eye_m =
+              f 1e-6
+              * eye
+                  m
+                  ~kind:(Torch.Tensor.kind (to_tensor _Cuu))
+                  ~device:(Torch.Tensor.device (to_tensor _Cuu))
+              |> any
+            in
+            let bs = shape _Cuu |> List.hd_exn in
+            broadcast_to eye_m ~size:[ bs; m; m ]
+          in *)
+          let _Quu =
+            Option.value_exn (z._Cuu +? (z._Fu_prod *? maybe_btr (z._Fu_prod *? _V)))
+          in
+          ( Some ((_Quu + transpose _Quu ~dims:[ 0; 2; 1 ]) / f 2.)
           , z._Cxx +? (z._Fx_prod *? maybe_btr tmp)
           , maybe_btr z._Cxu +? (z._Fu_prod *? maybe_btr tmp) ))
       in
@@ -123,40 +147,36 @@ let _k ~tangent ~batch_const ~(z : backward_common_info) ~_f _qu =
      | Some _f ->
        (* from [k x m x b] to [b x km ] *)
        let _qu_tmp = Option.value_exn _qu in
-       let m, b =
-         List.nth_exn (Maths.shape _qu_tmp) 1, List.nth_exn (Maths.shape _qu_tmp) 2
-       in
+       let m, b = List.nth_exn (shape _qu_tmp) 1, List.nth_exn (shape _qu_tmp) 2 in
        let _qu_squeezed =
-         _qu_tmp |> Maths.reshape ~shape:[ -1; b ] |> Maths.permute ~dims:[ 1; 0 ] |> Some
+         _qu_tmp |> reshape ~shape:[ -1; b ] |> permute ~dims:[ 1; 0 ] |> Some
        in
        neg_inv_symm ~is_vector:false _qu_squeezed (z._Quu_chol, z._Quu_chol_T)
        (* from [b x km ] to [k x m x b] *)
        |> Option.value_exn
-       |> Maths.reshape ~shape:[ b; -1; m ]
-       |> Maths.permute ~dims:[ 1; 2; 0 ]
+       |> reshape ~shape:[ b; -1; m ]
+       |> permute ~dims:[ 1; 2; 0 ]
        |> Some
      | None -> None)
   | true, false ->
     (match _f with
      | Some _f ->
        (* from [k x m x b] to [m x b x k] *)
-       let _qu_swapped =
-         Option.value_exn _qu |> Maths.permute ~dims:[ 1; 2; 0 ] |> Some
-       in
+       let _qu_swapped = Option.value_exn _qu |> permute ~dims:[ 1; 2; 0 ] |> Some in
        neg_inv_symm ~is_vector:false _qu_swapped (z._Quu_chol, z._Quu_chol_T)
        (* from [m x b x k] to [k x m x b] *)
        |> Option.value_exn
-       |> Maths.permute ~dims:[ 2; 0; 1 ]
+       |> permute ~dims:[ 2; 0; 1 ]
        |> Some
      | None -> None)
   | false, true ->
     (match _qu with
      | None -> None
      | Some _qu ->
-       let _qu_swapped = Some (Maths.permute ~dims:[ 1; 0 ] _qu) in
+       let _qu_swapped = Some (permute ~dims:[ 1; 0 ] _qu) in
        neg_inv_symm ~is_vector:false _qu_swapped (z._Quu_chol, z._Quu_chol_T)
        |> Option.value_exn
-       |> Maths.permute ~dims:[ 1; 0 ]
+       |> permute ~dims:[ 1; 0 ]
        |> Some)
   | false, false ->
     let _k_unsqueezed = neg_inv_symm ~is_vector:true _qu (z._Quu_chol, z._Quu_chol_T) in
@@ -196,11 +216,7 @@ let backward
       ?(tangent = false)
       ~batch_const
       common_info
-      (params :
-        ( Maths.any Maths.t option
-          , (Maths.any Maths.t, Maths.any Maths.t -> Maths.any Maths.t) momentary_params
-              list )
-          Params.p)
+      (params : (any t option, (any t, any t -> any t) momentary_params list) Params.p)
   =
   let _v =
     match List.last params.params with
@@ -305,12 +321,9 @@ let _solve ?(batch_const = false) p =
 let tangent_solve
       ~batch_const
       common_info
-      (s : Maths.any Maths.t option Solution.p list)
-      (p :
-        ( Maths.any Maths.t option
-          , (Maths.any Maths.t, Maths.any Maths.t prod) momentary_params list )
-          Params.p)
-  : Maths.any Maths.t option Solution.p list
+      (s : any t option Solution.p list)
+      (p : (any t option, (any t, any t prod) momentary_params list) Params.p)
+  : any t option Solution.p list
   =
   let _p_implicit_primal = Option.map ~f:(fun x -> x.primal) in
   let _p_implicit_tangent x =
@@ -319,16 +332,14 @@ let tangent_solve
     | Some a -> a
     | None -> None
   in
-  let _p_primal =
-    Option.map ~f:(fun x -> Maths.any (Maths.of_tensor (Maths.to_tensor x)))
-  in
+  let _p_primal = Option.map ~f:(fun x -> any (of_tensor (to_tensor x))) in
   let _p_tangent x =
     match x with
     | None -> None
     | Some x ->
-      (match Maths.tangent x with
+      (match tangent x with
        | None -> None
-       | Some dx -> Some (Maths.any dx))
+       | Some dx -> Some (any dx))
   in
   (* calculate terminal conditions *)
   let params_T = List.last_exn p.params in
@@ -466,7 +477,7 @@ let tangent_solve
   problem; return optimal u and x *)
 let solve ?(batch_const = false) p =
   (* solve the primal problem first *)
-  let _p = Option.map ~f:(fun x -> Maths.any (Maths.of_tensor (Maths.to_tensor x))) in
+  let _p = Option.map ~f:(fun x -> any (of_tensor (to_tensor x))) in
   let _p_implicit = Option.map ~f:(fun x -> x.primal) in
   let p_primal =
     Params.
@@ -512,10 +523,8 @@ let solve ?(batch_const = false) p =
       match a with
       | Some a ->
         (match at with
-         | None -> Maths.any (Maths.of_tensor (Maths.to_tensor a))
-         | Some at ->
-           Maths.any
-             (Maths.dual ~tangent:(Maths.const at) (Maths.of_tensor (Maths.to_tensor a))))
+         | None -> any (of_tensor (to_tensor a))
+         | Some at -> any (dual ~tangent:(const at) (of_tensor (to_tensor a))))
       | None -> failwith "for some reason, no solution in there"
     in
     Solution.{ u = zip s.u st.u; x = zip s.x st.x })

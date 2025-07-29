@@ -15,7 +15,7 @@ let _ =
 
 let in_dir = Cmdargs.in_dir "-d"
 let base = Optimizer.Config.Base.default
-let conv_threshold = 1e-4
+let conv_threshold = 1e-5
 
 (* -----------------------------------------
    -- Generate Lorenz data            ------
@@ -270,7 +270,7 @@ let ilqr ~observation =
     Ilqr._isolve
       ~f_theta
       ~batch_const:false
-      ~gamma:0.9
+      ~gamma:0.5
       ~cost_func
       ~params_func
       ~conv_threshold
