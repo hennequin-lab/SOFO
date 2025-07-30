@@ -15,7 +15,7 @@ let _ =
 
 let in_dir = Cmdargs.in_dir "-d"
 let base = Optimizer.Config.Base.default
-let conv_threshold = 1e-7
+let conv_threshold = 1e-5
 
 (* -----------------------------------------
    -- Generate Lorenz data            ------
@@ -67,23 +67,32 @@ let get_batch data =
   List.init tmax ~f:(fun i ->
     Arr.(squeeze (get_slice [ [ i ] ] data)) |> Tensor.of_bigarray ~device:base.device)
 
-let x0, data =
+let x0, data, data_no_input, u_array =
   let train_data = Lorenz_common.data 33 in
   let trajectory = Lorenz_common.get_batch train_data bs in
   (* get initial condition from integrated lorenz data *)
   let x0 = List.last_exn trajectory in
-  (* TODO: no input for now; goal is to recover initial condition *)
-  let u_array = Array.init bs ~f:(fun _ -> Mat.zeros tmax 3) in
-  (* generate trajectory *)
-  let data =
-    gen_lorenz ~dt x0 u_array
+  let u_array_no_input = Array.init bs ~f:(fun _ -> Mat.zeros tmax 3) in
+  let u_array =
+    Array.init bs ~f:(fun _ ->
+      let t = Random.int Int.(2 + (tmax / 2)) in
+      let input = Mat.gaussian ~sigma:Float.(10. / dt) 1 3 in
+      Tensor.print (Tensor.of_bigarray ~device:base.device input);
+      Mat.concatenate ~axis:0 [| Mat.zeros (t - 1) 3; input; Mat.zeros (tmax - t) 3 |])
+  in
+  let gen_data_list us =
+    gen_lorenz ~dt x0 us
     |> get_batch
     |> List.map ~f:(fun x ->
       x |> Maths.of_tensor |> Maths.any |> Maths.reshape ~shape:[ bs; 3 ])
   in
-  x0, data
+  (* generate trajectory *)
+  let data_no_input = gen_data_list u_array_no_input
+  and data = gen_data_list u_array in
+  x0, data, data_no_input, u_array
 
-let x0_maths = Maths.zeros ~device:base.device ~kind:base.kind [ bs; 3 ] |> Maths.any
+let x0_maths =
+  Maths.of_bigarray ~device:base.device x0 |> Maths.reshape ~shape:[ bs; 3 ] |> Maths.any
 
 (* -----------------------------------------
    -- iLQR params         ------
@@ -285,30 +294,37 @@ let ilqr ~observation =
    ----------------------------------------- *)
 let _ =
   let sol = ilqr ~observation:data in
-  let inferred_us = List.map sol ~f:(fun x -> x.u |> Option.value_exn) in
-  (* inferred_u_mat shape [tmax x bs x 3] *)
-  let inferred_u_mat =
-    List.map inferred_us ~f:(fun u ->
+  let sol_list_concat a =
+    List.map a ~f:(fun u ->
       let tmp = u |> Maths.to_tensor |> Tensor.to_bigarray ~kind:base.ba_kind in
       Arr.reshape tmp [| 1; bs; 3 |])
     |> List.to_array
     |> Arr.concatenate ~axis:0
   in
-  let inferred_x_mat =
-    let inferred_xs = List.map sol ~f:(fun x -> x.x |> Option.value_exn) in
-    List.map inferred_xs ~f:(fun x ->
-      let tmp = x |> Maths.to_tensor |> Tensor.to_bigarray ~kind:base.ba_kind in
-      Arr.reshape tmp [| 1; bs; 3 |])
-    |> List.to_array
-    |> Arr.concatenate ~axis:0
+  let data_list_concat a =
+    Maths.concat (List.map a ~f:(Maths.unsqueeze ~dim:0)) ~dim:0
+    |> Maths.to_tensor
+    |> Tensor.to_bigarray ~kind:base.ba_kind
   in
-  let x_mat =
-    let tmp = Maths.concat (List.map data ~f:(Maths.unsqueeze ~dim:0)) ~dim:0 in
-    tmp |> Maths.to_tensor |> Tensor.to_bigarray ~kind:base.ba_kind
+  (* inferred_u_mat shape [tmax x bs x 3] *)
+  let inferred_u_mat =
+    List.map sol ~f:(fun x -> x.u |> Option.value_exn) |> sol_list_concat
+  in
+  let inferred_x_mat =
+    List.map sol ~f:(fun x -> x.x |> Option.value_exn) |> sol_list_concat
+  in
+  let x_mat = data_list_concat data
+  and x_no_input_mat = data_list_concat data_no_input in
+  let u_mat =
+    Arr.concatenate
+      (Array.map u_array ~f:(fun u -> Arr.reshape u [| tmax; 1; 3 |]))
+      ~axis:1
   in
   Arr.(save_npy ~out:(in_dir "inferred_x") inferred_x_mat);
   Mat.(save_npy ~out:(in_dir "x") x_mat);
+  Mat.(save_npy ~out:(in_dir "x_no_input") x_no_input_mat);
   Mat.(save_npy ~out:(in_dir "inferred_u") inferred_u_mat);
+  Mat.(save_npy ~out:(in_dir "u") u_mat);
   Mat.(save_npy ~out:(in_dir "x0") x0);
   let final_error = Arr.(mean' (sqr (x_mat - inferred_x_mat))) in
   Sofo.print [%message (final_error : float)]

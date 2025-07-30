@@ -1,4 +1,4 @@
-(* Test whether ilqr is correct with arm model. TODO: this does not work! *)
+(* Test whether ilqr is correct with arm model. *)
 
 open Base
 open Torch
@@ -9,12 +9,12 @@ open Sofo
 
 let in_dir = Cmdargs.in_dir "-d"
 let base = Optimizer.Config.Base.default
-let bs = 5
-let tmax = 100
+let bs = 1
+let tmax = 10000
 let n = 4
 let m = 2
 let dt = 0.001
-let conv_threshold = 0.0001
+let conv_threshold = 1e-4
 
 (* -----------------------------------------
    ----- Arm Model ------
@@ -156,12 +156,13 @@ let integrate ~dt state torque =
   }
 
 (* specify target angles and pos directly *)
-(* TODO: change to a wider range *)
 let reach_target () =
-  let a1 = Owl_stats.uniform_rvs ~a:0. ~b:30. |> fun x -> Float.(x * pi / 180.) in
-  let a2 = Owl_stats.uniform_rvs ~a:80. ~b:110. |> fun x -> Float.(x * pi / 180.) in
-  (* let a1 = 0.1 in
-  let a2 = 0.1 in *)
+  let a1 =
+    Owl_stats.uniform_rvs ~a:(-36.) ~b:(180. +. 36.) |> fun x -> Float.(x * pi / 180.)
+  in
+  let a2 =
+    Owl_stats.uniform_rvs ~a:(-36.) ~b:(180. +. 36.) |> fun x -> Float.(x * pi / 180.)
+  in
   let joint_x = Float.(_L1 * cos a1) in
   let joint_y = Float.(_L1 * sin a1) in
   let z = Float.(a1 + a2) in
@@ -181,7 +182,7 @@ let _Cxx_batched =
 
 let _Cuu_batched =
   let _Cuu =
-    Maths.(any (of_tensor Tensor.(f 1e-3 * eye ~options:(base.kind, base.device) ~n:m)))
+    Maths.(any (of_tensor Tensor.(f 1. * eye ~options:(base.kind, base.device) ~n:m)))
   in
   Maths.broadcast_to _Cuu ~size:[ bs; m; m ]
 
@@ -571,18 +572,28 @@ let ilqr ~targets_batched =
         Lqr.Params.p
     =
     let tau_extended = extend_tau_list tau in
-    let _cx = Maths.(neg (einsum [ targets_batched, "ma"; _Cxx_batched, "mab" ] "mb")) in
     let tmp_list =
       Lqr.Params.
         { x0 = Some x0_batched
         ; params =
             List.map tau_extended ~f:(fun s ->
+              let _cu =
+                match s.u with
+                | None -> None
+                | Some u -> Some Maths.(einsum [ u, "ma"; _Cuu_batched, "mab" ] "mb")
+              in
+              let _cx =
+                Maths.(
+                  einsum
+                    [ Option.value_exn s.x - targets_batched, "ma"; _Cxx_batched, "mab" ]
+                    "mb")
+              in
               Lds_data.Temp.
                 { _f = None
                 ; _Fx_prod = _Fx ~x:s.x ~u:s.u
                 ; _Fu_prod = _Fu ~x:s.x
                 ; _cx = Some _cx
-                ; _cu = None
+                ; _cu
                 ; _Cxx = _Cxx_batched
                 ; _Cxu = None
                 ; _Cuu = _Cuu_batched
@@ -593,15 +604,16 @@ let ilqr ~targets_batched =
   in
   let u_init =
     List.init tmax ~f:(fun _ ->
-      let rand = Tensor.randn ~device:base.device ~kind:base.kind [ bs; m ] in
+      let rand = Tensor.zeros ~device:base.device ~kind:base.kind [ bs; m ] in
       Maths.any (Maths.of_tensor rand))
   in
   let tau_init = rollout_sol ~u_list:u_init ~x0:x0_batched in
   let sol, _ =
     Ilqr._isolve
-      ~f_theta
+      ~linesearch:false
       ~batch_const:false
-      ~gamma:0.8
+      ~f_theta
+      ~gamma:0.5
       ~cost_func
       ~params_func
       ~conv_threshold

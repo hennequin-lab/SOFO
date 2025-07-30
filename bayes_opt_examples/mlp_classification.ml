@@ -186,11 +186,7 @@ module O = Optimizer.SOFO (MLP.P)
 
 let init_config =
   Optimizer.Config.SOFO.
-    { base
-    ; learning_rate = None
-    ; n_tangents = 128
-    ; damping = `relative_from_top 1e-3
-    }
+    { base; learning_rate = None; n_tangents = 128; damping = `relative_from_top 1e-3 }
 
 (* TODO: fix tangents to be used when line searching for the optimal learning rate *)
 let model ~data ~tangents ~state alpha =
@@ -261,4 +257,4 @@ let _ =
   in
   Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
   Bos.Cmd.(v "rm" % "-f" % in_dir "gp_info") |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out ~state:(O.init (MLP.init)) ~alpha_opt:0.1 []
+  loop ~t:0 ~out ~state:(O.init MLP.init) ~alpha_opt:0.1 []
