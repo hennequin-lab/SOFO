@@ -232,7 +232,7 @@ let backward
     List.fold2_exn
       (List.rev common_info)
       (List.rev params_except_last)
-      ~init:(_v, [], Some Maths.(any (f 0.)), Some Maths.(any (f 0.)))
+      ~init:(_v, [], None, None)
       ~f:(fun (_v, info_list, _dC1_accu, _dC2_accu) z p ->
         cleanup ();
         let _qu, _qx =

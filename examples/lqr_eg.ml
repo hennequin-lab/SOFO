@@ -53,66 +53,6 @@ let _Cuu =
 
 let x0 = Data.sample_x0 () |> Maths.any
 
-(* let map_implicit
-      (x :
-        ( Maths.any Maths.t option
-          , (Maths.any Maths.t, Maths.any Maths.t option) Lds_data.Temp.p list )
-          Lqr.Params.p)
-      ~batch_const
-  =
-  let params =
-    List.map x.params ~f:(fun p ->
-      Lqr.
-        { common =
-            { _Fx_prod = Some (Lds_data.prod ~batch_const p._Fx_prod)
-            ; _Fx_prod2 = Some (Lds_data.prod2 ~batch_const p._Fx_prod)
-            ; _Fu_prod = Some (Lds_data.prod ~batch_const p._Fu_prod)
-            ; _Fu_prod2 = Some (Lds_data.prod2 ~batch_const p._Fu_prod)
-            ; _Fx_prod_tangent = Some (Lds_data.prod_tangent ~batch_const p._Fx_prod)
-            ; _Fx_prod2_tangent = Some Lds_data.(prod2_tangent ~batch_const p._Fx_prod)
-            ; _Fu_prod_tangent = Some (Lds_data.prod_tangent ~batch_const p._Fu_prod)
-            ; _Fu_prod2_tangent = Some (Lds_data.prod2_tangent ~batch_const p._Fu_prod)
-            ; _Cxx = Some p._Cxx
-            ; _Cxu = p._Cxu
-            ; _Cuu = Some p._Cuu
-            }
-        ; _f = p._f
-        ; _cx = p._cx
-        ; _cu = p._cu
-        })
-  in
-  Lqr.Params.{ x with params } *)
-
-let map_naive
-      (x :
-        ( Maths.any Maths.t option
-          , (Maths.any Maths.t, Maths.any Maths.t option) Lds_data.Temp.p list )
-          Lqr.Params.p)
-      ~batch_const
-  =
-  let irrelevant = Some (fun _ -> assert false) in
-  let params =
-    List.map x.params ~f:(fun p ->
-      Lqr.
-        { common =
-            { _Fx_prod = Some (Lds_data.bmm ~batch_const p._Fx_prod)
-            ; _Fx_prod2 = Some (Lds_data.bmm2 ~batch_const p._Fx_prod)
-            ; _Fu_prod = Some (Lds_data.bmm ~batch_const p._Fu_prod)
-            ; _Fu_prod2 = Some (Lds_data.bmm2 ~batch_const p._Fu_prod)
-            ; _Fx_prod_tangent = irrelevant
-            ; _Fx_prod2_tangent = irrelevant
-            ; _Fu_prod_tangent = irrelevant
-            ; _Fu_prod2_tangent = irrelevant
-            ; _Cxx = Some p._Cxx
-            ; _Cxu = p._Cxu
-            ; _Cuu = Some p._Cuu
-            }
-        ; _f = p._f
-        ; _cx = p._cx
-        ; _cu = p._cu
-        })
-  in
-  Lqr.Params.{ x with params }
 
 (* need to sample params first to get the trajectory *)
 let f_list : Maths.any Maths.t Lds_data.f_params list =
@@ -153,7 +93,7 @@ let params
     }
 
 let check_quality common_params u_targets =
-  let p = map_naive ~batch_const:Dims.batch_const common_params in
+  let p = Lds_data.map_naive ~batch_const:Dims.batch_const common_params in
   let result, _ = Lqr._solve ~batch_const:Dims.batch_const p in
   (* let p = map_implicit ~batch_const:Dims.batch_const common_params in
   let result = Lqr.solve ~batch_const:Dims.batch_const p in *)

@@ -105,7 +105,7 @@ let forward
       in
       let cost_curr = cost_func tau_curr in
       cleanup ();
-      print [%message "fwd loop" (alpha : float) (cost_init : float) (cost_curr : float)];
+      (* print [%message "fwd loop" (alpha : float) (cost_init : float) (cost_curr : float)]; *)
       let lower_than_init =
         let cost_change = Float.(cost_curr - cost_init) in
         match _dC1, _dC2 with
@@ -165,8 +165,8 @@ let ilqr_loop
     in
     let cost_curr = cost_func tau_curr in
     let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
-    print
-      [%message "ilqr loop" (cost_prev : float) (cost_curr : float) (pct_change : float)];
+    (* print
+      [%message "ilqr loop" (cost_prev : float) (cost_curr : float) (pct_change : float)]; *)
     let stop = Float.(pct_change < conv_threshold) || i = max_iter in
     cleanup ();
     if stop
@@ -204,4 +204,5 @@ let _isolve
       ~cost_init
   in
   cleanup ();
+  print [%message "ilqr solve finished!"];
   tau_final, info_final

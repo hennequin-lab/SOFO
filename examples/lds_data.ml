@@ -237,7 +237,15 @@ let q_of ~batch_const ~m ~reg d =
     Array.init m ~f:(fun _ -> Arr.reshape (pos_sym ~reg d) [| 1; d; d |])
     |> Arr.concatenate ~axis:0
 
-(* let map_naive (x) ~batch_const =
+
+
+let map_naive
+      (x :
+        ( Maths.any Maths.t option
+          , (Maths.any Maths.t, Maths.any Maths.t option) Temp.p list )
+          Lqr.Params.p)
+      ~batch_const
+  =
   let irrelevant = Some (fun _ -> assert false) in
   let params =
     List.map x.params ~f:(fun p ->
@@ -262,7 +270,13 @@ let q_of ~batch_const ~m ~reg d =
   in
   Lqr.Params.{ x with params }
 
-let map_implicit (x : Input.M.t) ~batch_const =
+let map_implicit
+      (x :
+        ( Maths.any Maths.t option
+          , (Maths.any Maths.t, Maths.any Maths.t option) Temp.p list )
+          Lqr.Params.p)
+      ~batch_const
+  =
   let params =
     List.map x.params ~f:(fun p ->
       Lqr.
@@ -284,7 +298,7 @@ let map_implicit (x : Input.M.t) ~batch_const =
         ; _cu = p._cu
         })
   in
-  Lqr.Params.{ x with params } *)
+  Lqr.Params.{ x with params }
 
 (* -----------------------------------------
    -- LDS Module with tangents    ------

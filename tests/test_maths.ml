@@ -145,6 +145,12 @@ let unary_tests =
           assert (Poly.(shape_ = shape x));
           let size = [ 2; 7; 3; 4 ] in
           broadcast_to ~size x )
+    ; ( "broadcast_to_left"
+      , [ `specified_unary [ 2; 3; 4 ] ]
+      , fun shape_ x ->
+          assert (Poly.(shape_ = shape x));
+          let size = [ 5; 2; 3; 4 ] in
+          broadcast_to ~size x )
     ; ( "reshape"
       , [ `specified_unary [ 2; 3; 6; 4 ] ]
       , any_shape (reshape ~shape:[ 2; 4; 18 ]) )

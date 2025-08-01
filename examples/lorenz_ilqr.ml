@@ -185,11 +185,11 @@ let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
   let x_list = List.map tau ~f:(fun s -> s.x |> Option.value_exn) in
   let u_list = List.map tau ~f:(fun s -> s.u |> Option.value_exn) in
   let x_cost =
-    let x_cost_lst =
+    let x_cost_list =
       List.map2_exn x_list data ~f:(fun x o ->
         Maths.(einsum [ x - o, "ma"; _Cxx_batched, "mab"; x - o, "mb" ] "m"))
     in
-    List.fold x_cost_lst ~init:Maths.(any (f 0.)) ~f:(fun accu c -> Maths.(accu + c))
+    List.fold x_cost_list ~init:Maths.(any (f 0.)) ~f:(fun accu c -> Maths.(accu + c))
   in
   let u_cost =
     List.fold
@@ -200,36 +200,7 @@ let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
   in
   Maths.(x_cost + u_cost) |> Maths.to_tensor |> Tensor.mean |> Tensor.to_float0_exn
 
-let map_naive
-      (x :
-        ( Maths.any Maths.t option
-          , (Maths.any Maths.t, Maths.any Maths.t option) Lds_data.Temp.p list )
-          Lqr.Params.p)
-      ~batch_const
-  =
-  let irrelevant = Some (fun _ -> assert false) in
-  let params =
-    List.map x.params ~f:(fun p ->
-      Lqr.
-        { common =
-            { _Fx_prod = Some (Lds_data.bmm ~batch_const p._Fx_prod)
-            ; _Fx_prod2 = Some (Lds_data.bmm2 ~batch_const p._Fx_prod)
-            ; _Fu_prod = Some (Lds_data.bmm ~batch_const p._Fu_prod)
-            ; _Fu_prod2 = Some (Lds_data.bmm2 ~batch_const p._Fu_prod)
-            ; _Fx_prod_tangent = irrelevant
-            ; _Fx_prod2_tangent = irrelevant
-            ; _Fu_prod_tangent = irrelevant
-            ; _Fu_prod2_tangent = irrelevant
-            ; _Cxx = Some p._Cxx
-            ; _Cxu = p._Cxu
-            ; _Cuu = Some p._Cuu
-            }
-        ; _f = p._f
-        ; _cx = p._cx
-        ; _cu = p._cu
-        })
-  in
-  Lqr.Params.{ x with params }
+
 
 let ilqr ~observation =
   let f_theta = rollout_one_step in
@@ -267,7 +238,7 @@ let ilqr ~observation =
                 })
         }
     in
-    map_naive tmp_list ~batch_const:false
+    Lds_data.map_naive tmp_list ~batch_const:false
   in
   let u_init =
     List.init tmax ~f:(fun _ ->

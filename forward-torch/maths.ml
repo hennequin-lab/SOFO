@@ -42,6 +42,8 @@ let tangent_tensor_of : type a. Tensor.t -> a tangent -> Tensor.t =
   | Explicit v -> v
   | On_demand v -> v (Tensor.device x)
 
+let repeat_list lst n = List.init n ~f:(fun _ -> lst) |> List.concat
+
 let assert_right_shape x dx =
   let sx = Tensor.shape x
   and sdx = Tensor.shape dx in
@@ -182,9 +184,20 @@ module Ops = struct
 
   let broadcast_to ~size =
     let f = Tensor.broadcast_to ~size in
-    let df ~f:_ ~x:_ ~dx =
-      let size = batch_dim dx :: size in
-      Tensor.broadcast_to ~size dx
+    let df ~f:_ ~x ~dx =
+      let ones_unsqueezed =
+        let n_extra = List.length size - List.length (Tensor.shape x) in
+        if n_extra = 0 then None else Some (repeat_list [ 1 ] n_extra)
+      in
+      let k = batch_dim dx in
+      let dx_unsqueezed =
+        match ones_unsqueezed with
+        | Some ones_unsqueezed ->
+          Tensor.view dx ~size:((k :: ones_unsqueezed) @ Tensor.shape x)
+        | None -> dx
+      in
+      let size = k :: size in
+      Tensor.broadcast_to ~size dx_unsqueezed
     in
     { f; df }
 
@@ -979,6 +992,7 @@ let log x = make_unary Ops.log x
 let exp x = make_unary Ops.exp x
 let tanh x = make_unary Ops.tanh x
 let pdf x = make_unary Ops.pdf x
+
 (* let cdf x = make_unary Ops.cdf x *)
 let erf x = make_unary Ops.erf x
 let inv_sqr x = make_unary Ops.inv_sqr x
@@ -1209,6 +1223,7 @@ module C = struct
   let exp = make_unary Ops.exp
   let tanh = make_unary Ops.tanh
   let pdf = make_unary Ops.pdf
+
   (* let cdf = make_unary Ops.cdf *)
   let erf = make_unary Ops.erf
   let inv_sqr x = make_unary Ops.inv_sqr x
