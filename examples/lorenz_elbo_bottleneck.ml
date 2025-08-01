@@ -31,14 +31,13 @@ let p = 40
 let o = 3
 let batch_size = 32
 let num_epochs_to_run = 70
-let tmax = 33
-let train_data = Arr.load_npy (in_dir "lorenz_train")
 
-(* let train_data = data Int.(tmax - 1) *)
-let full_batch_size = Arr.(shape train_data).(1)
+(* tmax needs to be divisible by 8 *)
+let tmax = 80
+let tmax_simulate = 1000
+let train_data = Lorenz_common.data tmax
 let train_data_batch = get_batch train_data
-let max_iter = Int.(full_batch_size * num_epochs_to_run / batch_size)
-let batch_const = true
+let max_iter = 100000
 let base = Optimizer.Config.Base.default
 
 (* list of clean data * list of noisy data *)
@@ -62,11 +61,6 @@ let ones_u = Maths.(ones ~device:base.device ~kind:base.kind [ m ])
 (* -----------------------------------------
    ----- Utilitiy Functions ------
    ----------------------------------------- *)
-
-let tmp_einsum a b =
-  if batch_const
-  then Maths.einsum [ a, "ma"; b, "ab" ] "mb"
-  else Maths.einsum [ a, "ma"; b, "mab" ] "mb"
 
 let gaussian_llh ?mu ~inv_std x =
   let d = x |> Maths.shape |> List.last_exn in
@@ -103,7 +97,6 @@ let gaussian_llh_chol ?(batched_chol = false) ?mu ~precision_chol:ell x =
 let precision_of_log_var log_var = Maths.(exp (neg log_var))
 let std_of_log_var log_var = Maths.(exp (f 0.5 * log_var))
 let sqrt_precision_of_log_var log_var = Maths.(exp (f (-0.5) * log_var))
-let _Cuu_batched = Maths.(any (broadcast_to (f 1e-5 * eye_m) ~size:[ batch_size; m; m ]))
 
 (* concat a list of [m x 3] tensors to [T x m x 3] mat *)
 let t_list_to_mat data =
@@ -124,6 +117,7 @@ module PP = struct
     ; _B : 'a
     ; _c : 'a (* likelihood: o = N(x _c + _b, std_o^2) *)
     ; _b : 'a
+    ; _log_prior_var : 'a (* log of the diagonal covariance of prior over u *)
     ; _log_obs_var : 'a (* log of the diagonal covariance of emission noise; *)
     ; _scaling_factor : 'a
     }
@@ -182,7 +176,7 @@ module GRU = struct
     let _, y_list =
       List.fold u_list ~init:(x0, []) ~f:(fun (x, accu) u ->
         let new_x = rollout_one_step ~x ~u theta in
-        let new_y = Maths.(tmp_einsum new_x theta._c + theta._b) in
+        let new_y = Maths.(einsum [ new_x, "ma"; theta._c, "ab" ] "mb" + theta._b) in
         Stdlib.Gc.major ();
         new_x, new_y :: accu)
     in
@@ -210,8 +204,18 @@ module GRU = struct
     let o_list = data in
     let c_trans = Maths.transpose theta._c ~dims:[ 1; 0 ] in
     let _obs_var_inv = Maths.(exp (neg theta._log_obs_var) * ones_o) in
-    let _Cxx = Maths.(einsum [ theta._c, "ab"; _obs_var_inv, "b"; c_trans, "bc" ] "ac") in
-    let _Cxx_batched = Maths.broadcast_to _Cxx ~size:[ batch_size; n; n ] in
+    let _Cxx_batched =
+      let _Cxx =
+        Maths.(einsum [ theta._c, "ab"; _obs_var_inv, "b"; c_trans, "bc" ] "ac")
+      in
+      Maths.broadcast_to _Cxx ~size:[ batch_size; n; n ]
+    in
+    let _Cuu_batched =
+      let _Cuu =
+        Maths.(diag_embed (exp theta._log_prior_var) ~offset:0 ~dim1:(-2) ~dim2:(-1))
+      in
+      Maths.broadcast_to _Cuu ~size:[ batch_size; m; m ]
+    in
     let _cx_common =
       Maths.(einsum [ theta._b, "ab"; _obs_var_inv, "b"; c_trans, "bc" ] "ac")
     in
@@ -477,6 +481,10 @@ module GRU = struct
       |> to_param
     in
     let _b = Tensor.zeros ~device:base.device [ 1; o ] |> to_param in
+    let _log_prior_var =
+      Tensor.(log (f Float.(square 1.) * ones ~device:base.device ~kind:base.kind [ m ]))
+      |> to_param
+    in
     let _log_obs_var =
       Tensor.(log (f Float.(square 1.) * ones ~device:base.device ~kind:base.kind [ 1 ]))
       |> to_param
@@ -484,7 +492,7 @@ module GRU = struct
     let _scaling_factor =
       Prms.Single.bounded ~above:(Maths.f 0.1) (Maths.ones [ 1 ] ~device:base.device)
     in
-    { _W; _A; _D; _B; _c; _b; _log_obs_var; _scaling_factor }
+    { _W; _A; _D; _B; _c; _b; _log_prior_var; _log_obs_var; _scaling_factor }
 
   let simulate ~theta ~data =
     (* infer the optimal u *)

@@ -193,7 +193,8 @@ module Ops = struct
       let dx_unsqueezed =
         match ones_unsqueezed with
         | Some ones_unsqueezed ->
-          Tensor.view dx ~size:((k :: ones_unsqueezed) @ Tensor.shape x)
+          
+          Tensor.reshape dx ~shape:((k :: ones_unsqueezed) @ Tensor.shape x)
         | None -> dx
       in
       let size = k :: size in
