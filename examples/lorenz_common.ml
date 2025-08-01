@@ -1,4 +1,5 @@
 open Base
+open Sofo
 open Domainslib
 module Mat = Owl.Dense.Matrix.S
 module Arr = Owl.Dense.Ndarray.S

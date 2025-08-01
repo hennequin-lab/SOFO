@@ -7,6 +7,7 @@
   delayed_addition
   lorenz
   lorenz_elbo_bottleneck
+  lorenz_elbo_bottleneck_kronecker
   bit_flipflop_force
   bit_flipflop_small_net
   kalman_rnn
