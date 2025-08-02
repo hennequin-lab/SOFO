@@ -81,6 +81,7 @@ val make_unary : unary_info -> 'a some t -> 'a t
 val make_binary : binary_info -> _ some t -> _ some t -> any t
 val view : size:int list -> 'a some t -> 'a t
 val broadcast_to : size:int list -> 'a some t -> 'a t
+val contiguous : 'a some t -> 'a t
 val reshape : shape:int list -> 'a some t -> 'a t
 val permute : dims:int list -> 'a some t -> 'a t
 val squeeze : dim:int -> 'a some t -> 'a t
@@ -163,6 +164,7 @@ module C : sig
   val make_binary : binary_info -> const t -> const t -> const t
   val view : size:int list -> const t -> const t
   val broadcast_to : size:int list -> const t -> const t
+  val contiguous : const t -> const t
   val shape : const t -> int list
   val reshape : shape:int list -> const t -> const t
   val permute : dims:int list -> const t -> const t

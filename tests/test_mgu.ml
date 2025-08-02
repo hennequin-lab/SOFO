@@ -75,7 +75,8 @@ let _Fx ~x ~u theta =
     let tmp3 = Tensor.diag_embed f_t ~offset:0 ~dim1:(-2) ~dim2:(-1) in
     let tmp4 = Tensor.(tmp2 + tmp3) in
     let tmp5 = Tensor.einsum ~equation:"mab,mbc->mac" [ tmp4; tmp1 ] ~path:None in
-    Tensor.(f_t * tmp5)
+    print [%message (Tensor.shape tmp5 : int list) (Tensor.shape f_t : int list)];
+    Tensor.( (unsqueeze ~dim:1 f_t) * tmp5)
   in
   Tensor.(term1 + term2 + term3)
 
@@ -89,7 +90,7 @@ let theta_eg =
   let _U_h = sample_ten ~shape:[ n; n ] in
   { _U_f; _U_h; _b_f; _b_h; _W }
 
-let x = Tensor.ones [ 1; n ]
+let x = Tensor.ones [1; n ]
 let u = Tensor.ones [ 1; m ]
 
 (* test partial f/partial u or partial f/partial x on the idx-th element of u/x *)

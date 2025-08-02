@@ -193,13 +193,17 @@ module Ops = struct
       let dx_unsqueezed =
         match ones_unsqueezed with
         | Some ones_unsqueezed ->
-          
           Tensor.reshape dx ~shape:((k :: ones_unsqueezed) @ Tensor.shape x)
         | None -> dx
       in
       let size = k :: size in
       Tensor.broadcast_to ~size dx_unsqueezed
     in
+    { f; df }
+
+  let contiguous =
+    let f = Tensor.contiguous in
+    let df ~f:_ ~x:_ ~dx = Tensor.contiguous dx in
     { f; df }
 
   (* reshape the size of x to size, and of each batch in dx to size. *)
@@ -973,6 +977,7 @@ let make_binary (z : binary_info) =
 
 let view ~size = make_unary (Ops.view ~size)
 let broadcast_to ~size = make_unary (Ops.broadcast_to ~size)
+let contiguous x = make_unary Ops.contiguous x
 let reshape ~shape = make_unary (Ops.reshape ~shape)
 let permute ~dims = make_unary (Ops.permute ~dims)
 let squeeze ~dim = make_unary (Ops.squeeze ~dim)
@@ -1203,6 +1208,7 @@ module C = struct
 
   let view ~size = make_unary (Ops.view ~size)
   let broadcast_to ~size = make_unary (Ops.broadcast_to ~size)
+  let contiguous = make_unary Ops.contiguous
   let shape x = shape x
   let reshape ~shape = make_unary (Ops.reshape ~shape)
   let permute ~dims = make_unary (Ops.permute ~dims)
