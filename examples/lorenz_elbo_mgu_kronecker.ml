@@ -412,13 +412,16 @@ module MGU = struct
 
   let lik_term ~y_pred ~data (theta : _ Maths.some P.t) =
     let open Maths in
-    let inv_sigma_o_expanded = sqrt_precision_of_log_var theta._log_obs_var in
     List.fold2_exn
       data
       y_pred
       ~init:(any (f 0.))
       ~f:(fun accu o y_pred ->
-        accu + gaussian_llh ~mu:y_pred ~inv_chol:inv_sigma_o_expanded (any (of_tensor o)))
+        accu
+        + gaussian_llh
+            ~mu:y_pred
+            ~inv_chol:(sqrt_precision_of_log_var theta._log_obs_var)
+            (any (of_tensor o)))
 
   (* M1: use kroneckered posterior *)
   let neg_elbo ~data (theta : _ Maths.some P.t) =
@@ -431,7 +434,7 @@ module MGU = struct
     let _Quu_0_inv_chol =
       let _Quu_0_chol_inv = inv_sqr _Quu_0_chol in
       cholesky (einsum [ _Quu_0_chol_inv, "mba"; _Quu_0_chol_inv, "mbc" ] "mac")
-    in 
+    in
     let optimal_u_0 = List.hd_exn optimal_u_list
     and optimal_u_rest_list = List.tl_exn optimal_u_list in
     let u_0_sampled =
@@ -607,7 +610,9 @@ module MGU = struct
     let sigma2_t = tangent (exp theta._log_obs_var) |> Option.value_exn in
     List.fold y_pred ~init:(f 0.) ~f:(fun accu y_pred ->
       let mu_t = tangent y_pred |> Option.value_exn |> const in
-      let ggn_part1 = C.(einsum [ mu_t, "kmo"; mu_t, "lmo" ] "kl" * obs_precision_p) in
+      let ggn_part1 =
+        C.(einsum [ mu_t, "kmo"; obs_precision_p, "o"; mu_t, "lmo" ] "kl")
+      in
       let ggn_part2 =
         C.(
           einsum
@@ -751,8 +756,8 @@ end
 let config ~t =
   Optimizer.Config.SOFO.
     { base
-    ; learning_rate = Some Float.(5. / (1. + sqrt (of_int t / 1.)))
-    ; n_tangents = 128
+    ; learning_rate = Some Float.(1. / (1. + sqrt (of_int t / 100.)))
+    ; n_tangents = 64
     ; damping = `relative_from_top 1e-5
     }
 
@@ -773,16 +778,18 @@ let rec loop ~t ~out ~state running_avg =
     then (
       let theta = MGU.P.value (O.params new_state) in
       (* simulate trajectory *)
-      let u_list, y_list, o_list =
+      let u_0, u_list, y_list, o_list =
         MGU.simulate ~theta:(MGU.P.map theta ~f:Maths.any) ~data
       in
       let y_list_auto = MGU.simulate_auto ~theta:(MGU.P.map theta ~f:Maths.any) in
-      let u_list_t = List.map u_list ~f:Maths.to_tensor
+      let u_0 = Maths.to_tensor u_0
+      and u_list_t = List.map u_list ~f:Maths.to_tensor
       and y_list_t = List.map y_list ~f:Maths.to_tensor
       and o_list_t = List.map o_list ~f:Maths.to_tensor
       and y_list_auto_t = List.map y_list_auto ~f:Maths.to_tensor in
       Arr.(save_npy ~out:(in_dir "o") (t_list_to_mat data));
       Arr.(save_npy ~out:(in_dir "y") (t_list_to_mat data_unnoised));
+      Arr.(save_npy ~out:(in_dir "u0_inferred") (t_list_to_mat [ u_0 ]));
       Arr.(save_npy ~out:(in_dir "u_inferred") (t_list_to_mat u_list_t));
       Arr.(save_npy ~out:(in_dir "y_inferred") (t_list_to_mat y_list_t));
       Arr.(save_npy ~out:(in_dir "y_auto") (t_list_to_mat y_list_auto_t));

@@ -61,8 +61,8 @@ let forward
     else (
       let x0 = p.x0 in
       let u0 = maybe_scalar_mul (List.hd_exn bck)._k alpha +? (List.hd_exn tau_opt).u in
-      (* in tau_opt x goes from 1 to T but u goes from 0 to T-1. bck goes from 0 to T-1. *)
-      (* in tau_opt_trunc and bck_trunc x,u and bck_trunc goes from 1 to T-1 *)
+      (* In tau_opt x goes from 1 to T but u goes from 0 to T-1. bck goes from 0 to T-1.
+        In tau_opt_trunc and bck_trunc x, u and bck_trunc goes from 1 to T-1 *)
       let tau_opt_trunc =
         let x_opt = List.map tau_opt ~f:(fun tau -> tau.x) in
         let u_opt = List.map tau_opt ~f:(fun tau -> tau.u) in
@@ -115,7 +115,7 @@ let forward
         | Some _dC1, Some _dC2 ->
           (* TODO: how to regularize Quu in batch *)
           (* let _dV = Maths.((f alpha * _dC1) + (f Float.(0.5 * alpha * alpha) * _dC2)) in *)
-          let _dV = Maths.((f alpha * _dC2) + (f Float.(0.5 * alpha * alpha) * _dC1)) in
+          let _dV = Maths.((f alpha * _dC1) + (f Float.(0.5 * alpha * alpha) * _dC2)) in
           let _dV_f =
             _dV |> Maths.mean ~keepdim:false |> Maths.const |> Maths.to_float_exn
           in
