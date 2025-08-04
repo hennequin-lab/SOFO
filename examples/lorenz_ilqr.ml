@@ -20,7 +20,7 @@ let conv_threshold = 1e-5
    -- Generate Lorenz data            ------
    ----------------------------------------- *)
 
-let bs = 1
+let bs = 2
 let tmax = 1000
 let dt = 0.01
 let n, m = 3, 3
@@ -40,9 +40,9 @@ let lorenz_step ?(u = Mat.zeros 1 3) ~dt x =
 
 (* [lorenz_flow] has shape [tmax x bs x 3] *)
 let gen_lorenz ~dt x0 u_array =
-  (* let x0_array = Mat.to_rows x0 in *)
+  let x0_array = Mat.to_rows x0 in
   (* TODO: this is only when bs=1 *)
-  let x0_array = [| Arr.reshape x0 [| bs; 3 |] |] in
+  (* let x0_array = [| Arr.reshape x0 [| bs; 3 |] |] in *)
   let lorenz_flow =
     Array.map2_exn x0_array u_array ~f:(fun x0 u ->
       (* x0 has shape [1 x 3], u of shape [tmax x 3] *)
@@ -196,7 +196,7 @@ let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
       ~f:(fun accu u ->
         Maths.(accu + einsum [ u, "ma"; _Cuu_batched, "mab"; u, "mb" ] "m"))
   in
-  Maths.(x_cost + u_cost) |> Maths.to_tensor |> Tensor.mean |> Tensor.to_float0_exn
+  Maths.(x_cost + u_cost) |> Maths.to_tensor
 
 let ilqr ~observation =
   let f_theta ~i:_ = rollout_one_step in
@@ -245,7 +245,8 @@ let ilqr ~observation =
   let sol, _ =
     Ilqr._isolve
       ~linesearch:true
-      ~ex_reduction:true
+      ~linesearch_bs_avg:false
+      ~expected_reduction:true
       ~batch_const:false
       ~f_theta
       ~gamma:0.5

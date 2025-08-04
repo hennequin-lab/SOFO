@@ -1,5 +1,6 @@
 open Base
 open Forward_torch
+open Torch
 open Lqr
 open Maths
 
@@ -20,10 +21,10 @@ let ( -? ) a b =
   | None, Some b -> Some b
   | Some a, Some b -> Some (a - b)
 
-let maybe_scalar_mul a s =
-  match a with
-  | None -> None
-  | Some a -> Some Maths.(s $* a)
+let maybe_mul a b =
+  match a, b with
+  | Some a, Some b -> Some Maths.(a * b)
+  | _ -> None
 
 let maybe_einsum (a, opsA) (b, opsB) opsC =
   match a, b with
@@ -38,13 +39,15 @@ let _u ~tangent ~batch_const ~_k ~_K ~x ~u ~alpha =
     | false, true -> maybe_einsum (x, "ma") (_K, "ba") "mb"
     | false, false -> maybe_einsum (x, "ma") (_K, "mba") "mb"
   in
-  maybe_scalar_mul _k alpha +? tmp +? u
+  (* maybe_scalar_mul _k alpha +? tmp +? u *)
+  (maybe_einsum (_k, "ma")) (Some Maths.(any (of_tensor alpha)), "m") "ma" +? tmp +? u
 
 (* calculate the new u w.r.t. the difference between x_t and x_opt_t *)
 let forward
       ?(beta = 0.1)
       ~batch_const
       ~linesearch
+      ~linesearch_bs_avg
       ~gamma
       ~cost_func
       ~f_theta
@@ -60,7 +63,16 @@ let forward
     then tau_prev
     else (
       let x0 = p.x0 in
-      let u0 = maybe_scalar_mul (List.hd_exn bck)._k alpha +? (List.hd_exn tau_opt).u in
+      let alpha_c = Maths.of_tensor alpha |> Maths.any in
+      (* let u0 = maybe_scalar_mul (List.hd_exn bck)._k alpha +? (List.hd_exn tau_opt).u in *)
+      let u0 =
+        let tmp =
+          if linesearch_bs_avg
+          then maybe_mul (List.hd_exn bck)._k (Some alpha_c)
+          else (maybe_einsum ((List.hd_exn bck)._k, "ma")) (Some alpha_c, "m") "ma"
+        in
+        tmp +? (List.hd_exn tau_opt).u
+      in
       (* In tau_opt x goes from 1 to T but u goes from 0 to T-1. bck goes from 0 to T-1.
         In tau_opt_trunc and bck_trunc x, u and bck_trunc goes from 1 to T-1 *)
       let tau_opt_trunc =
@@ -109,31 +121,56 @@ let forward
       let cost_curr = cost_func tau_curr in
       cleanup ();
       let lower_than_init =
-        let cost_change = Float.(cost_curr - cost_init) in
-        match _dC1, _dC2 with
-        | None, None -> Float.(cost_change <= 0.)
-        | Some _dC1, Some _dC2 ->
-          (* TODO: how to regularize Quu in batch *)
-          (* let _dV = Maths.((f alpha * _dC1) + (f Float.(0.5 * alpha * alpha) * _dC2)) in *)
-          let _dV = Maths.((f alpha * _dC1) + (f Float.(0.5 * alpha * alpha) * _dC2)) in
-          let _dV_f =
-            _dV |> Maths.mean ~keepdim:false |> Maths.const |> Maths.to_float_exn
-          in
-          (* print [%message (cost_change : float) (_dV_f : float)]; *)
-          Float.(cost_change <= neg beta * _dV_f)
-        | _ -> failwith "only dC1/dC2 defined (but not both)"
+        let cost_change = Tensor.(cost_curr - cost_init) in
+        let lower_than_init_bool =
+          match _dC1, _dC2 with
+          | None, None -> Tensor.(lt cost_change (Scalar.f 0.))
+          | Some _dC1, Some _dC2 ->
+            (* TODO: how to regularize Quu in batch *)
+            let _dV_f =
+              let _dV = Maths.(alpha_c * _dC1) + (f 0.5 * alpha_c * alpha_c * _dC2) in
+              if linesearch_bs_avg
+              then _dV |> Maths.mean ~keepdim:false |> Maths.to_tensor
+              else _dV |> Maths.to_tensor
+            in
+            if linesearch_bs_avg
+            then (
+              let criterion =
+                Float.(
+                  Tensor.(to_float0_exn (mean cost_change))
+                  <= neg beta * Tensor.to_float0_exn _dV_f)
+              in
+              Tensor.(f (if criterion then 1. else 0.) * ones_like cost_curr))
+            else Tensor.(le_tensor cost_change (neg (f beta * _dV_f)))
+          | _ -> failwith "only dC1/dC2 defined (but not both)"
+        in
+        Tensor.to_kind lower_than_init_bool ~kind:(Tensor.kind cost_curr)
       in
-      if Float.(alpha < 1e-10) then failwith "linesearch did not converge";
-      let stop = (not linesearch) || lower_than_init in
-      fwd_loop ~stop ~i:Int.(i + 1) ~alpha:(alpha *. gamma) ~tau_prev:tau_curr)
+      (* check if any alpha value is smaller than 1e-10. *)
+      let alpha_not_converged =
+        let bool_tensor = Tensor.lt alpha (Scalar.f 1e-10) in
+        let any_less_than_one = Tensor.any bool_tensor in
+        Tensor.to_int0_exn any_less_than_one
+      in
+      if Int.(alpha_not_converged = 1) then failwith "linesearch did not converge";
+      let all_trials_converged =
+        if Float.(Tensor.(to_float0_exn (mean lower_than_init)) = 1.) then true else false
+      in
+      let stop = (not linesearch) || all_trials_converged in
+      let new_alpha =
+        let _scale = Tensor.(lower_than_init + (f gamma * (f 1. - lower_than_init))) in
+        Tensor.(_scale * alpha)
+      in
+      fwd_loop ~stop ~i:Int.(i + 1) ~alpha:new_alpha ~tau_prev:tau_curr)
   in
   (* start with alpha set to 1 *)
-  let alpha = 1. in
+  let alpha = Tensor.ones_like cost_init in
   fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt
 
 let ilqr_loop
       ~linesearch
-      ~ex_reduction
+      ~linesearch_bs_avg
+      ~expected_reduction
       ~batch_const
       ~gamma
       ~conv_threshold
@@ -151,12 +188,13 @@ let ilqr_loop
     in
     cleanup ();
     let bck, _dC1, _dC2 =
-      backward ~ilqr_ex_reduction:ex_reduction ~batch_const common_info p_curr
+      backward ~ilqr_expected_reduction:expected_reduction ~batch_const common_info p_curr
     in
     let tau_curr =
       forward
         ~batch_const
         ~linesearch
+        ~linesearch_bs_avg
         ~gamma
         ~cost_func
         ~f_theta
@@ -166,7 +204,7 @@ let ilqr_loop
         ~_dC2
         bck
     in
-    let cost_curr = cost_func tau_curr in
+    let cost_curr = cost_func tau_curr |> Tensor.mean |> Tensor.to_float0_exn in
     let pct_change = Float.(abs (cost_curr - cost_prev) / cost_prev) in
     let stop = Float.(pct_change < conv_threshold) || i = max_iter in
     cleanup ();
@@ -181,7 +219,8 @@ let ilqr_loop
 (* when batch_const is true, _Fx_prods, _Fu_prods, _Cxx, _Cxu, _Cuu has no leading batch dimension and special care needs to be taken to deal with these *)
 let _isolve
       ?(linesearch = true)
-      ?(ex_reduction = false)
+      ?(linesearch_bs_avg = true)
+      ?(expected_reduction = false)
       ?(batch_const = false)
       ~gamma
       ~f_theta
@@ -191,15 +230,16 @@ let _isolve
       ~tau_init
       max_iter
   =
-  (* [ex_reduction] only true iff using linesearch. *)
-  if not linesearch then assert (not ex_reduction);
+  (* [expected_reduction] only true iff using linesearch. *)
+  if not linesearch then assert (not expected_reduction);
   (* step 1: init params and cost *)
-  let cost_init = cost_func tau_init in
+  let cost_init = cost_func tau_init |> Tensor.mean |> Tensor.to_float0_exn in
   (*step 2: loop to find the best controls and states *)
   let tau_final, _, info_final =
     ilqr_loop
       ~linesearch
-      ~ex_reduction
+      ~linesearch_bs_avg
+      ~expected_reduction
       ~batch_const
       ~gamma
       ~conv_threshold

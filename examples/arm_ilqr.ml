@@ -9,8 +9,8 @@ open Sofo
 
 let in_dir = Cmdargs.in_dir "-d"
 let base = Optimizer.Config.Base.default
-let bs = 1
-let tmax = 1000
+let bs = 2
+let tmax = 5000
 let n = 4
 let m = 2
 let dt = 0.001
@@ -506,7 +506,7 @@ let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
       ~f:(fun accu u ->
         Maths.(accu + einsum [ u, "ma"; _Cuu_batched, "mab"; u, "mb" ] "m"))
   in
-  Maths.(x_cost + u_cost) |> Maths.to_tensor |> Tensor.mean |> Tensor.to_float0_exn
+  Maths.(x_cost + u_cost) |> Maths.to_tensor
 
 let ilqr ~targets_batched =
   let f_theta ~i:_ = rollout_one_step in
@@ -556,7 +556,8 @@ let ilqr ~targets_batched =
   let sol, _ =
     Ilqr._isolve
       ~linesearch:true
-      ~ex_reduction:true
+      ~linesearch_bs_avg:false
+      ~expected_reduction:true
       ~batch_const:false
       ~f_theta
       ~gamma:0.5

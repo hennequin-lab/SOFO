@@ -206,24 +206,22 @@ module MGU = struct
       final
     | _ -> any (zeros ~device:base.device ~kind:base.kind [ batch_size; n; n ])
 
-  let rollout_y ~u_list (theta : _ Maths.some P.t) =
-    let _, y_list =
-      List.foldi u_list ~init:(x0, []) ~f:(fun i (x, accu) u ->
-        let new_x = rollout_one_step ~i ~x ~u theta in
-        let new_y = Maths.(einsum [ new_x, "ma"; theta._c, "ab" ] "mb" + theta._b) in
-        Stdlib.Gc.major ();
-        new_x, new_y :: accu)
-    in
-    List.rev y_list
-
-  let rollout_sol ~u_list (theta : _ Maths.some P.t) =
+  let rollout_x ~u_list (theta : _ Maths.some P.t) =
     let _, x_list =
       List.foldi u_list ~init:(x0, []) ~f:(fun i (x, accu) u ->
         let new_x = rollout_one_step ~i ~x ~u theta in
-        Stdlib.Gc.major ();
-        new_x, Lqr.Solution.{ u = Some u; x = Some new_x } :: accu)
+        new_x, new_x :: accu)
     in
     List.rev x_list
+
+  let rollout_y ~u_list (theta : _ Maths.some P.t) =
+    let x_list = rollout_x ~u_list theta in
+    List.map x_list ~f:(fun x ->
+      Maths.(einsum [ x, "ma"; theta._c, "ab" ] "mb" + theta._b))
+
+  let rollout_sol ~u_list (theta : _ Maths.some P.t) =
+    let x_list = rollout_x ~u_list theta in
+    List.map2_exn u_list x_list ~f:(fun u x -> Lqr.Solution.{ u = Some u; x = Some x })
 
   (* artificially add one to tau so it goes from 0 to T *)
   let extend_tau_list (tau : Maths.any Maths.t option Lqr.Solution.p list) =
@@ -348,7 +346,7 @@ module MGU = struct
                 ]
                 "m")
       in
-      x_cost + u_cost |> to_tensor |> Tensor.mean |> Tensor.to_float0_exn
+      x_cost + u_cost |> to_tensor
     in
     let u_init =
       List.init tmax ~f:(fun i ->
@@ -365,7 +363,8 @@ module MGU = struct
     let sol, backward_info =
       Ilqr._isolve
         ~linesearch:true
-        ~ex_reduction:true
+        ~linesearch_bs_avg:true
+        ~expected_reduction:true
         ~batch_const:false
         ~gamma:0.5
         ~f_theta
@@ -391,7 +390,7 @@ module MGU = struct
 
   let kronecker_sample ~optimal_u_list (theta : _ Maths.some P.t) =
     let open Maths in
-    (* sample u_{1}:u_{T-1} from the kronecker formation *)
+    (* sample u_{1}to u_{T-1} from the kronecker formation *)
     let u_list =
       let optimal_u = concat_time optimal_u_list in
       let xi =
@@ -456,9 +455,8 @@ module MGU = struct
             gaussian_llh
               ~inv_chol:
                 (any
-                   (f 1.
-                    / std_of_log_var
-                        (if t = 0 then theta._log_prior_var_0 else theta._log_prior_var)))
+                   (sqrt_precision_of_log_var
+                      (if t = 0 then theta._log_prior_var_0 else theta._log_prior_var)))
               u
           in
           match accu with
@@ -474,7 +472,7 @@ module MGU = struct
           ~inv_chol:_Quu_0_chol
           u_0_sampled
       in
-      let neg_entropy =
+      let neg_entropy_u_rest =
         let u = concat_time u_sampled_rest |> reshape ~shape:[ batch_size; -1 ] in
         let optimal_u = reshape optimal_u_rest_concated ~shape:[ batch_size; -1 ] in
         let inv_chol =
@@ -484,7 +482,7 @@ module MGU = struct
         in
         gaussian_llh ~diagonal_inv_chol:false ~mu:optimal_u ~inv_chol u
       in
-      neg_entropy_u_0 + neg_entropy - prior
+      neg_entropy_u_0 + neg_entropy_u_rest - prior
     in
     mean ~dim:[ 0 ] (neg (lik_term - kl) / f Float.(of_int tmax * of_int o)), y_pred
 
@@ -699,14 +697,9 @@ module MGU = struct
     (* infer the optimal u *)
     let optimal_u_list, _ = pred_u ~data theta in
     (* rollout x and y *)
-    let _, y_list_rev =
-      List.foldi optimal_u_list ~init:(x0, []) ~f:(fun i (x, y_list) u ->
-        let x = rollout_one_step ~i ~x ~u theta in
-        let y = Maths.((x *@ theta._c) + theta._b) in
-        x, y :: y_list)
-    in
-    let o_list_rev =
-      List.map y_list_rev ~f:(fun y ->
+    let y_list = rollout_y ~u_list:optimal_u_list theta in
+    let o_list =
+      List.map y_list ~f:(fun y ->
         Maths.(
           y
           + einsum
@@ -716,17 +709,14 @@ module MGU = struct
               ]
               "ma"))
     in
-    ( List.hd_exn optimal_u_list
-    , List.tl_exn optimal_u_list
-    , List.rev y_list_rev
-    , List.rev o_list_rev )
+    List.hd_exn optimal_u_list, List.tl_exn optimal_u_list, y_list, o_list
 
   (* simulate the autonomous dynamics of Lorenz given initial condition. *)
   let simulate_auto ~theta =
     let init_cond =
       Maths.randn ~device:base.device ~kind:base.kind [ 1; n ] |> Maths.any
     in
-    (* rollout y *)
+    (* rollout y with init_cond *)
     let _, y_list_rev =
       List.fold
         (List.init tmax_simulate ~f:(fun i -> i))
@@ -874,15 +864,15 @@ let rec loop ~t ~out ~state running_avg =
   if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state (loss :: running_avg)
 
 (* Start the loop. *)
-let _ =
+(* let _ =
   let out = in_dir "loss" in
   Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out ~state:(O.init MGU.init) []
+  loop ~t:0 ~out ~state:(O.init MGU.init) [] *)
 
-(* let _ =
+let _ =
   let theta = O.P.C.load ~device:base.device (in_dir "adam_params") in
   Sofo.print [%message ("params loaded")];
   (* simulate trajectory *)
   let y_list_auto = MGU.simulate_auto ~theta:(MGU.P.map theta ~f:Maths.any) in
   let y_list_auto_t = List.map y_list_auto ~f:Maths.to_tensor in
-  Arr.(save_npy ~out:(in_dir "y_auto") (t_list_to_mat y_list_auto_t))    *)
+  Arr.(save_npy ~out:(in_dir "y_auto") (t_list_to_mat y_list_auto_t))   

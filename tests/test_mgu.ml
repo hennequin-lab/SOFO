@@ -1,7 +1,6 @@
 (* test whether the gradient of MGU agrees with results obtained from finite differences *)
 open Base
 open Torch
-open Forward_torch
 module Arr = Owl.Arr
 module Mat = Owl.Mat
 module Linalg = Owl.Linalg.D
