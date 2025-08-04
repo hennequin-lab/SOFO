@@ -29,7 +29,7 @@ let o = 3
 let batch_size = 64
 
 (* tmax needs to be divisible by 8 *)
-let tmax = 80
+let tmax = 112
 let tmax_simulate = 10000
 let train_data = Lorenz_common.data tmax
 let train_data_batch = get_batch train_data
@@ -425,14 +425,18 @@ module MGU = struct
     let open Maths in
     (* obtain u from lqr *)
     let optimal_u_list, bck_info = pred_u ~data theta in
-    let _Quu_chol_0 =
+    let _Quu_0_chol =
       (List.hd_exn (Option.value_exn bck_info))._Quu_chol |> Option.value_exn
     in
+    let _Quu_0_inv_chol =
+      let _Quu_0_chol_inv = inv_sqr _Quu_0_chol in
+      cholesky (einsum [ _Quu_0_chol_inv, "mba"; _Quu_0_chol_inv, "mbc" ] "mac")
+    in 
     let optimal_u_0 = List.hd_exn optimal_u_list
     and optimal_u_rest_list = List.tl_exn optimal_u_list in
     let u_0_sampled =
       let xi = randn ~device:base.device ~kind:base.kind [ batch_size; n ] |> any in
-      optimal_u_0 + einsum [ xi, "ma"; _Quu_chol_0, "mab" ] "mb"
+      optimal_u_0 + einsum [ xi, "ma"; _Quu_0_inv_chol, "mab" ] "mb"
     in
     let u_sampled_rest = kronecker_sample ~optimal_u_list:optimal_u_rest_list theta in
     let u_sampled_total = u_0_sampled :: u_sampled_rest in
@@ -440,7 +444,7 @@ module MGU = struct
     let y_pred = rollout_y ~u_list:u_sampled_total theta in
     let lik_term = lik_term ~y_pred ~data theta in
     (* calculate the kl term using samples *)
-    let optimal_u = concat_time optimal_u_rest_list in
+    let optimal_u_rest_concated = concat_time optimal_u_rest_list in
     let kl =
       let prior =
         List.foldi u_sampled_total ~init:None ~f:(fun t accu u ->
@@ -449,8 +453,9 @@ module MGU = struct
             gaussian_llh
               ~inv_chol:
                 (any
-                   (std_of_log_var
-                      (if t = 0 then theta._log_prior_var_0 else theta._log_prior_var)))
+                   (f 1.
+                    / std_of_log_var
+                        (if t = 0 then theta._log_prior_var_0 else theta._log_prior_var)))
               u
           in
           match accu with
@@ -459,20 +464,16 @@ module MGU = struct
         |> Option.value_exn
       in
       let neg_entropy_u_0 =
-        let _Quu_chol_0_inv = inv_sqr _Quu_chol_0 in
-        let _Quu_inv_chol =
-          cholesky (einsum [ _Quu_chol_0_inv, "mba"; _Quu_chol_0_inv, "mbc" ] "mac")
-        in
         gaussian_llh
           ~diagonal_inv_chol:false
           ~batched_inv_chol:true
           ~mu:optimal_u_0
-          ~inv_chol:_Quu_inv_chol
+          ~inv_chol:_Quu_0_chol
           u_0_sampled
       in
       let neg_entropy =
         let u = concat_time u_sampled_rest |> reshape ~shape:[ batch_size; -1 ] in
-        let optimal_u = reshape optimal_u ~shape:[ batch_size; -1 ] in
+        let optimal_u = reshape optimal_u_rest_concated ~shape:[ batch_size; -1 ] in
         let inv_chol =
           let _space_var_inv = inv_sqr (_space_cov theta) |> Maths.contiguous in
           let _time_var_inv = inv_sqr (_time_cov theta) |> Maths.contiguous in
@@ -802,7 +803,7 @@ let config ~t =
     ; beta_1 = 0.9
     ; beta_2 = 0.99
     ; eps = 1e-4
-    ; learning_rate = Some Float.(0.01 / (1. + sqrt (of_int t / 1.)))
+    ; learning_rate = Some Float.(0.01 / (1. + sqrt (of_int t / 100.)))
     ; weight_decay = None
     }
 
