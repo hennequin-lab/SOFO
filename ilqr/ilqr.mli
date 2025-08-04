@@ -1,8 +1,11 @@
 open Forward_torch
 open Lqr
 
+(* if [linesearch], backtrack alpha iteratively; if [ex_reduction], use dC 
+  in linesearch criterion. *)
 val _isolve
   :  ?linesearch:bool
+  -> ?ex_reduction:bool
   -> ?batch_const:bool
   -> gamma:float
   -> f_theta:(x:Maths.any Maths.t -> u:Maths.any Maths.t -> Maths.any Maths.t)

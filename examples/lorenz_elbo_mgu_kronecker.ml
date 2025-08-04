@@ -8,8 +8,8 @@ open Lds_data
 
 let _ =
   Random.init 1999;
-  Owl_stats_prng.init 1985;
-  Torch_core.Wrapper.manual_seed 1985
+  Owl_stats_prng.init (Random.int 100000);
+  Torch_core.Wrapper.manual_seed (Random.int 100000)
 
 let in_dir = Cmdargs.in_dir "-d"
 let _ = Bos.Cmd.(v "rm" % "-f" % in_dir "info") |> Bos.OS.Cmd.run
@@ -30,7 +30,7 @@ let batch_size = 64
 
 (* tmax needs to be divisible by 8 *)
 let tmax = 80
-let tmax_simulate = 10000
+let tmax_simulate = 100000
 let train_data = Lorenz_common.data tmax
 let train_data_batch = get_batch train_data
 let max_iter = 100000
@@ -554,12 +554,12 @@ module MGU = struct
     List.rev y_list_rev
 end
 
-module O = Optimizer.SOFO (MGU.P)
+(* module O = Optimizer.SOFO (MGU.P)
 
 let config ~t =
   Optimizer.Config.SOFO.
     { base
-    ; learning_rate = Some Float.(1. / (1. + sqrt (of_int t / 1.)))
+    ; learning_rate = Some Float.(5. / (1. + sqrt (of_int t / 1.)))
     ; n_tangents = 128
     ; damping = `relative_from_top 1e-5
     }
@@ -601,9 +601,9 @@ let rec loop ~t ~out ~state running_avg =
       Owl.Mat.(save_txt ~append:true ~out (of_array [| Float.of_int t; loss_avg |] 1 2)));
     []
   in
-  if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state (loss :: running_avg)
+  if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state (loss :: running_avg) *)
 
-(* module O = Optimizer.Adam (MGU.P)
+module O = Optimizer.Adam (MGU.P)
 
 let config ~t =
   Optimizer.Config.Adam.
@@ -670,7 +670,7 @@ let rec loop ~t ~out ~state running_avg =
       Owl.Mat.(save_txt ~append:true ~out (of_array [| Float.of_int t; loss_avg |] 1 2)));
     []
   in
-  if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state (loss :: running_avg) *)
+  if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state (loss :: running_avg)
 
 (* Start the loop. *)
 let _ =
@@ -679,9 +679,9 @@ let _ =
   loop ~t:0 ~out ~state:(O.init MGU.init) []
 
 (* let _ =
-  let theta = O.P.C.load ~device:base.device (in_dir "sofo_params") in
+  let theta = O.P.C.load ~device:base.device (in_dir "adam_params") in
   Sofo.print [%message ("params loaded")];
   (* simulate trajectory *)
   let y_list_auto = MGU.simulate_auto ~theta:(MGU.P.map theta ~f:Maths.any) in
   let y_list_auto_t = List.map y_list_auto ~f:Maths.to_tensor in
-  Arr.(save_npy ~out:(in_dir "y_auto_10000") (t_list_to_mat y_list_auto_t)) *)
+  Arr.(save_npy ~out:(in_dir "y_auto") (t_list_to_mat y_list_auto_t))    *)

@@ -8,8 +8,7 @@ module Arr = Dense.Ndarray.S
 module Mat = Dense.Matrix.S
 
 let _ =
-  Random.init 1985;
-  (* Random.self_init (); *)
+  Random.self_init ();
   Owl_stats_prng.init 1985;
   Torch_core.Wrapper.manual_seed 1985
 
@@ -77,7 +76,6 @@ let x0, data, data_no_input, u_array =
     Array.init bs ~f:(fun _ ->
       let t = Random.int Int.(2 + (tmax / 2)) in
       let input = Mat.gaussian ~sigma:Float.(10. / dt) 1 3 in
-      Tensor.print (Tensor.of_bigarray ~device:base.device input);
       Mat.concatenate ~axis:0 [| Mat.zeros (t - 1) 3; input; Mat.zeros (tmax - t) 3 |])
   in
   let gen_data_list us =
@@ -200,8 +198,6 @@ let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
   in
   Maths.(x_cost + u_cost) |> Maths.to_tensor |> Tensor.mean |> Tensor.to_float0_exn
 
-
-
 let ilqr ~observation =
   let f_theta = rollout_one_step in
   let params_func (tau : Maths.any Maths.t option Lqr.Solution.p list)
@@ -249,6 +245,7 @@ let ilqr ~observation =
   let sol, _ =
     Ilqr._isolve
       ~linesearch:true
+      ~ex_reduction:true
       ~batch_const:false
       ~f_theta
       ~gamma:0.5
@@ -263,6 +260,7 @@ let ilqr ~observation =
 (* -----------------------------------------
    -- iLQR pass        ------
    ----------------------------------------- *)
+
 let _ =
   let sol = ilqr ~observation:data in
   let sol_list_concat a =

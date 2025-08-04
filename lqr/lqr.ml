@@ -216,7 +216,7 @@ let v ~tangent ~batch_const ~_K ~_qx ~_qu =
    computed *)
 let backward
       ?(tangent = false)
-      ~ilqr_linesearch
+      ~ilqr_ex_reduction
       ~batch_const
       common_info
       (params : (any t option, (any t, any t -> any t) momentary_params list) Params.p)
@@ -257,9 +257,11 @@ let backward
         (* update the value function *)
         let _v = v ~tangent ~batch_const ~_K:z._K ~_qx ~_qu in
         let _dC1, _dC2 =
-          if ilqr_linesearch
+          if ilqr_ex_reduction
           then (
-            let _dC1 =
+          let _dC1 = maybe_einsum (_k, "mb") (_qu, "mb") "m" in
+
+            let _dC2 =
               let tmp =
                 maybe_einsum
                   (_k, "mb")
@@ -268,7 +270,6 @@ let backward
               in
               maybe_einsum (tmp, "ma") (tmp, "ma") "m"
             in
-            let _dC2 = maybe_einsum (_k, "mb") (_qu, "mb") "m" in
             _dC1, _dC2)
           else None, None
         in
@@ -322,12 +323,12 @@ let forward ?(tangent = false) ~batch_const params (backward_info : backward_inf
 
 (* when batch_const is true, _Fx_prods, _Fu_prods, _Cxx, _Cxu, _Cuu has no leading batch dimension and special care needs to be taken to deal with these *)
 (* given parameters, run backward and forward passes in LQR to compute optimal u and x *)
-let _solve ?(ilqr_linesearch = false) ?(batch_const = false) p =
+let _solve ?(ilqr_ex_reduction = false) ?(batch_const = false) p =
   let common_info =
     backward_common ~batch_const (List.map p.Params.params ~f:(fun x -> x.common))
   in
   cleanup ();
-  let bck, _, _ = backward ~ilqr_linesearch ~batch_const common_info p in
+  let bck, _, _ = backward ~ilqr_ex_reduction ~batch_const common_info p in
   cleanup ();
   let sol =
     bck
@@ -497,7 +498,7 @@ let tangent_solve
 
 (* implicitly differentiate through LQR by solving the primal problem before solving the tangent
   problem; return optimal u and x *)
-let solve ?(ilqr_linesearch = false) ?(batch_const = false) p =
+let solve ?(ilqr_ex_reduction = false) ?(batch_const = false) p =
   (* solve the primal problem first *)
   let _p = Option.map ~f:(fun x -> any (of_tensor (to_tensor x))) in
   let _p_implicit = Option.map ~f:(fun x -> x.primal) in
@@ -531,7 +532,7 @@ let solve ?(ilqr_linesearch = false) ?(batch_const = false) p =
   cleanup ();
   (* SOLVE THE PRIMAL PROBLEM *)
   let s =
-    let bck, _, _ = backward common_info ~ilqr_linesearch ~batch_const p_primal in
+    let bck, _, _ = backward common_info ~ilqr_ex_reduction ~batch_const p_primal in
     cleanup ();
     bck |> forward ~batch_const p_primal
   in

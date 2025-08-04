@@ -10,10 +10,10 @@ val backward_common
   -> backward_common_info list
 
 (* given backward_common_info and momentary_params, calculate backward_info and dC1 and dC2
-  optionally for ilqr linesearch. *)
+  optionally for ilqr linesearch reduction. *)
 val backward
   :  ?tangent:bool
-  -> ilqr_linesearch:bool
+  -> ilqr_ex_reduction:bool
   -> batch_const:bool
   -> backward_common_info list
   -> ( Maths.any Maths.t option
@@ -23,9 +23,9 @@ val backward
   -> backward_info list * Maths.any Maths.t option * Maths.any Maths.t option
 
 (* given momentary_params, run LQR and return solutions and backward_info; naively differentiate.
-    if ilqr_linesearch, return C1 and C2 in backward pass.  *)
+    if ilqr_ex_reduction, return the expected reduction (C1 and C2) in backward pass.  *)
 val _solve
-  :  ?ilqr_linesearch:bool
+  :  ?ilqr_ex_reduction:bool
   -> ?batch_const:bool
   -> ( Maths.any Maths.t option
        , (Maths.any Maths.t, Maths.any Maths.t -> Maths.any Maths.t) momentary_params list
@@ -34,9 +34,9 @@ val _solve
   -> Maths.any Maths.t Solution.p list * backward_info list
 
 (* given momentary_params, run LQR and return solutions and backward_info; implicit differentiate.
-  if ilqr_linesearch, return C1 and C2 in backward pass. *)
+  if ilqr_ex_reduction, return the expected reduction (C1 and C2) in backward pass. *)
 val solve
-  :  ?ilqr_linesearch:bool
+  :  ?ilqr_ex_reduction:bool
   -> ?batch_const:bool
   -> ( Maths.any Maths.t option
        , (Maths.any Maths.t, Maths.any Maths.t prod) momentary_params list )

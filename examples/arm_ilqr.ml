@@ -10,7 +10,7 @@ open Sofo
 let in_dir = Cmdargs.in_dir "-d"
 let base = Optimizer.Config.Base.default
 let bs = 1
-let tmax = 10000
+let tmax = 1000
 let n = 4
 let m = 2
 let dt = 0.001
@@ -198,30 +198,6 @@ let x0_batched =
     ; central_state.vel.x2
     ]
     ~dim:1
-
-(* given target positions, calculate target angle positions *)
-(* let target_state (y1, y2) =
-  let r_sqr = Tensor.(square y1 + square (y2 - Maths.to_tensor central_spot_x2)) in
-  let x2 =
-    let num = Tensor.(r_sqr - f Float.(square _L1 + square _L2)) in
-    Tensor.(arccos (num / f Float.(2. * _L1 * _L2))) |> Tensor.to_float0_exn
-  in
-  let x1 =
-    let tmp1 =
-      let num = y1 in
-      let denom =
-        Tensor.(f Float.(sqrt (square _L1 + square _L2 + (2. * _L1 * _L2 * cos x2))))
-      in
-      Tensor.(arccos (num / denom))
-    in
-    let tmp2 =
-      let num = Tensor.(f Float.(_L1 + (_L2 * cos x2))) in
-      let denom = Tensor.f Float.(_L2 * sin x2) in
-      Tensor.(arctan (num / denom))
-    in
-    Tensor.(tmp1 - tmp2)
-  in
-  x1, Tensor.of_float0 ~device:base.device x2 *)
 
 (* batched targets of shape [bs x 4]; angular positions and velocities *)
 let targets_batched, targets_hand_pos_batched =
@@ -532,7 +508,6 @@ let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
   in
   Maths.(x_cost + u_cost) |> Maths.to_tensor |> Tensor.mean |> Tensor.to_float0_exn
 
-
 let ilqr ~targets_batched =
   let f_theta = rollout_one_step in
   let params_func (tau : Maths.any Maths.t option Lqr.Solution.p list)
@@ -580,7 +555,8 @@ let ilqr ~targets_batched =
   let tau_init = rollout_sol ~u_list:u_init ~x0:x0_batched in
   let sol, _ =
     Ilqr._isolve
-      ~linesearch:false
+      ~linesearch:true
+      ~ex_reduction:true
       ~batch_const:false
       ~f_theta
       ~gamma:0.5
