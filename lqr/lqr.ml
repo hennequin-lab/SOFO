@@ -76,16 +76,6 @@ let backward_common
               z._Fu_prod *? maybe_btr (z._Fu_prod *? _V_unsqueezed)
               |> maybe_squeeze ~dim:0
             in
-            (* let reg =
-              let _Cuu = Option.value_exn z._Cuu in
-              let m = shape _Cuu |> List.last_exn in
-              f 1e-4
-              * eye
-                  m
-                  ~kind:(Torch.Tensor.kind (to_tensor _Cuu))
-                  ~device:(Torch.Tensor.device (to_tensor _Cuu))
-              |> any
-            in *)
             let _Quu = Option.value_exn (z._Cuu +? tmp2) in
             Some ((_Quu + transpose _Quu ~dims:[ 1; 0 ]) / f 2.)
           in
@@ -101,20 +91,6 @@ let backward_common
           _Quu, _Qxx, _Qux)
         else (
           let tmp = z._Fx_prod *? _V in
-          (* let reg =
-            let _Cuu = Option.value_exn z._Cuu in
-            let m = shape _Cuu |> List.last_exn in
-            let eye_m =
-              f 1e-4
-              * eye
-                  m
-                  ~kind:(Torch.Tensor.kind (to_tensor _Cuu))
-                  ~device:(Torch.Tensor.device (to_tensor _Cuu))
-              |> any
-            in
-            let bs = shape _Cuu |> List.hd_exn in
-            broadcast_to eye_m ~size:[ bs; m; m ]
-          in *)
           let _Quu =
             Option.value_exn (z._Cuu +? (z._Fu_prod *? maybe_btr (z._Fu_prod *? _V)))
           in
@@ -259,8 +235,7 @@ let backward
         let _dC1, _dC2 =
           if ilqr_ex_reduction
           then (
-          let _dC1 = maybe_einsum (_k, "mb") (_qu, "mb") "m" in
-
+            let _dC1 = maybe_einsum (_k, "mb") (_qu, "mb") "m" in
             let _dC2 =
               let tmp =
                 maybe_einsum

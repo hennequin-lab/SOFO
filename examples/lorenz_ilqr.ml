@@ -199,7 +199,7 @@ let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
   Maths.(x_cost + u_cost) |> Maths.to_tensor |> Tensor.mean |> Tensor.to_float0_exn
 
 let ilqr ~observation =
-  let f_theta = rollout_one_step in
+  let f_theta ~i:_ = rollout_one_step in
   let params_func (tau : Maths.any Maths.t option Lqr.Solution.p list)
     : ( Maths.any Maths.t option
         , (Maths.any Maths.t, Maths.any Maths.t -> Maths.any Maths.t) Lqr.momentary_params

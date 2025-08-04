@@ -8,7 +8,7 @@ val _isolve
   -> ?ex_reduction:bool
   -> ?batch_const:bool
   -> gamma:float
-  -> f_theta:(x:Maths.any Maths.t -> u:Maths.any Maths.t -> Maths.any Maths.t)
+  -> f_theta:(i:int -> x:Maths.any Maths.t -> u:Maths.any Maths.t -> Maths.any Maths.t)
   -> cost_func:(Maths.any Maths.t option Solution.p list -> float)
   -> params_func:
        (Maths.any Maths.t option Solution.p list

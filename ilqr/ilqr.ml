@@ -71,36 +71,38 @@ let forward
         List.map2_exn x_opt_trunc u_opt_trunc ~f:(fun x u -> Solution.{ x; u })
       in
       let bck_trunc = List.tl_exn bck in
+      let bck_tau = List.map2_exn bck_trunc tau_opt_trunc ~f:(fun b tau -> b, tau) in
       let x_f, u_f, solution =
-        List.fold2_exn
-          bck_trunc
-          tau_opt_trunc
-          ~init:(x0, u0, [])
-          ~f:(fun (x_prev, u_prev, accu) b tau ->
-            cleanup ();
-            (* calculate x_t and u_t and fold into the state update *)
-            let x_new =
-              f_theta ~x:(Option.value_exn x_prev) ~u:(Option.value_exn u_prev)
-            in
-            let u_new =
-              let x_opt = tau.x in
-              _u
-                ~tangent:false
-                ~batch_const
-                ~_k:b._k
-                ~_K:b._K
-                ~x:(Some x_new -? x_opt)
-                ~u:tau.u
-                ~alpha
-            in
-            Some x_new, u_new, Solution.{ u = u_prev; x = Some x_new } :: accu)
+        List.foldi bck_tau ~init:(x0, u0, []) ~f:(fun i (x_prev, u_prev, accu) (b, tau) ->
+          cleanup ();
+          (* calculate x_t and u_t and fold into the state update *)
+          let x_new =
+            f_theta ~i ~x:(Option.value_exn x_prev) ~u:(Option.value_exn u_prev)
+          in
+          let u_new =
+            let x_opt = tau.x in
+            _u
+              ~tangent:false
+              ~batch_const
+              ~_k:b._k
+              ~_K:b._K
+              ~x:(Some x_new -? x_opt)
+              ~u:tau.u
+              ~alpha
+          in
+          Some x_new, u_new, Solution.{ u = u_prev; x = Some x_new } :: accu)
       in
       (* append x_T and u_T-1 at the back *)
       let tau_curr =
         List.rev solution
         @ [ Solution.
               { u = u_f
-              ; x = Some (f_theta ~x:(Option.value_exn x_f) ~u:(Option.value_exn u_f))
+              ; x =
+                  Some
+                    (f_theta
+                       ~i:(List.length solution)
+                       ~x:(Option.value_exn x_f)
+                       ~u:(Option.value_exn u_f))
               }
           ]
       in
@@ -114,7 +116,6 @@ let forward
           (* TODO: how to regularize Quu in batch *)
           (* let _dV = Maths.((f alpha * _dC1) + (f Float.(0.5 * alpha * alpha) * _dC2)) in *)
           let _dV = Maths.((f alpha * _dC2) + (f Float.(0.5 * alpha * alpha) * _dC1)) in
-
           let _dV_f =
             _dV |> Maths.mean ~keepdim:false |> Maths.const |> Maths.to_float_exn
           in
@@ -210,5 +211,4 @@ let _isolve
       ~cost_init
   in
   cleanup ();
-  print [%message "ilqr solve finished!"];
   tau_final, info_final

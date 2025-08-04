@@ -30,7 +30,7 @@ let batch_size = 64
 
 (* tmax needs to be divisible by 8 *)
 let tmax = 80
-let tmax_simulate = 100000
+let tmax_simulate = 10000
 let train_data = Lorenz_common.data tmax
 let train_data_batch = get_batch train_data
 let max_iter = 100000
@@ -51,25 +51,26 @@ let sample_data () =
   List.map both ~f:fst, List.map both ~f:snd
 
 let x0 = Maths.zeros ~device:base.device ~kind:base.kind [ batch_size; n ] |> Maths.any
-let ones_o = Maths.(ones ~device:base.device ~kind:base.kind [ o ])
+let _W_0 = Maths.eye n ~device:base.device ~kind:base.kind |> Maths.any
 
 (* -----------------------------------------
    ----- Utilitiy Functions ------
    ----------------------------------------- *)
 (* inv_chol is the cholesky of the inverse of the covariance *)
-let gaussian_llh ?mu ?(diagonal_inv_chol = true) ~inv_chol x =
+let gaussian_llh ?mu ?(diagonal_inv_chol = true) ?(batched_inv_chol = false) ~inv_chol x =
   let d = x |> Maths.shape |> List.last_exn in
   let error_term =
     let error =
-      match mu with
-      | None ->
-        if diagonal_inv_chol
-        then Maths.(einsum [ x, "ma"; inv_chol, "a" ] "ma")
-        else Maths.(einsum [ x, "ma"; inv_chol, "ab" ] "mb")
-      | Some mu ->
-        if diagonal_inv_chol
-        then Maths.(einsum [ x - mu, "ma"; inv_chol, "a" ] "ma")
-        else Maths.(einsum [ x - mu, "ma"; inv_chol, "ab" ] "mb")
+      let diff =
+        match mu with
+        | None -> x
+        | Some mu -> Maths.(x - mu)
+      in
+      match diagonal_inv_chol, batched_inv_chol with
+      | true, true -> Maths.(einsum [ diff, "ma"; inv_chol, "ma" ] "ma")
+      | true, false -> Maths.(einsum [ diff, "ma"; inv_chol, "a" ] "ma")
+      | false, true -> Maths.(einsum [ diff, "ma"; inv_chol, "mab" ] "mb")
+      | false, false -> Maths.(einsum [ diff, "ma"; inv_chol, "ab" ] "mb")
     in
     Maths.einsum [ error, "ma"; error, "ma" ] "m"
   in
@@ -110,6 +111,7 @@ module PP = struct
     ; _W : 'a
     ; _c : 'a
     ; _b : 'a
+    ; _log_prior_var_0 : 'a (* log of the diagonal covariance of prior over u_0 *)
     ; _log_prior_var : 'a (* log of the diagonal covariance of prior over u *)
     ; _log_obs_var : 'a (* log of the diagonal covariance of emission noise; *)
     ; _space_var_lt : 'a
@@ -147,15 +149,15 @@ module MGU = struct
   let pre_g ~f_t ~x (theta : _ Maths.some P.t) =
     Maths.((f_t * x *@ theta._U_h) + theta._b_h)
 
-  let x_hat ~pre_g ~u (theta : _ Maths.some P.t) =
-    Maths.(soft_relu pre_g + (u *@ theta._W))
+  let x_hat ~i ~pre_g ~u (theta : _ Maths.some P.t) =
+    Maths.(soft_relu pre_g + (u *@ if i = 0 then _W_0 else theta._W))
 
   (* rollout x list under sampled u *)
-  let rollout_one_step ~x ~u (theta : _ Maths.some P.t) =
+  let rollout_one_step ~i ~x ~u (theta : _ Maths.some P.t) =
     let pre_sig = pre_sig ~x theta in
     let f_t = Maths.sigmoid pre_sig in
     let pre_g = pre_g ~f_t ~x theta in
-    let x_hat = x_hat ~pre_g ~u theta in
+    let x_hat = x_hat ~i ~pre_g ~u theta in
     let new_x = Maths.(((f 1. - f_t) * x) + (f_t * x_hat)) in
     new_x
 
@@ -169,23 +171,23 @@ module MGU = struct
     Maths.(((tmp2 * x) + f 1.) / f 2.)
 
   (* _Fu and _Fx TESTED. *)
-  let _Fu ~x (theta : _ Maths.some P.t) =
+  let _Fu ~i ~x (theta : _ Maths.some P.t) =
     let open Maths in
     match x with
     | Some x ->
       let pre_sig = pre_sig ~x theta in
       let f_t = sigmoid pre_sig in
-      einsum [ f_t, "ma"; theta._W, "ba" ] "mba"
+      einsum [ f_t, "ma"; (if i = 0 then _W_0 else theta._W), "ba" ] "mba"
     | None -> any (zeros ~device:base.device ~kind:base.kind [ batch_size; m; n ])
 
-  let _Fx ~x ~u (theta : _ Maths.some P.t) =
+  let _Fx ~i ~x ~u (theta : _ Maths.some P.t) =
     let open Maths in
     match x, u with
     | Some x, Some u ->
       let pre_sig = pre_sig ~x theta in
       let f_t = sigmoid pre_sig in
       let pre_g = pre_g ~f_t ~x theta in
-      let x_hat = x_hat ~pre_g ~u theta in
+      let x_hat = x_hat ~i ~pre_g ~u theta in
       let tmp_einsum2 a b = einsum [ a, "ba"; b, "ma" ] "mba" in
       let term1 = diag_embed (f 1. - f_t) ~offset:0 ~dim1:(-2) ~dim2:(-1) in
       let term2 =
@@ -206,8 +208,8 @@ module MGU = struct
 
   let rollout_y ~u_list (theta : _ Maths.some P.t) =
     let _, y_list =
-      List.fold u_list ~init:(x0, []) ~f:(fun (x, accu) u ->
-        let new_x = rollout_one_step ~x ~u theta in
+      List.foldi u_list ~init:(x0, []) ~f:(fun i (x, accu) u ->
+        let new_x = rollout_one_step ~i ~x ~u theta in
         let new_y = Maths.(einsum [ new_x, "ma"; theta._c, "ab" ] "mb" + theta._b) in
         Stdlib.Gc.major ();
         new_x, new_y :: accu)
@@ -216,8 +218,8 @@ module MGU = struct
 
   let rollout_sol ~u_list (theta : _ Maths.some P.t) =
     let _, x_list =
-      List.fold u_list ~init:(x0, []) ~f:(fun (x, accu) u ->
-        let new_x = rollout_one_step ~x ~u theta in
+      List.foldi u_list ~init:(x0, []) ~f:(fun i (x, accu) u ->
+        let new_x = rollout_one_step ~i ~x ~u theta in
         Stdlib.Gc.major ();
         new_x, Lqr.Solution.{ u = Some u; x = Some new_x } :: accu)
     in
@@ -235,13 +237,20 @@ module MGU = struct
   let pred_u ~data (theta : _ Maths.some P.t) =
     let open Maths in
     let c_trans = transpose theta._c ~dims:[ 1; 0 ] in
-    let _obs_var_inv = exp (neg theta._log_obs_var) * ones_o in
+    let _obs_var_inv = precision_of_log_var theta._log_obs_var in
     let _Cxx_batched =
       let _Cxx =
         Maths.(einsum [ theta._c, "ab"; _obs_var_inv, "b"; c_trans, "bc" ] "ac")
         |> Maths.unsqueeze ~dim:0
       in
       Maths.broadcast_to _Cxx ~size:[ batch_size; n; n ]
+    in
+    let _Cuu_0_batched =
+      let _Cuu_0 =
+        Maths.(diag_embed (exp theta._log_prior_var_0) ~offset:0 ~dim1:(-2) ~dim2:(-1))
+        |> Maths.unsqueeze ~dim:0
+      in
+      Maths.broadcast_to _Cuu_0 ~size:[ batch_size; n; n ]
     in
     let _Cuu_batched =
       let _Cuu =
@@ -254,14 +263,17 @@ module MGU = struct
     let params_func (tau : any t option Lqr.Solution.p list)
       : (any t option, (any t, any t -> any t) Lqr.momentary_params list) Lqr.Params.p
       =
-      (* set o at time 0 as 0 *)
-      let o_list_extended = Tensor.zeros_like (List.hd_exn data) :: data in
-      let tau_extended = extend_tau_list tau in
+      let o_tau_list =
+        (* set o at time 0 as 0 *)
+        let o_list_extended = Tensor.zeros_like (List.hd_exn data) :: data in
+        let tau_extended = extend_tau_list tau in
+        List.map2_exn o_list_extended tau_extended ~f:(fun o tau -> o, tau)
+      in
       let tmp_list =
         Lqr.Params.
           { x0 = Some x0
           ; params =
-              List.map2_exn o_list_extended tau_extended ~f:(fun o s ->
+              List.mapi o_tau_list ~f:(fun i (o, s) ->
                 let _cx =
                   let tmp1 = einsum [ any (of_tensor o), "ab"; _obs_var_inv, "b" ] "ab" in
                   let tmp2 =
@@ -274,17 +286,23 @@ module MGU = struct
                 let _cu =
                   match s.u with
                   | None -> None
-                  | Some u -> Some (einsum [ u, "ma"; _Cuu_batched, "mab" ] "mb")
+                  | Some u ->
+                    Some
+                      (einsum
+                         [ u, "ma"
+                         ; (if i = 0 then _Cuu_0_batched else _Cuu_batched), "mab"
+                         ]
+                         "mb")
                 in
                 Lds_data.Temp.
                   { _f = None
-                  ; _Fx_prod = _Fx ~x:s.x ~u:s.u theta
-                  ; _Fu_prod = _Fu ~x:s.x theta
+                  ; _Fx_prod = _Fx ~i ~x:s.x ~u:s.u theta
+                  ; _Fu_prod = _Fu ~i ~x:s.x theta
                   ; _cx = Some _cx
                   ; _cu
                   ; _Cxx = _Cxx_batched
                   ; _Cxu = None
-                  ; _Cuu = _Cuu_batched
+                  ; _Cuu = (if i = 0 then _Cuu_0_batched else _Cuu_batched)
                   })
           }
       in
@@ -318,16 +336,27 @@ module MGU = struct
         List.fold x_cost_list ~init:(any (f 0.)) ~f:(fun accu c -> accu + c)
       in
       let u_cost =
-        List.fold
+        List.foldi
           u_list
           ~init:(any (f 0.))
-          ~f:(fun accu u -> accu + einsum [ u, "ma"; _Cuu_batched, "mab"; u, "mb" ] "m")
+          ~f:(fun i accu u ->
+            accu
+            + einsum
+                [ u, "ma"
+                ; (if i = 0 then _Cuu_0_batched else _Cuu_batched), "mab"
+                ; u, "mb"
+                ]
+                "m")
       in
       x_cost + u_cost |> to_tensor |> Tensor.mean |> Tensor.to_float0_exn
     in
     let u_init =
-      List.init tmax ~f:(fun _ ->
-        any (zeros ~device:base.device ~kind:base.kind [ batch_size; m ]))
+      List.init tmax ~f:(fun i ->
+        any
+          (zeros
+             ~device:base.device
+             ~kind:base.kind
+             [ batch_size; (if i = 0 then n else m) ]))
     in
     let tau_init = rollout_sol ~u_list:u_init theta in
     (* TODO: is there a more elegant way? Currently I need to set batch_const to false since _Fx and _Fu has batch dim. *)
@@ -335,7 +364,8 @@ module MGU = struct
     let f_theta = rollout_one_step theta in
     let sol, backward_info =
       Ilqr._isolve
-        ~linesearch:false
+        ~linesearch:true
+        ~ex_reduction:true
         ~batch_const:false
         ~gamma:0.5
         ~f_theta
@@ -361,47 +391,66 @@ module MGU = struct
 
   let kronecker_sample ~optimal_u_list (theta : _ Maths.some P.t) =
     let open Maths in
-    (* sample u from the kronecker formation *)
+    (* sample u_{1}:u_{T-1} from the kronecker formation *)
     let u_list =
       let optimal_u = concat_time optimal_u_list in
-      let xi = randn ~device:base.device ~kind:base.kind [ batch_size; m; tmax ] |> any in
+      let xi =
+        randn ~device:base.device ~kind:base.kind [ batch_size; m; Int.(tmax - 1) ] |> any
+      in
       let _space_chol = cholesky (_space_cov theta)
       and _time_chol = cholesky (_time_cov theta) in
       let xi_space = einsum [ xi, "mbt"; _space_chol, "ba" ] "mat" in
       let xi_time = einsum [ xi_space, "mat"; _time_chol, "tk" ] "mak" in
       let meaned = xi_time + optimal_u in
-      List.init tmax ~f:(fun i ->
-        slice ~dim:2 ~start:i ~end_:Int.(i + 1) ~step:1 meaned
-        |> reshape ~shape:[ batch_size; m ])
+      List.init
+        Int.(tmax - 1)
+        ~f:(fun i ->
+          slice ~dim:2 ~start:i ~end_:Int.(i + 1) ~step:1 meaned
+          |> reshape ~shape:[ batch_size; m ])
     in
     u_list
 
+  let lik_term ~y_pred ~data (theta : _ Maths.some P.t) =
+    let open Maths in
+    let inv_sigma_o_expanded = sqrt_precision_of_log_var theta._log_obs_var in
+    List.fold2_exn
+      data
+      y_pred
+      ~init:(any (f 0.))
+      ~f:(fun accu o y_pred ->
+        accu + gaussian_llh ~mu:y_pred ~inv_chol:inv_sigma_o_expanded (any (of_tensor o)))
+
+  (* M1: use kroneckered posterior *)
   let neg_elbo ~data (theta : _ Maths.some P.t) =
     let open Maths in
     (* obtain u from lqr *)
-    let optimal_u_list, _ = pred_u ~data theta in
-    let u_sampled = kronecker_sample ~optimal_u_list theta in
-    (* calculate the likelihood term *)
-    let y_pred = rollout_y ~u_list:u_sampled theta in
-    let lik_term =
-      let inv_sigma_o_expanded = sqrt_precision_of_log_var theta._log_obs_var * ones_o in
-      List.fold2_exn
-        data
-        y_pred
-        ~init:(any (f 0.))
-        ~f:(fun accu o y_pred ->
-          accu
-          + gaussian_llh ~mu:y_pred ~inv_chol:inv_sigma_o_expanded (any (of_tensor o)))
+    let optimal_u_list, bck_info = pred_u ~data theta in
+    let _Quu_chol_0 =
+      (List.hd_exn (Option.value_exn bck_info))._Quu_chol |> Option.value_exn
     in
+    let optimal_u_0 = List.hd_exn optimal_u_list
+    and optimal_u_rest_list = List.tl_exn optimal_u_list in
+    let u_0_sampled =
+      let xi = randn ~device:base.device ~kind:base.kind [ batch_size; n ] |> any in
+      optimal_u_0 + einsum [ xi, "ma"; _Quu_chol_0, "mab" ] "mb"
+    in
+    let u_sampled_rest = kronecker_sample ~optimal_u_list:optimal_u_rest_list theta in
+    let u_sampled_total = u_0_sampled :: u_sampled_rest in
+    (* calculate the likelihood term *)
+    let y_pred = rollout_y ~u_list:u_sampled_total theta in
+    let lik_term = lik_term ~y_pred ~data theta in
     (* calculate the kl term using samples *)
-    let optimal_u = concat_time optimal_u_list in
+    let optimal_u = concat_time optimal_u_rest_list in
     let kl =
       let prior =
-        List.foldi u_sampled ~init:None ~f:(fun t accu u ->
+        List.foldi u_sampled_total ~init:None ~f:(fun t accu u ->
           if t % 1 = 0 then Stdlib.Gc.major ();
           let increment =
             gaussian_llh
-              ~inv_chol:(any (ones [ m ] ~device:base.device ~kind:base.kind))
+              ~inv_chol:
+                (any
+                   (std_of_log_var
+                      (if t = 0 then theta._log_prior_var_0 else theta._log_prior_var)))
               u
           in
           match accu with
@@ -409,8 +458,20 @@ module MGU = struct
           | Some accu -> Some (accu + increment))
         |> Option.value_exn
       in
+      let neg_entropy_u_0 =
+        let _Quu_chol_0_inv = inv_sqr _Quu_chol_0 in
+        let _Quu_inv_chol =
+          cholesky (einsum [ _Quu_chol_0_inv, "mba"; _Quu_chol_0_inv, "mbc" ] "mac")
+        in
+        gaussian_llh
+          ~diagonal_inv_chol:false
+          ~batched_inv_chol:true
+          ~mu:optimal_u_0
+          ~inv_chol:_Quu_inv_chol
+          u_0_sampled
+      in
       let neg_entropy =
-        let u = concat_time u_sampled |> reshape ~shape:[ batch_size; -1 ] in
+        let u = concat_time u_sampled_rest |> reshape ~shape:[ batch_size; -1 ] in
         let optimal_u = reshape optimal_u ~shape:[ batch_size; -1 ] in
         let inv_chol =
           let _space_var_inv = inv_sqr (_space_cov theta) |> Maths.contiguous in
@@ -419,9 +480,124 @@ module MGU = struct
         in
         gaussian_llh ~diagonal_inv_chol:false ~mu:optimal_u ~inv_chol u
       in
-      neg_entropy - prior
+      neg_entropy_u_0 + neg_entropy - prior
     in
     mean ~dim:[ 0 ] (neg (lik_term - kl) / f Float.(of_int tmax * of_int o)), y_pred
+
+  (* M2: use Kalman-filtering to estimate kl *)
+  (* let sample_and_kl ~(theta : _ Maths.some P.t) ~optimal_u_list o_list =
+    let open Maths in
+    let o_list = List.map ~f:Maths.of_tensor o_list in
+    let optimal_u_o_list = List.map2_exn optimal_u_list o_list ~f:(fun u o -> u, o) in
+    let scaling_factor = reshape theta._scaling_factor ~shape:[ 1; 1; -1 ] in
+    let z0 = Maths.(any (zeros ~device:base.device ~kind:base.kind [ batch_size; n ])) in
+    let _Cuu_0_batched =
+      let _Cuu_0 =
+        Maths.(diag_embed (exp theta._log_prior_var_0) ~offset:0 ~dim1:(-2) ~dim2:(-1))
+        |> Maths.unsqueeze ~dim:0
+      in
+      Maths.broadcast_to _Cuu_0 ~size:[ batch_size; n; n ]
+    in
+    let _Cuu_batched =
+      let _Cuu =
+        Maths.(diag_embed (exp theta._log_prior_var) ~offset:0 ~dim1:(-2) ~dim2:(-1))
+        |> Maths.unsqueeze ~dim:0
+      in
+      Maths.broadcast_to _Cuu ~size:[ batch_size; m; m ]
+    in
+    let _, kl, us =
+      List.foldi
+        optimal_u_o_list
+        ~init:(z0, any (f 0.), [])
+        ~f:(fun i (z, kl, us) (ustar, o) ->
+          Stdlib.Gc.major ();
+          let zpred = rollout_one_step ~i ~x:z ~u:ustar theta in
+          let ypred = Maths.((zpred *@ theta._c) + theta._b) in
+          let delta = o - ypred in
+          (* approximate z_{t+1} = f(z_t, u_opt) + df/du u. dimension is now [batch_size x m x n] *)
+          let _b_prime = _Fu ~i ~x:(Some z) theta in
+          (* BC / obs_var *)
+          let btrinv =
+            let tmp = einsum [ _b_prime, "mij"; theta._c, "jo" ] "mio" in
+            tmp / reshape ~shape:[ -1; 1; 1 ] (exp theta._log_obs_var)
+          in
+          (* cholesky of posterior precision of filtered covariance of u *)
+          let precision_chol =
+            let tmp =
+              (if i = 0 then _Cuu_0_batched else _Cuu_batched)
+              + einsum [ btrinv, "mio"; theta._c, "jo"; _b_prime, "mkj" ] "mik"
+              |> cholesky
+            in
+            tmp * scaling_factor
+          in
+          (* cov = cov_chol cov_chol^T *)
+          let cov_chol =
+            let batched_eye =
+              let s = if i = 0 then n else m in
+              broadcast_to
+                (eye ~device:base.device ~kind:base.kind s)
+                ~size:[ batch_size; s; s ]
+            in
+            linsolve_triangular ~left:true ~upper:false precision_chol batched_eye
+            |> transpose ~dims:[ 0; 2; 1 ]
+          in
+          (* posterior mean of filtered u *)
+          let mu =
+            let tmp = einsum [ btrinv, "mio"; delta, "mo" ] "mi" in
+            einsum [ tmp, "ma"; cov_chol, "mab"; cov_chol, "mcb" ] "mc"
+          in
+          (* sample from posterior filtered covariance of u. *)
+          let u_diff_elbo =
+            einsum
+              [ ( any
+                    (Maths.randn
+                       ~device:base.device
+                       ~kind:base.kind
+                       [ batch_size; (if i = 0 then n else m) ])
+                , "ma" )
+              ; cov_chol, "mba"
+              ]
+              "mb"
+          in
+          let u_sample = mu + u_diff_elbo in
+          let u_final = ustar + u_sample in
+          (* propagate that sample to update z *)
+          let z = rollout_one_step ~i ~x:z ~u:u_final theta in
+          (* update the KL divergence *)
+          let kl =
+            let prior_term =
+              gaussian_llh
+                ~inv_chol:
+                  (any
+                     (std_of_log_var
+                        (if i = 0 then theta._log_prior_var_0 else theta._log_prior_var)))
+                u_final
+            in
+            let q_term =
+              gaussian_llh
+                ~diagonal_inv_chol:false
+                ~batched_inv_chol:true
+                ~inv_chol:precision_chol
+                u_diff_elbo
+            in
+            kl + q_term - prior_term
+          in
+          z, kl, (ustar + u_sample) :: us)
+    in
+    kl, List.rev us
+
+  let neg_elbo_filter ~data (theta : _ Maths.some P.t) =
+    (* obtain u from lqr *)
+    let optimal_u_list, _ = pred_u ~data theta in
+    let kl, u_sampled =
+      sample_and_kl ~theta:(theta : _ Maths.some P.t) ~optimal_u_list data
+    in
+    let y_pred = rollout_y ~u_list:u_sampled theta in
+    let lik_term = lik_term ~y_pred ~data theta in
+    let neg_elbo =
+      Maths.(neg (mean ~dim:[ 0 ] (lik_term - kl)) / f Float.(of_int tmax * of_int o))
+    in
+    neg_elbo, y_pred *)
 
   let ggn ~y_pred (theta : _ Maths.some P.t) =
     let open Maths in
@@ -434,9 +610,7 @@ module MGU = struct
       let ggn_part2 =
         C.(
           einsum
-            [ ( Float.(0.5 * of_int o * of_int batch_size)
-                $* sigma2_t * sqr obs_precision_p
-              , "ky" )
+            [ Float.(0.5 * of_int batch_size) $* sigma2_t * sqr obs_precision_p, "ky"
             ; sigma2_t, "ly"
             ]
             "kl")
@@ -473,12 +647,17 @@ module MGU = struct
       |> to_param
     in
     let _b = Tensor.zeros ~device:base.device [ 1; o ] |> to_param in
+    (* scale the prior over the initial condition w.r.t. 1/dt *)
+    let _log_prior_var_0 =
+      Tensor.(log (f Float.(1. / 0.01) * ones ~device:base.device ~kind:base.kind [ n ]))
+      |> to_param
+    in
     let _log_prior_var =
       Tensor.(log (f Float.(square 1.) * ones ~device:base.device ~kind:base.kind [ m ]))
       |> to_param
     in
     let _log_obs_var =
-      Tensor.(log (f Float.(square 1.) * ones ~device:base.device ~kind:base.kind [ 1 ]))
+      Tensor.(log (f Float.(square 1.) * ones ~device:base.device ~kind:base.kind [ o ]))
       |> to_param
     in
     let _space_var_lt =
@@ -488,10 +667,11 @@ module MGU = struct
       Tensor.(log (ones ~device:base.device ~kind:base.kind [ m ])) |> to_param
     in
     let _time_var_lt =
-      Tensor.zeros ~device:base.device ~kind:base.kind [ tmax; tmax ] |> to_param
+      Tensor.zeros ~device:base.device ~kind:base.kind [ tmax - 1; tmax - 1 ] |> to_param
     in
     let _log_time_var_diag =
-      Tensor.(log (ones ~device:base.device ~kind:base.kind [ tmax ])) |> to_param
+      Tensor.(log (ones ~device:base.device ~kind:base.kind [ Int.(tmax - 1) ]))
+      |> to_param
     in
     { _U_f
     ; _U_h
@@ -500,6 +680,7 @@ module MGU = struct
     ; _W
     ; _c
     ; _b
+    ; _log_prior_var_0
     ; _log_prior_var
     ; _log_obs_var
     ; _log_space_var_diag
@@ -513,8 +694,8 @@ module MGU = struct
     let optimal_u_list, _ = pred_u ~data theta in
     (* rollout x and y *)
     let _, y_list_rev =
-      List.fold optimal_u_list ~init:(x0, []) ~f:(fun (x, y_list) u ->
-        let x = rollout_one_step ~x ~u theta in
+      List.foldi optimal_u_list ~init:(x0, []) ~f:(fun i (x, y_list) u ->
+        let x = rollout_one_step ~i ~x ~u theta in
         let y = Maths.((x *@ theta._c) + theta._b) in
         x, y :: y_list)
     in
@@ -529,7 +710,10 @@ module MGU = struct
               ]
               "ma"))
     in
-    optimal_u_list, List.rev y_list_rev, List.rev o_list_rev
+    ( List.hd_exn optimal_u_list
+    , List.tl_exn optimal_u_list
+    , List.rev y_list_rev
+    , List.rev o_list_rev )
 
   (* simulate the autonomous dynamics of Lorenz given initial condition. *)
   let simulate_auto ~theta =
@@ -541,11 +725,18 @@ module MGU = struct
       List.fold
         (List.init tmax_simulate ~f:(fun i -> i))
         ~init:(init_cond, [])
-        ~f:(fun (x, y_list) _ ->
+        ~f:(fun (x, y_list) i ->
           let x =
             rollout_one_step
+              ~i
               ~x
-              ~u:Maths.(any (zeros ~device:base.device ~kind:base.kind [ 1; m ]))
+              ~u:
+                Maths.(
+                  any
+                    (zeros
+                       ~device:base.device
+                       ~kind:base.kind
+                       [ 1; (if i = 0 then n else m) ]))
               theta
           in
           let y = Maths.((x *@ theta._c) + theta._b) in
@@ -650,16 +841,18 @@ let rec loop ~t ~out ~state running_avg =
     then (
       let theta = MGU.P.value (O.params new_state) in
       (* simulate trajectory *)
-      let u_list, y_list, o_list =
+      let u_0, u_list, y_list, o_list =
         MGU.simulate ~theta:(MGU.P.map theta ~f:Maths.any) ~data
       in
       let y_list_auto = MGU.simulate_auto ~theta:(MGU.P.map theta ~f:Maths.any) in
-      let u_list_t = List.map u_list ~f:Maths.to_tensor
+      let u_0 = Maths.to_tensor u_0
+      and u_list_t = List.map u_list ~f:Maths.to_tensor
       and y_list_t = List.map y_list ~f:Maths.to_tensor
       and o_list_t = List.map o_list ~f:Maths.to_tensor
       and y_list_auto_t = List.map y_list_auto ~f:Maths.to_tensor in
       Arr.(save_npy ~out:(in_dir "o") (t_list_to_mat data));
       Arr.(save_npy ~out:(in_dir "y") (t_list_to_mat data_unnoised));
+      Arr.(save_npy ~out:(in_dir "u0_inferred") (t_list_to_mat [ u_0 ]));
       Arr.(save_npy ~out:(in_dir "u_inferred") (t_list_to_mat u_list_t));
       Arr.(save_npy ~out:(in_dir "y_inferred") (t_list_to_mat y_list_t));
       Arr.(save_npy ~out:(in_dir "y_auto") (t_list_to_mat y_list_auto_t));
