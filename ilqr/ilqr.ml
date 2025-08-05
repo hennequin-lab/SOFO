@@ -234,6 +234,86 @@ let ilqr_loop
   in
   loop 0 tau_init cost_init
 
+(* forward pass after info from final lqr backward pass has been obtained. *)
+let forward_final ~batch_const ~f_theta params (backward_info : backward_info list) =
+  let open Params in
+  (* compute control _u *)
+  let _u_forward ~batch_const ~_k ~_K ~x =
+    let tmp =
+      match batch_const with
+      | true -> maybe_einsum (x, "ma") (_K, "ba") "mb"
+      | false -> maybe_einsum (x, "ma") (_K, "mba") "mb"
+    in
+    _k +? tmp
+  in
+  (* u goes from 0 to T-1, x goes from 1 to T *)
+  let _, solution =
+    List.foldi
+      backward_info
+      ~init:(Option.value_exn params.x0, [])
+      ~f:(fun i (x, accu) b ->
+        cleanup ();
+        (* compute the optimal control inputs *)
+        let u =
+          _u_forward ~batch_const ~_k:b._k ~_K:b._K ~x:(Some x) |> Option.value_exn
+        in
+        (* fold them into the state update *)
+        let x = f_theta ~i ~x ~u in
+        x, Solution.{ u; x } :: accu)
+  in
+  List.rev solution
+
+(* formate params for final lqr backward pass *)
+let params_final_pass
+      ~batch_const
+      ~f_theta
+      ~(params_func :
+         no_tangents:bool
+         -> any t option Solution.p list
+         -> (any t option, (any t, any t -> any t) momentary_params list) Params.p)
+      tau_best
+  =
+  let params_func_best = params_func ~no_tangents:false tau_best in
+  let tau_best_extended = extend_tau_list ~x0:params_func_best.x0 tau_best in
+  let params_tau_list =
+    List.map2_exn params_func_best.params tau_best_extended ~f:(fun p tau -> p, tau)
+  in
+  let params =
+    List.mapi params_tau_list ~f:(fun i (p, tau) ->
+      let _cx_new =
+        p._cx
+        -? (maybe_einsum
+              (tau.x, "ma")
+              (p.common._Cxx, if batch_const then "ab" else "mab")
+              "mb"
+            +? maybe_einsum
+                 (tau.u, "ma")
+                 (p.common._Cxu, if batch_const then "ba" else "mba")
+                 "mb")
+      in
+      let _cu_new =
+        p._cu
+        -? (maybe_einsum
+              (tau.x, "ma")
+              (p.common._Cxu, if batch_const then "ab" else "mab")
+              "mb"
+            +? maybe_einsum
+                 (tau.u, "ma")
+                 (p.common._Cuu, if batch_const then "ab" else "mab")
+                 "mb")
+      in
+      let _f_new =
+        let next =
+          if Int.(i = List.length params_tau_list - 1)
+          then None
+          else Some (f_theta ~i ~x:(Option.value_exn tau.x) ~u:(Option.value_exn tau.u))
+        in
+        next -? ((p.common._Fx_prod2 *? tau.x) +? (p.common._Fu_prod2 *? tau.u))
+      in
+      Lqr.{ common = p.common; _f = _f_new; _cx = _cx_new; _cu = _cu_new })
+  in
+  Lqr.Params.{ x0 = params_func_best.x0; params }
+
 (* when batch_const is true, _Fx_prods, _Fu_prods, _Cxx, _Cxu, _Cuu has no leading batch dimension and special care needs to be taken to deal with these *)
 let _isolve
       ?(linesearch = true)
@@ -253,7 +333,7 @@ let _isolve
   (* step 1: init params and cost *)
   let cost_init = cost_func tau_init |> Tensor.mean |> Tensor.to_float0_exn in
   (*step 2: loop to find the best controls and states *)
-  let tau_best, _, info_best =
+  let tau_best, _, _ =
     ilqr_loop
       ~linesearch
       ~linesearch_bs_avg
@@ -269,52 +349,26 @@ let _isolve
       ~cost_init
   in
   cleanup ();
-  (* List.map tau_best ~f:(fun tau ->
-    Lqr.Solution.{ x = Option.value_exn tau.x; u = Option.value_exn tau.u }), Option.value_exn info_best *)
   (* step 3: final lqr pass with modified cost parameters *)
-  let params_func_final =
-    let params_func_best = params_func ~no_tangents:false tau_best in
-    let tau_best_extended = extend_tau_list ~x0:params_func_best.x0 tau_best in
-    let params_tau_list =
-      List.map2_exn params_func_best.params tau_best_extended ~f:(fun p tau -> p, tau)
-    in
-    let params =
-      List.mapi params_tau_list ~f:(fun i (p, tau) ->
-        let _cx_new =
-          p._cx
-          -? (maybe_einsum
-                (tau.x, "ma")
-                (p.common._Cxx, if batch_const then "ab" else "mab")
-                "mb"
-              +? maybe_einsum
-                   (tau.u, "ma")
-                   (p.common._Cxu, if batch_const then "ba" else "mba")
-                   "mb")
-        in
-        let _cu_new =
-          p._cu
-          -? (maybe_einsum
-                (tau.x, "ma")
-                (p.common._Cxu, if batch_const then "ab" else "mab")
-                "mb"
-              +? maybe_einsum
-                   (tau.u, "ma")
-                   (p.common._Cuu, if batch_const then "ab" else "mab")
-                   "mb")
-        in
-        let _f_new =
-          let next =
-            if Int.(i = List.length params_tau_list - 1)
-            then None
-            else Some (f_theta ~i ~x:(Option.value_exn tau.x) ~u:(Option.value_exn tau.u))
-          in
-          next -? ((p.common._Fx_prod2 *? tau.x) +? (p.common._Fu_prod2 *? tau.u))
-        in
-        Lqr.{ common = p.common; _f = _f_new; _cx = _cx_new; _cu = _cu_new })
-    in
-    Lqr.Params.{ x0 = params_func_best.x0; params }
-  in
+  let params_func_final = params_final_pass ~batch_const ~f_theta ~params_func tau_best in
   let tau_final, info_final =
-    _solve ~ilqr_expected_reduction:false ~batch_const params_func_final
+    let common_info =
+      List.map params_func_final.Params.params ~f:(fun p -> p.common)
+      |> backward_common ~batch_const
+    in
+    cleanup ();
+    let bck, _dC1, _dC2 =
+      backward
+        ~ilqr_expected_reduction:expected_reduction
+        ~batch_const
+        common_info
+        params_func_final
+    in
+    let sol =
+      bck
+      |> forward_final ~batch_const ~f_theta params_func_final
+      |> List.map ~f:(fun s -> Solution.{ x = s.x; u = s.u })
+    in
+    sol, bck
   in
   tau_final, info_final
