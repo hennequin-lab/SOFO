@@ -351,24 +351,5 @@ let _isolve
   cleanup ();
   (* step 3: final lqr pass with modified cost parameters *)
   let params_func_final = params_final_pass ~batch_const ~f_theta ~params_func tau_best in
-  let tau_final, info_final =
-    let common_info =
-      List.map params_func_final.Params.params ~f:(fun p -> p.common)
-      |> backward_common ~batch_const
-    in
-    cleanup ();
-    let bck, _dC1, _dC2 =
-      backward
-        ~ilqr_expected_reduction:expected_reduction
-        ~batch_const
-        common_info
-        params_func_final
-    in
-    let sol =
-      bck
-      |> forward_final ~batch_const ~f_theta params_func_final
-      |> List.map ~f:(fun s -> Solution.{ x = s.x; u = s.u })
-    in
-    sol, bck
-  in
+  let tau_final, info_final = _solve ~batch_const params_func_final in
   tau_final, info_final
