@@ -231,6 +231,13 @@ module MGU = struct
     let x_ext = Some x0 :: x_list in
     List.map2_exn u_ext x_ext ~f:(fun u x -> Lqr.Solution.{ u; x })
 
+  let any_to_const x = Maths.(any (const x))
+  let opt_const_map x = Option.map x ~f:(fun x -> any_to_const x)
+
+  let map_to_const (tau : Maths.any Maths.t option Lqr.Solution.p list) =
+    List.map tau ~f:(fun tau ->
+      Lqr.Solution.{ u = opt_const_map tau.u; x = opt_const_map tau.x })
+
   (* optimal u determined from lqr *)
   let pred_u ~data (theta : _ Maths.some P.t) =
     let open Maths in
@@ -257,15 +264,25 @@ module MGU = struct
       in
       Maths.broadcast_to _Cuu ~size:[ batch_size; m; m ]
     in
-    let _cx_common = einsum [ theta._b, "ab"; _obs_var_inv, "b"; c_trans, "bc" ] "ac" in
-    let params_func (tau : any t option Lqr.Solution.p list)
+    let params_func ~no_tangents (tau : any t option Lqr.Solution.p list)
       : (any t option, (any t, any t -> any t) Lqr.momentary_params list) Lqr.Params.p
       =
       let o_tau_list =
         (* set o at time 0 as 0 *)
         let o_list_extended = Tensor.zeros_like (List.hd_exn data) :: data in
-        let tau_extended = extend_tau_list tau in
+        let tau_extended =
+          let tmp = extend_tau_list tau in
+          if no_tangents then map_to_const tmp else tmp
+        in
         List.map2_exn o_list_extended tau_extended ~f:(fun o tau -> o, tau)
+      in
+      let _obs_var_inv =
+        if no_tangents then Maths.(any (const _obs_var_inv)) else _obs_var_inv
+      in
+      let theta = if no_tangents then P.map theta ~f:any_to_const else theta in
+      let _cx_common =
+        let tmp = einsum [ theta._b, "ab"; _obs_var_inv, "b"; c_trans, "bc" ] "ac" in
+        if no_tangents then any_to_const tmp else tmp
       in
       let tmp_list =
         Lqr.Params.
@@ -358,7 +375,7 @@ module MGU = struct
     in
     let tau_init = rollout_sol ~u_list:u_init theta in
     (* TODO: is there a more elegant way? Currently I need to set batch_const to false since _Fx and _Fu has batch dim. *)
-    (* use lqr to obtain the optimal u *)
+    (* use iqr to obtain the optimal u *)
     let f_theta = rollout_one_step theta in
     let sol, backward_info =
       Ilqr._isolve
@@ -374,7 +391,7 @@ module MGU = struct
         ~tau_init
         2000
     in
-    List.map sol ~f:(fun s -> s.u |> Option.value_exn), backward_info
+    List.map sol ~f:(fun s -> s.u), backward_info
 
   let _space_cov (theta : _ Maths.some P.t) =
     let tri = Maths.(tril ~_diagonal:(-1) theta._space_var_lt) in
@@ -390,7 +407,7 @@ module MGU = struct
 
   let kronecker_sample ~optimal_u_list (theta : _ Maths.some P.t) =
     let open Maths in
-    (* sample u_{1}to u_{T-1} from the kronecker formation *)
+    (* sample u_{1} to u_{T-1} from the kronecker formation *)
     let u_list =
       let optimal_u = concat_time optimal_u_list in
       let xi =
@@ -427,9 +444,8 @@ module MGU = struct
     let open Maths in
     (* obtain u from lqr *)
     let optimal_u_list, bck_info = pred_u ~data theta in
-    let _Quu_0_chol =
-      (List.hd_exn (Option.value_exn bck_info))._Quu_chol |> Option.value_exn
-    in
+    (* posterior covariance of u_0 = Quu_0^-1 *)
+    let _Quu_0_chol = (List.hd_exn bck_info)._Quu_chol |> Option.value_exn in
     let _Quu_0_inv_chol =
       let _Quu_0_chol_inv = inv_sqr _Quu_0_chol in
       cholesky (einsum [ _Quu_0_chol_inv, "mba"; _Quu_0_chol_inv, "mbc" ] "mac")
@@ -800,7 +816,7 @@ let config ~t =
     ; beta_1 = 0.9
     ; beta_2 = 0.99
     ; eps = 1e-4
-    ; learning_rate = Some Float.(0.01 / (1. + sqrt (of_int t / 100.)))
+    ; learning_rate = Some Float.(0.01 / (1. + sqrt (of_int t / 1.)))
     ; weight_decay = None
     }
 
@@ -864,15 +880,15 @@ let rec loop ~t ~out ~state running_avg =
   if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state (loss :: running_avg)
 
 (* Start the loop. *)
-(* let _ =
+let _ =
   let out = in_dir "loss" in
   Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out ~state:(O.init MGU.init) [] *)
+  loop ~t:0 ~out ~state:(O.init MGU.init) []
 
-let _ =
+(* let _ =
   let theta = O.P.C.load ~device:base.device (in_dir "adam_params") in
   Sofo.print [%message ("params loaded")];
   (* simulate trajectory *)
   let y_list_auto = MGU.simulate_auto ~theta:(MGU.P.map theta ~f:Maths.any) in
   let y_list_auto_t = List.map y_list_auto ~f:Maths.to_tensor in
-  Arr.(save_npy ~out:(in_dir "y_auto") (t_list_to_mat y_list_auto_t))   
+  Arr.(save_npy ~out:(in_dir "y_auto") (t_list_to_mat y_list_auto_t))    *)

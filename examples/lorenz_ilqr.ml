@@ -178,6 +178,12 @@ let extend_tau_list (tau : Maths.any Maths.t option Lqr.Solution.p list) =
   let x_ext = Some x0_maths :: x_list in
   List.map2_exn u_ext x_ext ~f:(fun u x -> Lqr.Solution.{ u; x })
 
+let opt_const_map x = Option.map x ~f:(fun x -> Maths.(any (const x)))
+
+let map_to_const (tau : Maths.any Maths.t option Lqr.Solution.p list) =
+  List.map tau ~f:(fun tau ->
+    Lqr.Solution.{ u = opt_const_map tau.u; x = opt_const_map tau.x })
+
 (* given a trajectory calculate average cost across batch (summed over time) *)
 let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
   let x_list = List.map tau ~f:(fun s -> s.x |> Option.value_exn) in
@@ -200,14 +206,17 @@ let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
 
 let ilqr ~observation =
   let f_theta ~i:_ = rollout_one_step in
-  let params_func (tau : Maths.any Maths.t option Lqr.Solution.p list)
+  let params_func ~no_tangents (tau : Maths.any Maths.t option Lqr.Solution.p list)
     : ( Maths.any Maths.t option
         , (Maths.any Maths.t, Maths.any Maths.t -> Maths.any Maths.t) Lqr.momentary_params
             list )
         Lqr.Params.p
     =
-    let tau_extended = extend_tau_list tau in
-    let observations_x0 = x0_maths :: observation in
+    let tau_extended =
+      let tmp = extend_tau_list tau in
+      if no_tangents then map_to_const tmp else tmp
+    in
+    let observations_x0 = x0_maths :: List.map ~f:Maths.any observation in
     let tmp_list =
       Lqr.Params.
         { x0 = Some x0_maths
@@ -238,8 +247,8 @@ let ilqr ~observation =
   in
   let u_init =
     List.init tmax ~f:(fun _ ->
-      let rand = Tensor.(zeros ~device:base.device ~kind:base.kind [ bs; 3 ]) in
-      Maths.any (Maths.of_tensor rand))
+      let _zeros = Tensor.(zeros ~device:base.device ~kind:base.kind [ bs; 3 ]) in
+      Maths.(any (of_tensor _zeros)))
   in
   let tau_init = rollout_sol ~u_list:u_init ~x0:x0_maths in
   let sol, _ =
@@ -277,12 +286,8 @@ let _ =
     |> Tensor.to_bigarray ~kind:base.ba_kind
   in
   (* inferred_u_mat shape [tmax x bs x 3] *)
-  let inferred_u_mat =
-    List.map sol ~f:(fun x -> x.u |> Option.value_exn) |> sol_list_concat
-  in
-  let inferred_x_mat =
-    List.map sol ~f:(fun x -> x.x |> Option.value_exn) |> sol_list_concat
-  in
+  let inferred_u_mat = List.map sol ~f:(fun x -> x.u) |> sol_list_concat in
+  let inferred_x_mat = List.map sol ~f:(fun x -> x.x) |> sol_list_concat in
   let x_mat = data_list_concat data
   and x_no_input_mat = data_list_concat data_no_input in
   let u_mat =

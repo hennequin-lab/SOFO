@@ -21,6 +21,12 @@ let ( -? ) a b =
   | None, Some b -> Some b
   | Some a, Some b -> Some (a - b)
 
+(* optionally f v *)
+let ( *? ) f v =
+  match f, v with
+  | Some f, Some v -> Some (f v)
+  | _ -> None
+
 let maybe_mul a b =
   match a, b with
   | Some a, Some b -> Some Maths.(a * b)
@@ -30,6 +36,14 @@ let maybe_einsum (a, opsA) (b, opsB) opsC =
   match a, b with
   | Some a, Some b -> Some (einsum [ a, opsA; b, opsB ] opsC)
   | _ -> None
+
+(* artificially add one to tau so it goes from 0 to T *)
+let extend_tau_list ~x0 (tau : Maths.any Maths.t option Lqr.Solution.p list) =
+  let u_list = List.map tau ~f:(fun s -> s.u) in
+  let x_list = List.map tau ~f:(fun s -> s.x) in
+  let u_ext = u_list @ [ None ] in
+  let x_ext = x0 :: x_list in
+  List.map2_exn u_ext x_ext ~f:(fun u x -> Lqr.Solution.{ u; x })
 
 let _u ~tangent ~batch_const ~_k ~_K ~x ~u ~alpha =
   let tmp =
@@ -67,9 +81,9 @@ let forward
       (* let u0 = maybe_scalar_mul (List.hd_exn bck)._k alpha +? (List.hd_exn tau_opt).u in *)
       let u0 =
         let tmp =
-          if linesearch_bs_avg
-          then maybe_mul (List.hd_exn bck)._k (Some alpha_c)
-          else (maybe_einsum ((List.hd_exn bck)._k, "ma")) (Some alpha_c, "m") "ma"
+          (maybe_einsum ((List.hd_exn bck)._k, "ma"))
+            (Some alpha_c, if linesearch_bs_avg then "d" else "m")
+            "ma"
         in
         tmp +? (List.hd_exn tau_opt).u
       in
@@ -164,7 +178,11 @@ let forward
       fwd_loop ~stop ~i:Int.(i + 1) ~alpha:new_alpha ~tau_prev:tau_curr)
   in
   (* start with alpha set to 1 *)
-  let alpha = Tensor.ones_like cost_init in
+  let alpha =
+    if linesearch_bs_avg
+    then Tensor.ones ~device:(Tensor.device cost_init) ~kind:(Tensor.kind cost_init) [ 1 ]
+    else Tensor.ones_like cost_init
+  in
   fwd_loop ~stop:false ~i:0 ~alpha ~tau_prev:tau_opt
 
 let ilqr_loop
@@ -235,7 +253,7 @@ let _isolve
   (* step 1: init params and cost *)
   let cost_init = cost_func tau_init |> Tensor.mean |> Tensor.to_float0_exn in
   (*step 2: loop to find the best controls and states *)
-  let tau_final, _, info_final =
+  let tau_best, _, info_best =
     ilqr_loop
       ~linesearch
       ~linesearch_bs_avg
@@ -244,11 +262,59 @@ let _isolve
       ~gamma
       ~conv_threshold
       ~max_iter
-      ~params_func
+      ~params_func:(params_func ~no_tangents:true)
       ~cost_func
       ~f_theta
       ~tau_init
       ~cost_init
   in
   cleanup ();
+  (* List.map tau_best ~f:(fun tau ->
+    Lqr.Solution.{ x = Option.value_exn tau.x; u = Option.value_exn tau.u }), Option.value_exn info_best *)
+  (* step 3: final lqr pass with modified cost parameters *)
+  let params_func_final =
+    let params_func_best = params_func ~no_tangents:false tau_best in
+    let tau_best_extended = extend_tau_list ~x0:params_func_best.x0 tau_best in
+    let params_tau_list =
+      List.map2_exn params_func_best.params tau_best_extended ~f:(fun p tau -> p, tau)
+    in
+    let params =
+      List.mapi params_tau_list ~f:(fun i (p, tau) ->
+        let _cx_new =
+          p._cx
+          -? (maybe_einsum
+                (tau.x, "ma")
+                (p.common._Cxx, if batch_const then "ab" else "mab")
+                "mb"
+              +? maybe_einsum
+                   (tau.u, "ma")
+                   (p.common._Cxu, if batch_const then "ba" else "mba")
+                   "mb")
+        in
+        let _cu_new =
+          p._cu
+          -? (maybe_einsum
+                (tau.x, "ma")
+                (p.common._Cxu, if batch_const then "ab" else "mab")
+                "mb"
+              +? maybe_einsum
+                   (tau.u, "ma")
+                   (p.common._Cuu, if batch_const then "ab" else "mab")
+                   "mb")
+        in
+        let _f_new =
+          let next =
+            if Int.(i = List.length params_tau_list - 1)
+            then None
+            else Some (f_theta ~i ~x:(Option.value_exn tau.x) ~u:(Option.value_exn tau.u))
+          in
+          next -? ((p.common._Fx_prod2 *? tau.x) +? (p.common._Fu_prod2 *? tau.u))
+        in
+        Lqr.{ common = p.common; _f = _f_new; _cx = _cx_new; _cu = _cu_new })
+    in
+    Lqr.Params.{ x0 = params_func_best.x0; params }
+  in
+  let tau_final, info_final =
+    _solve ~ilqr_expected_reduction:false ~batch_const params_func_final
+  in
   tau_final, info_final

@@ -12,7 +12,8 @@ val _isolve
   -> f_theta:(i:int -> x:Maths.any Maths.t -> u:Maths.any Maths.t -> Maths.any Maths.t)
   -> cost_func:(Maths.any Maths.t option Solution.p list -> Torch.Tensor.t)
   -> params_func:
-       (Maths.any Maths.t option Solution.p list
+       (no_tangents:bool
+        -> Maths.any Maths.t option Solution.p list
         -> ( Maths.any Maths.t option
              , ( Maths.any Maths.t
                  , Maths.any Maths.t -> Maths.any Maths.t )
@@ -22,4 +23,4 @@ val _isolve
   -> conv_threshold:float
   -> tau_init:Maths.any Maths.t option Solution.p list
   -> int
-  -> Maths.any Maths.t option Solution.p list * backward_info list option
+  -> Maths.any Maths.t Solution.p list * backward_info list

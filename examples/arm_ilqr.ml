@@ -485,6 +485,12 @@ let extend_tau_list (tau : Maths.any Maths.t option Lqr.Solution.p list) =
   let x_ext = Some x0_batched :: x_list in
   List.map2_exn u_ext x_ext ~f:(fun u x -> Lqr.Solution.{ u; x })
 
+let opt_const_map x = Option.map x ~f:(fun x -> Maths.(any (const x)))
+
+let map_to_const (tau : Maths.any Maths.t option Lqr.Solution.p list) =
+  List.map tau ~f:(fun tau ->
+    Lqr.Solution.{ u = opt_const_map tau.u; x = opt_const_map tau.x })
+
 (* given a trajectory, calculate average cost across batch (summed over time) *)
 let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
   let x_list = List.map tau ~f:(fun s -> s.x |> Option.value_exn) in
@@ -510,13 +516,16 @@ let cost_func (tau : Maths.any Maths.t option Lqr.Solution.p list) =
 
 let ilqr ~targets_batched =
   let f_theta ~i:_ = rollout_one_step in
-  let params_func (tau : Maths.any Maths.t option Lqr.Solution.p list)
+  let params_func ~no_tangents (tau : Maths.any Maths.t option Lqr.Solution.p list)
     : ( Maths.any Maths.t option
         , (Maths.any Maths.t, Maths.any Maths.t -> Maths.any Maths.t) Lqr.momentary_params
             list )
         Lqr.Params.p
     =
-    let tau_extended = extend_tau_list tau in
+    let tau_extended =
+      let tmp = extend_tau_list tau in
+      if no_tangents then map_to_const tmp else tmp
+    in
     let tmp_list =
       Lqr.Params.
         { x0 = Some x0_batched
@@ -579,7 +588,7 @@ let _ =
   let sol = ilqr ~targets_batched in
   let to_bigarray x = x |> Maths.to_tensor |> Tensor.to_bigarray ~kind:base.ba_kind in
   let inferred_u_mat =
-    let inferred_us = List.map sol ~f:(fun x -> x.u |> Option.value_exn) in
+    let inferred_us = List.map sol ~f:(fun x -> x.u) in
     List.map inferred_us ~f:(fun u -> Arr.reshape (to_bigarray u) [| 1; bs; m |])
     |> List.to_array
     |> Arr.concatenate ~axis:0
@@ -590,7 +599,7 @@ let _ =
     Maths.concat [ hand_pos_x1; hand_pos_x2 ] ~dim:1
   in
   let inferred_x_mat =
-    let inferred_xs = List.map sol ~f:(fun x -> x.x |> Option.value_exn) in
+    let inferred_xs = List.map sol ~f:(fun x -> x.x) in
     List.fold
       inferred_xs
       ~init:[ Maths.unsqueeze ~dim:0 x0_pos_batched ]
@@ -611,7 +620,7 @@ let _ =
   Mat.(save_npy ~out:(in_dir "x0") (to_bigarray x0_pos_batched));
   let final_state =
     let last = List.last_exn sol in
-    Option.value_exn last.x
+    last.x
   in
   let final_error = calc_error final_state in
   Sofo.print [%message (final_error : float)]
