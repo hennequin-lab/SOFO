@@ -252,14 +252,24 @@ module MGU = struct
     in
     let _Cuu_0_batched =
       let _Cuu_0 =
-        Maths.(diag_embed (exp theta._log_prior_var_0) ~offset:0 ~dim1:(-2) ~dim2:(-1))
+        Maths.(
+          diag_embed
+            (precision_of_log_var theta._log_prior_var_0)
+            ~offset:0
+            ~dim1:(-2)
+            ~dim2:(-1))
         |> Maths.unsqueeze ~dim:0
       in
       Maths.broadcast_to _Cuu_0 ~size:[ batch_size; n; n ]
     in
     let _Cuu_batched =
       let _Cuu =
-        Maths.(diag_embed (exp theta._log_prior_var) ~offset:0 ~dim1:(-2) ~dim2:(-1))
+        Maths.(
+          diag_embed
+            (precision_of_log_var theta._log_prior_var)
+            ~offset:0
+            ~dim1:(-2)
+            ~dim2:(-1))
         |> Maths.unsqueeze ~dim:0
       in
       Maths.broadcast_to _Cuu ~size:[ batch_size; m; m ]
@@ -277,7 +287,15 @@ module MGU = struct
         List.map2_exn o_list_extended tau_extended ~f:(fun o tau -> o, tau)
       in
       let _obs_var_inv =
-        if no_tangents then Maths.(any (const _obs_var_inv)) else _obs_var_inv
+        if no_tangents then any_to_const _obs_var_inv else _obs_var_inv
+      in
+      let _Cxx_batched, _Cuu_0_batched, _Cuu_batched =
+        if no_tangents
+        then
+          ( any_to_const _Cxx_batched
+          , any_to_const _Cuu_0_batched
+          , any_to_const _Cuu_batched )
+        else _Cxx_batched, _Cuu_0_batched, _Cuu_batched
       in
       let theta = if no_tangents then P.map theta ~f:any_to_const else theta in
       let _cx_common =
@@ -490,13 +508,13 @@ module MGU = struct
       in
       let neg_entropy_u_rest =
         let u = concat_time u_sampled_rest |> reshape ~shape:[ batch_size; -1 ] in
-        let optimal_u = reshape optimal_u_rest_concated ~shape:[ batch_size; -1 ] in
+        let optimal_u_rest = reshape optimal_u_rest_concated ~shape:[ batch_size; -1 ] in
         let inv_chol =
           let _space_var_inv = inv_sqr (_space_cov theta) |> Maths.contiguous in
           let _time_var_inv = inv_sqr (_time_cov theta) |> Maths.contiguous in
           cholesky (kron _space_var_inv _time_var_inv)
         in
-        gaussian_llh ~diagonal_inv_chol:false ~mu:optimal_u ~inv_chol u
+        gaussian_llh ~diagonal_inv_chol:false ~mu:optimal_u_rest ~inv_chol u
       in
       neg_entropy_u_0 + neg_entropy_u_rest - prior
     in
@@ -887,8 +905,8 @@ let _ =
 
 (* let _ =
   let theta = O.P.C.load ~device:base.device (in_dir "adam_params") in
-  Sofo.print [%message ("params loaded")];
+  Sofo.print [%message "params loaded"];
   (* simulate trajectory *)
   let y_list_auto = MGU.simulate_auto ~theta:(MGU.P.map theta ~f:Maths.any) in
   let y_list_auto_t = List.map y_list_auto ~f:Maths.to_tensor in
-  Arr.(save_npy ~out:(in_dir "y_auto") (t_list_to_mat y_list_auto_t))    *)
+  Arr.(save_npy ~out:(in_dir "y_auto") (t_list_to_mat y_list_auto_t)) *)
