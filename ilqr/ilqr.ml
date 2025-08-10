@@ -27,11 +27,6 @@ let ( *? ) f v =
   | Some f, Some v -> Some (f v)
   | _ -> None
 
-let maybe_mul a b =
-  match a, b with
-  | Some a, Some b -> Some Maths.(a * b)
-  | _ -> None
-
 let maybe_einsum (a, opsA) (b, opsB) opsC =
   match a, b with
   | Some a, Some b -> Some (einsum [ a, opsA; b, opsB ] opsC)
@@ -138,7 +133,10 @@ let forward
         let cost_change = Tensor.(cost_curr - cost_init) in
         let lower_than_init_bool =
           match _dC1, _dC2 with
-          | None, None -> Tensor.(lt cost_change (Scalar.f 0.))
+          | None, None ->
+            if linesearch_bs_avg
+            then Tensor.(le (mean cost_change) (Scalar.f 0.))
+            else Tensor.(le cost_change (Scalar.f 0.))
           | Some _dC1, Some _dC2 ->
             (* TODO: how to regularize Quu in batch *)
             let _dV_f =
@@ -235,7 +233,7 @@ let ilqr_loop
   loop 0 tau_init cost_init
 
 (* forward pass after info from final lqr backward pass has been obtained. *)
-let forward_final ~batch_const ~f_theta params (backward_info : backward_info list) =
+(* let forward_final ~batch_const ~f_theta params (backward_info : backward_info list) =
   let open Params in
   (* compute control _u *)
   let _u_forward ~batch_const ~_k ~_K ~x =
@@ -261,7 +259,7 @@ let forward_final ~batch_const ~f_theta params (backward_info : backward_info li
         let x = f_theta ~i ~x ~u in
         x, Solution.{ u; x } :: accu)
   in
-  List.rev solution
+  List.rev solution *)
 
 (* formate params for final lqr backward pass *)
 let params_final_pass

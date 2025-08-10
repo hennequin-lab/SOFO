@@ -7,6 +7,9 @@
   delayed_addition
   lorenz
   lorenz_elbo_mgu_kronecker
+  ; lorenz_elbo_mgu_kronecker_no_sep_init
+  ; lorenz_elbo_mgu_kronecker_no_sep_init_diag
+  lorenz_mgu_spike_no_sep_init
   bit_flipflop_force
   bit_flipflop_small_net
   kalman_rnn

@@ -7,8 +7,6 @@ module Mat = Owl.Dense.Matrix.D
 module Arr = Owl.Dense.Ndarray.D
 module Linalg = Owl.Linalg.D
 
-let print s = Stdio.print_endline (Sexp.to_string_hum s)
-
 (* -----------------------------------------
    -- Some utility functions         ------
    ----------------------------------------- *)
@@ -236,8 +234,6 @@ let q_of ~batch_const ~m ~reg d =
   else
     Array.init m ~f:(fun _ -> Arr.reshape (pos_sym ~reg d) [| 1; d; d |])
     |> Arr.concatenate ~axis:0
-
-
 
 let map_naive
       (x :
