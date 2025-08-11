@@ -208,26 +208,15 @@ module Ops = struct
     in
     { f; df }
 
-  let min_binary_swaps permutation =
-    try
-      let perm = Array.of_list permutation in
-      let n = Array.length perm in
-      let swaps = ref [] in
-      for i = 0 to n - 1 do
-        if perm.(i) <> i
-        then (
-          let j = ref (i + 1) in
-          while !j < n && perm.(!j) <> i do
-            Int.incr j
-          done;
-          let temp = perm.(i) in
-          perm.(i) <- perm.(!j);
-          perm.(!j) <- temp;
-          swaps := (i, !j) :: !swaps)
-      done;
-      List.rev !swaps
-    with
-    | _ -> failwith "Improper specification of axis permutation"
+  let transpose_eq ~with_tangents dims =
+    let lhs =
+      List.mapi dims ~f:(fun i _ -> Char.of_int_exn Int.(97 + i)) |> String.of_char_list
+    in
+    let rhs =
+      List.mapi dims ~f:(fun _ i -> Char.of_int_exn Int.(97 + i)) |> String.of_char_list
+    in
+    let lhs, rhs = if with_tangents then "x" ^ lhs, "x" ^ rhs else lhs, rhs in
+    lhs ^ "->" ^ rhs
 
   let[@warning "-16"] transpose ?dims =
     let f x =
@@ -237,8 +226,7 @@ module Ops = struct
         Tensor.transpose ~dim0:0 ~dim1:1 x
       | Some dims ->
         assert (Int.(List.length (Tensor.shape x) = List.length dims));
-        List.fold (min_binary_swaps dims) ~init:x ~f:(fun accu (dim0, dim1) ->
-          Tensor.transpose accu ~dim0 ~dim1)
+        Tensor.einsum ~equation:(transpose_eq ~with_tangents:false dims) ~path:None [ x ]
     in
     let df ~f:_ ~x:_ ~dx =
       match dims with
@@ -247,8 +235,7 @@ module Ops = struct
         Tensor.transpose ~dim0:1 ~dim1:2 dx
       | Some dims ->
         assert (Int.(List.length (Tensor.shape dx) = 1 + List.length dims));
-        List.fold (min_binary_swaps dims) ~init:dx ~f:(fun accu (dim0, dim1) ->
-          Tensor.transpose accu ~dim0:Int.(dim0 + 1) ~dim1:Int.(dim1 + 1))
+        Tensor.einsum ~equation:(transpose_eq ~with_tangents:true dims) ~path:None [ dx ]
     in
     { f; df }
 
