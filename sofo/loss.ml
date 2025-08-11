@@ -3,9 +3,9 @@ open Forward_torch
 open Maths
 
 (* computes the total number of elements being reduced *)
-let n_reduction dim y =
+(* let n_reduction dim y =
   let s = Array.of_list (shape y) in
-  List.fold dim ~init:1 ~f:(fun accu i -> Int.(accu * s.(i)))
+  List.fold dim ~init:1 ~f:(fun accu i -> Int.(accu * s.(i))) *)
 
 let mse ~output_dims err = mean ~keepdim:false ~dim:(0 :: output_dims) (sqr err)
 
