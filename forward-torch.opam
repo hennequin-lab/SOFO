@@ -11,4 +11,4 @@ depends: [
   "torch"
   "ppx_sexp_message"
 ]
-synopsis: "Bached forward-mode AD in ocaml-torch"
+synopsis: "Batched forward-mode AD in ocaml-torch"

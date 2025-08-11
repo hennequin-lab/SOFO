@@ -1,10 +1,11 @@
 opam-version: "2.0"
 maintainer: "Hennequin Lab"
 authors: [ "Guillaume Hennequin, Youjing Yu" ]
+synopsis: "Second-order Forward Mode Differentiation"
 license: "MIT"
-homepage: "https://github.com/hennequin-lab/sgn"
-dev-repo: "git+https://github.com/hennequin-lab/sgn.git"
-bug-reports: "https://github.com/hennequin-lab/sgn/issues"
+homepage: "https://github.com/hennequin-lab/SOFO"
+dev-repo: "git+https://github.com/hennequin-lab/SOFO.git"
+bug-reports: "https://github.com/hennequin-lab/SOFO/issues"
 build: [
   ["dune" "build" "-p" name "-j" jobs]
 ]
@@ -16,4 +17,4 @@ depends: [
   "ppx-forward-torch"
   "ppx_sexp_message"
 ]
-synopsis: ""
+
