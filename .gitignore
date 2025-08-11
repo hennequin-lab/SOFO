@@ -16,6 +16,7 @@ _build/
 
 # data folder 
 _data
+data
 
 
 # ocamlbuild targets
@@ -34,3 +35,7 @@ setup.log
 
 # Local OPAM switch
 _opam/
+
+# Mac remains
+pytorch/.DS_Store
+.DS_Store
