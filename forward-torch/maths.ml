@@ -852,11 +852,7 @@ module Ops = struct
   (* apply a 2d convolution over x with weight [w] *)
   let conv2d ?(padding = 0, 0) ?(dilation = 1, 1) ?(groups = 1) ~bias stride =
     (* x has shape [bs x n_channels x w x h], w has shape [out_channels x in_channels x kerl_x x kerl_y] *)
-    let bias_p =
-      match bias with
-      | Some bias -> Some (to_tensor bias)
-      | None -> None
-    in
+    let bias_p = Option.map bias ~f:to_tensor in
     let bias_t =
       match bias with
       | Some bias ->
