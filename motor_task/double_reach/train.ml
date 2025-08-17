@@ -160,7 +160,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     | C 2 -> { params_tmp with c2 = v }
     | _ -> assert false
 
-  let random_localised_vs _K : P.T.t =
+  let random_localised_vs () : P.T.t =
     let random_localised_param_name param_name =
       let w_shape = get_shapes param_name in
       let before, after = get_n_params_before_after param_name in
@@ -300,8 +300,7 @@ end
    --- Training for double reaches
    ----------------------------------------- *)
 
-
-let max_iter = 5000 
+let max_iter = 5000
 
 module Run (X : sig
     module O :

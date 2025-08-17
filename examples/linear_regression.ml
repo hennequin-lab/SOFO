@@ -14,6 +14,7 @@ let n = 100
 
 (* output dim *)
 let d = 1
+let _K = 10
 
 (* -----------------------------------------
    -- Model setup and optimizer
@@ -49,6 +50,7 @@ module FF =
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
 let cycle = true
+
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
     type 'a p =
@@ -75,7 +77,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     theta
 
-  let random_localised_vs _K : P.T.t =
+  let random_localised_vs () : P.T.t =
     Tensor.randn ~device:base.device ~kind:base.kind [ _K; d; n ]
 
   let eigenvectors ~(lambda : A.M.t) ~switch_to_learn t (_K : int) =
@@ -100,13 +102,11 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     in
     let selection =
       if cycle
-      then
-        List.init n_per_param ~f:(fun i ->
-          ((t * n_per_param) + i) % n_params)
+      then List.init n_per_param ~f:(fun i -> ((t * n_per_param) + i) % n_params)
       else List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
     in
     let vs =
-      List.map selection ~f:(fun idx->
+      List.map selection ~f:(fun idx ->
         let il, ir, _ = s_all.(idx) in
         let u_left =
           Tensor.(
@@ -150,12 +150,13 @@ let config =
       ; steps = 50
       ; learn_steps = 10
       ; exploit_steps = 10
+      ; local = true
       }
   in
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some 100.
-    ; n_tangents = 10
+    ; n_tangents = _K
     ; rank_one = false
     ; damping = None
     ; aux = None

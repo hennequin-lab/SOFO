@@ -8,20 +8,16 @@
   hvs
   random_class
   mlp_classification
-  lqr_eg
   lorenz
   lgs
+  lgs_elbo
+  lgs_from_scratch
   fa
   mlp_adaptive
   mlp_mixer
   learn_ggn
-  lgs_elbo
-  lgs_from_scratch
-  lorenz_elbo_bottleneck
-  lorenz_elbo_gru
-  arm_ilqr
   vae)
- (libraries cmdargs bos sofo owl domainslib owl-ode lqr ilqr framework)
+ (libraries cmdargs bos sofo owl domainslib owl-ode framework lqr)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch ppx_jane)))
 

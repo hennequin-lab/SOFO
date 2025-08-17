@@ -50,8 +50,9 @@ module type Auxiliary = sig
   (* given aux parameters [lambda] and tangents v, compute \hat{G}^{1/2}v where \hat{G} is the approximated ggn *)
   val g12v : lambda:A.M.t -> P.M.t -> P.M.t
 
-  (* given the number of tangents, draw localised tangents randomly *)
-  val random_localised_vs : int -> P.T.t
+  (* draw localised tangents randomly. Do not need tangent parameters now since tangents for each layer distributed 
+    upstream. *)
+  val random_localised_vs : unit -> P.T.t
 
   (* given aux parameters [lambda], whether to switch to learning, current sampling state and the number of tangents, 
     return eigenvectors of \hat{G} and new sampling state *)

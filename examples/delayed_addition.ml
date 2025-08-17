@@ -236,7 +236,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     | B -> { params_tmp with b = v }
     | O -> { params_tmp with o = v }
 
-  let random_localised_vs _K : P.T.t =
+  let random_localised_vs () : P.T.t =
     let random_localised_param_name param_name =
       let w_shape = get_shapes param_name in
       let before, after = get_n_params_before_after param_name in
@@ -450,9 +450,10 @@ module Do_with_SOFO : Do_with_T = struct
           config =
             Optimizer.Config.Adam.
               { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
-        ; steps = 50
-        ; learn_steps = 10
-        ; exploit_steps = 10
+        ; steps = 5
+        ; learn_steps = 1
+        ; exploit_steps = 1
+        ; local = true
         }
     in
     Optimizer.Config.SOFO.
@@ -461,8 +462,8 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = _K
       ; rank_one = false
       ; damping = Some 1e-5
-      ; aux = None
-      ; orthogonalize = true
+      ; aux = Some aux
+      ; orthogonalize = false
       }
 
   let init = O.init RNN.init

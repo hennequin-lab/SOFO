@@ -219,7 +219,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     | C -> { params_tmp with c = v }
     | A -> { params_tmp with a = v }
 
-  let random_localised_vs _K : P.T.t =
+  let random_localised_vs () : P.T.t =
     let random_localised_param_name param_name =
       let w_shape = get_shapes param_name in
       let before, after = get_n_params_before_after param_name in
@@ -418,6 +418,7 @@ module Do_with_SOFO : Do_with_T = struct
         ; steps = 5
         ; learn_steps = 1
         ; exploit_steps = 1
+        ; local = true
         }
     in
     Optimizer.Config.SOFO.

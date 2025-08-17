@@ -224,7 +224,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
       in
       if id = i then { params_tmp with w = v } else params_tmp)
 
-  let random_localised_vs _K : P.T.t =
+  let random_localised_vs () : P.T.t =
     let n_per_param = n_params_w in
     Array.init n_layers ~f:(fun id ->
       let w_shape = get_shapes id in
@@ -406,6 +406,7 @@ module Do_with_SOFO : Do_with_T = struct
         ; steps = 5
         ; learn_steps = 100
         ; exploit_steps = 100
+        ; local = true
         }
     in
     Optimizer.Config.SOFO.
@@ -416,7 +417,6 @@ module Do_with_SOFO : Do_with_T = struct
       ; damping = Some 1e-3
       ; aux = Some aux
       ; orthogonalize = true
-
       }
 
   let init = O.init MLP.init
@@ -438,7 +438,7 @@ module Do_with_Adam : Do_with_T = struct
 end
 
 let _ =
-  let max_iter = num_train_loops  in
+  let max_iter = num_train_loops in
   let optimise =
     match Cmdargs.get_string "-m" with
     | Some "sofo" ->

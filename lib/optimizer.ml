@@ -379,27 +379,43 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
   let step ~(config : ('a, 'b) config) ~state ~data args =
     Stdlib.Gc.major ();
     (* extract aux learning flags. if switch to learn, switch to learning the ggn at the NEXT iteration *)
-    let aux_learn, aux_exploit, switch_to_learn =
+    let aux_learn, aux_exploit, switch_to_learn, local =
       match config.aux with
-      | None -> false, false, false
-      | Some { learn_steps; exploit_steps; _ } ->
+      | None -> false, false, false, false
+      | Some { learn_steps; exploit_steps; local; _ } ->
         let rem = state.t % (learn_steps + exploit_steps) in
         let learn = rem < learn_steps in
-        learn, not learn, rem = learn_steps + exploit_steps - 1
+        learn, not learn, rem = learn_steps + exploit_steps - 1, local
     in
     (* initialise tangents *)
     let theta = params state in
-    (* if learning or not using aux, use random vs; else use vs sampled from eigenvectors *)
+    (* if exploiting, use vs sampled from eigenvectors; if learning and localised, use localised vs; otherwise random vs. *)
+    (* tangent sampling: exploit vs learn vs default *)
     let _vs, new_sampling_state, new_seeds =
-      if aux_exploit
-      then (
+      match aux_exploit, aux_learn, local with
+      | true, _, _ ->
+        let lambda =
+          state.aux |> O.params |> A.A.map ~f:(fun x -> Maths.const (Prms.value x))
+        in
         let _vs, new_sampling_state =
-          let lambda = O.params state.aux in
-          let lambda = A.A.map ~f:(fun x -> Maths.const (Prms.value x)) lambda in
           A.eigenvectors ~lambda ~switch_to_learn state.sampling_state config.n_tangents
         in
-        _vs, new_sampling_state, None)
-      else (
+        _vs, new_sampling_state, None
+      | false, true, true ->
+        let _vs = A.random_localised_vs () in
+        _vs, state.sampling_state, None
+      | false, true, false ->
+        let _vs, _ =
+          init_tangents
+            ~base:config.base
+            ~rank_one:config.rank_one
+            ~n_tangents:config.n_tangents
+            ~prev_seeds:state.prev_seeds
+            ~ortho:config.orthogonalize
+            theta
+        in
+        _vs, state.sampling_state, None
+      | false, false, _ ->
         let _vs, new_seeds =
           init_tangents
             ~base:config.base
@@ -409,7 +425,7 @@ module SOFO (W : Wrapper.T) (A : Wrapper.Auxiliary with module P = W.P) = struct
             ~ortho:config.orthogonalize
             theta
         in
-        _vs, state.sampling_state, new_seeds)
+        _vs, state.sampling_state, new_seeds
     in
     let _vs = orthonormalise _vs in
     let vs = W.P.map _vs ~f:(fun x -> Maths.Direct x) in

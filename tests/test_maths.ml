@@ -474,7 +474,7 @@ let binary_tests =
             ~padding:(0, 0)
             ~dilation:(1, 1)
             ~groups:1
-            ~bias:(b, None)
+            ~bias:(Some (Maths.const b))
             ~stride:(stride, stride) )
     ]
   in

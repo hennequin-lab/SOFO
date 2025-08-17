@@ -791,7 +791,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
     | Log_obs_var -> { params_tmp with _log_obs_var = v }
     | Log_scaling_factor -> { params_tmp with _log_scaling_factor = v }
 
-  let random_localised_vs _K : P.T.t =
+  let random_localised_vs () : P.T.t =
     let random_localised_param_name param_name =
       let w_shape = get_shapes param_name in
       let before, after = get_n_params_before_after param_name in

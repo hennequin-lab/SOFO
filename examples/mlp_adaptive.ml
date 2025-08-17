@@ -154,7 +154,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
 
   let n_per_layer = _K / n_layers
 
-  let random_localised_vs _K : P.T.t =
+  let random_localised_vs () : P.T.t =
     List.init n_layers ~f:(fun id ->
       let w_shape = get_shapes id in
       let w = random_params ~shape:w_shape n_per_layer in
@@ -336,6 +336,7 @@ module Do_with_SOFO : Do_with_T = struct
         ; steps = 25000
         ; learn_steps = 1
         ; exploit_steps = 500
+        ; local = true
         }
     in
     Optimizer.Config.SOFO.
@@ -346,7 +347,6 @@ module Do_with_SOFO : Do_with_T = struct
       ; damping = Some 1e-3
       ; aux = Some aux
       ; orthogonalize = true
-
       }
 
   let init = O.init theta

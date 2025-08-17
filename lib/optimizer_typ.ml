@@ -64,6 +64,7 @@ module Config = struct
       ; config : ('a, 'b) Adam.t
       ; learn_steps : int
       ; exploit_steps : int
+      ; local : bool (* if use localised tangents during learning phase *)
       }
 
     type ('a, 'b) t =
@@ -73,11 +74,17 @@ module Config = struct
       ; rank_one : bool
       ; damping : float option
       ; aux : ('a, 'b) aux option
-      ; orthogonalize: bool
+      ; orthogonalize : bool
       }
 
     let default_aux file =
-      { steps = 10; file; config = Adam.default; learn_steps = 1; exploit_steps = 1 }
+      { steps = 10
+      ; file
+      ; config = Adam.default
+      ; learn_steps = 1
+      ; exploit_steps = 1
+      ; local = true
+      }
 
     let default =
       { base = Base.default

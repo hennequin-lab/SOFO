@@ -379,7 +379,7 @@ module Do_with_SOFO : Do_with_T = struct
       ; n_tangents = 16
       ; rank_one = false
       ; damping = None
-      ; aux= None
+      ; aux = None
       }
 
   let init = O.init theta

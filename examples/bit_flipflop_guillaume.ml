@@ -245,7 +245,7 @@ module GGN : Wrapper.Auxiliary with module P = P = struct
 
   let localise v = RNN_P.{ j; fb; b; w = v }
 
-  let random_localised_vs _K : P.T.t =
+  let random_localised_vs () : P.T.t =
     { w = random_params ~shape:[ n; Settings.b ] _K; j; fb; b }
 
   (* compute sorted eigenvalues, u_left and u_right. *)
@@ -405,6 +405,7 @@ module Do_with_SOFO : Do_with_T = struct
         ; steps = 50
         ; learn_steps = 100
         ; exploit_steps = 100
+        ; local = true
         }
     in
     Optimizer.Config.SOFO.
@@ -415,7 +416,6 @@ module Do_with_SOFO : Do_with_T = struct
       ; damping = Some 1e-5
       ; aux = Some aux
       ; orthogonalize = false
-
       }
 
   let init = O.init (RNN.init ())
