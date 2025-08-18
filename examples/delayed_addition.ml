@@ -145,8 +145,7 @@ module RNN = struct
     result
 end
 
-(* TODO: _K should be 128 *)
-let _K = 32
+let _K = 128
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
