@@ -49,7 +49,7 @@ module FF =
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
-let cycle = true
+let cycle = false
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct

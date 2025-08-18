@@ -370,7 +370,7 @@ let test_eval ~train_data theta =
 let _K_w = 32
 let _K = Int.(List.length layer_list * _K_w)
 let _ = Convenience.print [%message (_K : int)]
-let cycle = true
+let cycle = false
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct

@@ -171,7 +171,7 @@ let test_eval ~train_data theta =
 
 let n_params_w = 170
 let _K = Array.length layer_sizes * n_params_w
-let cycle = true
+let cycle = false
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct

@@ -212,7 +212,7 @@ let sample_batch ~n_steps bs =
    ------------------------------------------------ *)
 
 let n_per_param = _K
-let cycle = true
+let cycle = false 
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct

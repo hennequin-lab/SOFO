@@ -612,7 +612,7 @@ let n_params_log_prior_var_0 = 1
 let n_params_log_prior_var = 1
 let n_params_log_obs_var = 1
 let n_params_log_scaling_factor = 1
-let cycle = true
+let cycle = false
 
 let n_params_list =
   [ n_params_a

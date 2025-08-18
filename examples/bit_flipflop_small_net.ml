@@ -235,7 +235,7 @@ let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
 let param_names_list = [ J; B; W ]
 let n_params_j, n_params_b, n_params_w = 50, 50, Int.(_K - 100)
 let n_params_list = [ n_params_j; n_params_b; n_params_w ]
-let cycle = true
+let cycle = false
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct

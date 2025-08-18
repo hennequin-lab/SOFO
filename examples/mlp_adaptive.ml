@@ -106,7 +106,7 @@ let loss_and_ggn ?(with_ggn = true) ~data:(data_x, data_y) (theta : P.M.t) =
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
    ------------------------------------------------ *)
-let cycle = true
+let cycle = false
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct

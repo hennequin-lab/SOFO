@@ -469,7 +469,7 @@ let n_params_d = 10
 let n_params_c = Int.(_K - 2 - n_params_d - n_params_q)
 let n_params_log_obs_var = 1
 let n_params_scaling_factor = 1
-let cycle = true
+let cycle = false
 
 let n_params_list =
   [ n_params_q; n_params_d; n_params_c; n_params_log_obs_var; n_params_scaling_factor ]

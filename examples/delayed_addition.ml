@@ -160,7 +160,7 @@ let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
 let param_names_list = [ C; B; O ]
 let n_params_c, n_params_b, n_params_o = Int.(_K - 4), 2, 2
 let n_params_list = [ n_params_c; n_params_b; n_params_o ]
-let cycle = true
+let cycle = false
 
 module GGN : Wrapper.Auxiliary with module P = P = struct
   include struct
@@ -448,7 +448,7 @@ module Do_with_SOFO : Do_with_T = struct
         { (default_aux (in_dir "aux")) with
           config =
             Optimizer.Config.Adam.
-              { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
+              { default with base; learning_rate = Some 5e-3; eps = 1e-8 }
         ; steps = 5
         ; learn_steps = 1
         ; exploit_steps = 1

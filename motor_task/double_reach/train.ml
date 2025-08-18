@@ -35,7 +35,7 @@ let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
 let n_params_init_cond, n_params_w, n_params_b, n_params_f, n_params_c =
   10, Int.(_K - (9 * 10)), 20, 10, 10
 
-let cycle = true
+let cycle = false
 
 let n_params_list =
   [ n_params_init_cond

@@ -51,7 +51,7 @@ module type Auxiliary = sig
   val g12v : lambda:A.M.t -> P.M.t -> P.M.t
 
   (* draw localised tangents randomly. Do not need tangent parameters now since tangents for each layer distributed 
-    upstream. *)
+    upstream. used in the learning phase of learning-the-ggn idea. *)
   val random_localised_vs : unit -> P.T.t
 
   (* given aux parameters [lambda], whether to switch to learning, current sampling state and the number of tangents, 
