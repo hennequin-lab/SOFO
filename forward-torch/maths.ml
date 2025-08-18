@@ -134,6 +134,10 @@ let f x = E (C (Tensor.f x))
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
 
+let primal_tensor_detach x =
+  let x_t = to_tensor x in
+  E (C x_t)
+
 let eye ?device ?kind n =
   let x = Tensor.zeros ?device ?kind [ n; n ] in
   let x = Tensor.eye_out ~out:x ~n in
@@ -1189,6 +1193,7 @@ module C = struct
     | E (C x) -> E (C (f x))
     | _ -> raise Not_const
 
+  let f = f
   let view ~size = make_unary (Ops.view ~size)
   let broadcast_to ~size = make_unary (Ops.broadcast_to ~size)
   let contiguous = make_unary Ops.contiguous

@@ -52,6 +52,7 @@ val f : float -> const t
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
 
+val primal_tensor_detach :  _ some t -> const t
 val eye : (int -> const t) with_tensor_params
 val zeros : (int list -> const t) with_tensor_params
 val ones : (?scale:float -> int list -> const t) with_tensor_params
@@ -160,6 +161,7 @@ val conv2d
    -- Type-preserving ops on constants
    --------------------------------------------------- *)
 module C : sig
+  val f : float -> const t
   val make_unary : unary_info -> const t -> const t
   val make_binary : binary_info -> const t -> const t -> const t
   val view : size:int list -> const t -> const t
