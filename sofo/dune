@@ -1,15 +1,15 @@
 (library
  (name sofo)
  (public_name sofo)
- (modules sofo convenience loss optimizer_typ optimizer)
+ (modules sofo convenience loss optimizer_typ optimizer wrapper_typ)
  (libraries stdio base forward-torch)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))
- 
+
 (documentation
-  (package sofo)
-  (mld_files index))
- 
+ (package sofo)
+ (mld_files index))
+
 (env
  (dev
   (flags

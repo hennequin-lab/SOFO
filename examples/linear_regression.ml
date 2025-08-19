@@ -1,5 +1,6 @@
 (* Example a simple linear regression task to learn W where y = W x. *)
 open Base
+open Torch
 open Forward_torch
 open Maths
 open Sofo
@@ -11,9 +12,10 @@ let base = Optimizer.Config.Base.default
 (* -----------------------------------------
    -- Model setup and optimizer
    ----------------------------------------- *)
+module P = Prms.Single
 
 module Model = struct
-  module P = Prms.Single
+  module P = P
 
   let f ~(theta : _ some P.t) input = Maths.(input *@ theta)
 
@@ -23,11 +25,7 @@ module Model = struct
     P.free theta
 end
 
-module O = Optimizer.SOFO (Model.P)
-
-let config =
-  Optimizer.Config.SOFO.
-    { base; learning_rate = Some 0.1; n_tangents = 10; damping = `none }
+let _K = 10
 
 (* -----------------------------------------
    -- Generate linear regression data.
@@ -57,6 +55,102 @@ let data_minibatch =
 
 let batch_size = 512
 let max_iter = 10_000
+let _K = 10
+
+(* ------------------------------------------------
+   --- Kronecker approximation of the GGN
+   ------------------------------------------------ *)
+module GGN : Auxiliary with module P = P = struct
+  include struct
+    type 'a p =
+      { theta_left : 'a
+      ; theta_right : 'a
+      }
+    [@@deriving prms]
+  end
+
+  module P = P
+
+  (* module A = AA.Make (Prms.Single) *)
+  module A = Make (Prms.Single)
+
+  type sampling_state = int
+
+  let init_sampling_state () = 0
+
+  (* cache storage with a ref to memoize computed results *)
+  let s_u_cache = ref []
+
+  let g12v ~(lambda : ([< `const | `dual ] as 'a) A.t) (v : 'a P.t) : any P.t =
+    Maths.einsum [ lambda.theta_left, "in"; v, "aij"; lambda.theta_right, "jm" ] "anm"
+
+  let random_localised_vs () : Tensor.t P.p =
+    Tensor.randn ~device:base.device ~kind:base.kind [ _K; d_in; d_out ]
+
+  let eigenvectors ~(lambda : _ some A.t) ~switch_to_learn t (_K : int) =
+    let left, right, n_per_param = lambda.theta_left, lambda.theta_right, _K in
+    let u_left, s_left, _ =
+      Tensor.svd ~some:true ~compute_uv:true Maths.(to_tensor left)
+    in
+    let u_right, s_right, _ =
+      Tensor.svd ~some:true ~compute_uv:true Maths.(to_tensor right)
+    in
+    let s_left = Tensor.to_float1_exn s_left |> Array.to_list in
+    let s_right = Tensor.to_float1_exn s_right |> Array.to_list in
+    let s_all =
+      List.mapi s_left ~f:(fun il sl ->
+        List.mapi s_right ~f:(fun ir sr -> il, ir, Float.(sl * sr)))
+      |> List.concat
+      |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
+      |> Array.of_list
+    in
+    (* randomly select the indices *)
+    let n_params =
+      Int.((Maths.shape left |> List.hd_exn) * (Maths.shape right |> List.hd_exn))
+    in
+    let selection =
+      List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
+    in
+    let vs =
+      List.map selection ~f:(fun idx ->
+        let il, ir, _ = s_all.(idx) in
+        let u_left =
+          Tensor.(
+            squeeze_dim
+              ~dim:1
+              (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
+        in
+        let u_right =
+          Tensor.(
+            squeeze_dim
+              ~dim:1
+              (slice u_right ~dim:1 ~start:(Some ir) ~end_:(Some Int.(ir + 1)) ~step:1))
+        in
+        let tmp = Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ] in
+        Tensor.unsqueeze tmp ~dim:0)
+      |> Tensor.concatenate ~dim:0
+    in
+    (* reset s_u_cache and set sampling state to 0 if learn again *)
+    if switch_to_learn then s_u_cache := [];
+    let new_sampling_state = if switch_to_learn then 0 else Int.(t + 1) in
+    vs, new_sampling_state
+
+  let init () =
+    let init_eye size =
+      Owl.Dense.Matrix.S.(0.1 $* eye size)
+      |> Tensor.of_bigarray ~device:base.device
+      |> Maths.of_tensor
+      |> Prms.Single.free
+    in
+    { theta_left = init_eye d_in; theta_right = init_eye d_out }
+end
+
+(* TODO: need to write the aux loop inside optimisation. *)
+module O = Optimizer.SOFO (Model.P) (GGN)
+
+let config =
+  Optimizer.Config.SOFO.
+    { base; learning_rate = Some 0.1; n_tangents = _K; damping = `none }
 
 let rec loop ~t ~out ~state =
   Stdlib.Gc.major ();
