@@ -5,3 +5,4 @@ module Loss = Loss
 module Optimizer = Optimizer
 
 include Convenience
+include Wrapper_typ
