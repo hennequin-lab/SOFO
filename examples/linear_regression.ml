@@ -85,8 +85,9 @@ module GGN : Auxiliary with module P = P = struct
   let g12v ~(lambda : ([< `const | `dual ] as 'a) A.t) (v : 'a P.t) : Maths.any P.t =
     Maths.einsum [ lambda.theta_left, "in"; v, "aij"; lambda.theta_right, "jm" ] "anm"
 
-  let random_localised_vs () : Tensor.t P.p =
+  let random_localised_vs () =
     Tensor.randn ~device:base.device ~kind:base.kind [ _K; d_in; d_out ]
+    |> Maths.of_tensor
 
   let eigenvectors ~(lambda : _ Maths.some A.t) ~switch_to_learn t (_K : int) =
     let left, right, n_per_param = lambda.theta_left, lambda.theta_right, _K in
@@ -130,6 +131,7 @@ module GGN : Auxiliary with module P = P = struct
         let tmp = Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ] in
         Tensor.unsqueeze tmp ~dim:0)
       |> Tensor.concatenate ~dim:0
+      |> Maths.of_tensor
     in
     (* reset s_u_cache and set sampling state to 0 if learn again *)
     if switch_to_learn then s_u_cache := [];
@@ -153,46 +155,10 @@ let config =
   Optimizer.Config.SOFO.
     { base; learning_rate = Some 0.1; n_tangents = _K; damping = `none; aux = None }
 
-let rec loop ~t ~out ~state =
+let rec loop ~t ~out ~(state : O.state) =
+  let open Maths in
   Stdlib.Gc.major ();
   let x, y = data_minibatch batch_size in
-  (* extract aux learning flags. if switch to learn, switch to learning the ggn at the NEXT iteration *)
-  let aux_learn, aux_exploit, switch_to_learn =
-    match config.aux with
-    | None -> false, false, false
-    | Some { learn_steps; exploit_steps; _ } ->
-      let rem = t % (learn_steps + exploit_steps) in
-      let learn = rem < learn_steps in
-      learn, not learn, rem = learn_steps + exploit_steps - 1
-  in
-  let tangents , new_sampling_state =
-    match aux_exploit, aux_learn with
-    | true, _ ->
-      let lambda =
-        state.aux |> O.params |> A.A.map ~f:(fun x -> Maths.const (Prms.value x))
-      in
-      let _vs, new_sampling_state =
-        A.eigenvectors ~lambda ~switch_to_learn state.sampling_state config.n_tangents
-      in
-      _vs, new_sampling_state
-    | false, true, ->
-      let _vs = A.random_localised_vs () in
-      _vs, sampling_state, None
-    | false, false ->
-      let _vs, _ =
-        init_tangents
-          ~base:config.base
-          ~rank_one:config.rank_one
-          ~n_tangents:config.n_tangents
-          ~prev_seeds:state.prev_seeds
-          ~ortho:config.orthogonalize
-          theta
-      in
-      _vs, sampling_state
-
-      in
-      _vs, sampling_state
-  in
   let theta, tangents = O.prepare ~config state in
   let y_pred = Model.f ~theta x in
   let loss = Loss.mse ~output_dims:[ 1 ] (y - y_pred) in
