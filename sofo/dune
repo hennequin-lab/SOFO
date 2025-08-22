@@ -2,7 +2,7 @@
  (name sofo)
  (public_name sofo)
  (modules sofo convenience loss optimizer_typ optimizer wrapper_typ)
- (libraries stdio base forward-torch)
+ (libraries stdio base forward-torch owl)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))
 

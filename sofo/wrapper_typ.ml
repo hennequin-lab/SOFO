@@ -17,7 +17,7 @@ module type Auxiliary = sig
 
   (* draw localised tangents randomly. Do not need tangent parameters now since tangents for each layer distributed 
     upstream. used in the learning phase of learning-the-ggn idea. *)
-  val random_localised_vs : unit -> Tensor.t P.p
+  val random_localised_vs : unit -> const t P.p
 
   (* given aux parameters [lambda], whether to switch to learning, current sampling state and the number of tangents, 
     return eigenvectors of \hat{G} and new sampling state *)
@@ -26,7 +26,7 @@ module type Auxiliary = sig
     -> switch_to_learn:bool
     -> sampling_state
     -> int
-    -> Tensor.t P.p * sampling_state
+    -> const t P.p * sampling_state
 
   (* initialise aux parameters *)
   val init : unit -> A.param

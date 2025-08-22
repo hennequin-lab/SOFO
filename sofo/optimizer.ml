@@ -101,47 +101,31 @@ module Adam (P : Prms.T) = struct
     { state with theta = U.manual_replace ~theta:state.theta (f p) }
 end
 
-module SOFO (P : Prms.T) (A : Auxiliary) = struct
+module SOFO (P : Prms.T) (A : Auxiliary with module P = P) = struct
   module P = P
 
   type ('a, 'b) config = ('a, 'b) Config.SOFO.t
   type ('a, 'b, 'c) init_opts = P.param -> 'c
 
   (* adam optimizer for training aux parameters *)
-  module O = Adam (struct
-      (* module P = A.A *)
-      module P = A.A
-
-      (* given update method [update], tangent [vs] and v^TGv [true_sketch], [init] state, [args]
-  (* and aux parameters lambda, compute mse between v^TGv and v^T\hat{G}v  *)
-      let f ~update ~data:(vs, true_sketch) ~init ~args:() lambda =
-        let open Maths in
-        let g12v = A.g12v ~lambda (W.P.map vs ~f:const) in
-        let sketch =
-          W.P.fold
-            g12v
-            ~init:Maths.(f 0.)
-            ~f:(fun accu (gv, _) ->
-              let n_tangents = Convenience.first_dim (primal gv) in
-              let gv = reshape gv ~shape:[ n_tangents; -1 ] in
-              accu + einsum [ gv, "ki"; gv, "li" ] "kl")
-        in
-        let normaliser = mean (sqr (const true_sketch)) in
-        let loss = mean (sqr (sketch - const true_sketch)) / normaliser in
-        match update with
-        | `loss_only u -> u init (Some loss)
-        | `loss_and_ggn _ -> assert false *)
-    end)
+  module O = Adam (A.A)
 
   type state =
     { theta : P.param
     ; aux : O.state
+    ; t : int
+    ; sampling_state : A.sampling_state
     }
 
   type info = const P.t sofo_info
 
   let params state = state.theta
-  let init theta = { theta }
+
+  let init theta =
+    let lambda = A.init () in
+    let aux = O.init lambda in
+    let sampling_state = A.init_sampling_state () in
+    { t = 0; theta; aux; sampling_state }
 
   let clone_state (state : state) : state =
     let open Prms in
@@ -153,7 +137,11 @@ module SOFO (P : Prms.T) (A : Auxiliary) = struct
         | Bounded { v = x; lb; ub } ->
           Bounded { v = Prms.enforce_bounds ?lb ?ub Tensor.(x + f 0.); lb; ub })
     in
-    { theta = theta_cloned }
+    { theta = theta_cloned
+    ; t = state.t
+    ; aux = state.aux
+    ; sampling_state = state.sampling_state
+    }
 
   (* orthonormalize tangents *)
   let orthonormalise vs =
@@ -214,24 +202,92 @@ module SOFO (P : Prms.T) (A : Auxiliary) = struct
 
   module U = Update_params (P)
 
+  (* given update method [update], tangent [vs] and v^TGv [true_sketch], [init] state, [args]
+  and aux parameters lambda, compute mse between v^TGv and v^T\hat{G}v  *)
+  let adam_f ~data:(vs, true_sketch) lambda =
+    let open Maths in
+    let g12v = A.g12v ~lambda (A.P.map vs ~f:const) in
+    let sketch =
+      P.fold
+        g12v
+        ~init:Maths.(any (f 0.))
+        ~f:(fun accu (gv, _) ->
+          let n_tangents = List.hd_exn (shape gv) in
+          let gv = reshape gv ~shape:[ n_tangents; -1 ] in
+          accu + einsum [ gv, "ki"; gv, "li" ] "kl")
+    in
+    let normaliser = mean (sqr (const true_sketch)) in
+    let loss = mean (sqr (sketch - const true_sketch)) / normaliser in
+    loss
+
+  let adam_true_g
+        ~(f :
+           data:[< `const | `dual ] t P.p * [< `const | `dual ] t -> const A.A.t -> any t)
+        ~data
+        ~state
+    =
+    let theta = O.params state in
+    let theta_ = O.P.value theta in
+    let theta_dual =
+      O.P.map theta_ ~f:(fun x ->
+        let x =
+          x
+          |> Maths.to_tensor
+          |> Tensor.copy
+          |> Tensor.to_device ~device:(Tensor.device (Maths.to_tensor x))
+        in
+        let x = Tensor.set_requires_grad x ~r:true in
+        Tensor.zero_grad x;
+        Maths.of_tensor x)
+    in
+    let loss, true_g =
+      let loss = f ~data theta_dual in
+      let loss = Maths.to_tensor loss in
+      Tensor.backward loss;
+      ( Tensor.to_float0_exn loss
+      , O.P.map2 theta (O.P.to_tensor theta_dual) ~f:(fun tagged p ->
+          match tagged with
+          | Prms.Pinned _ -> Maths.(f 0.)
+          | _ -> Maths.of_tensor (Tensor.grad p)) )
+    in
+    loss, true_g
+
   let step ~(config : ('a, 'b) config) ~info state =
+    let aux_learn, aux_exploit, switch_to_learn =
+      match config.aux with
+      | None -> false, false, false
+      | Some { learn_steps; exploit_steps; _ } ->
+        let rem = state.t % Int.(learn_steps + exploit_steps) in
+        let learn = rem < learn_steps in
+        learn, not learn, rem = Int.(learn_steps + exploit_steps - 1)
+    in
+    let tangents, new_sampling_state =
+      match aux_exploit, aux_learn with
+      | true, _ ->
+        let lambda =
+          state.aux |> O.params |> O.P.map ~f:(fun x -> Maths.const (Prms.value x))
+        in
+        A.eigenvectors ~lambda ~switch_to_learn state.sampling_state config.n_tangents
+      | false, true ->
+        let _vs = A.random_localised_vs () in
+        _vs, state.sampling_state
+      | false, false -> info.tangents, state.sampling_state
+    in
     match config.learning_rate with
     | None -> state
     | Some eta ->
       Stdlib.Gc.major ();
       let loss_t = tangent_exn info.loss in
-      let delta =
-        sofo_update ~damping:config.damping ~tangents:info.tangents ~ggn:info.ggn loss_t
-      in
+      let delta = sofo_update ~damping:config.damping ~tangents ~ggn:info.ggn loss_t in
       (* update the auxiliary state by running a few iterations of Adam if using random vs (odd trial) *)
-      (* TODO: rewrite this *)
       let update_aux (aux_config : ('a, 'b) Config.SOFO.aux) =
-        let data = _vs, final_ggn in
         let rec aux_loop ~iter ~state =
-          let loss, new_state = O.step ~config:aux_config.config ~state ~data () in
+          let data = tangents, info.ggn in
+          let loss, adam_true_g = adam_true_g ~f:adam_f ~data ~state in
           Owl.Mat.(save_txt ~append:true ~out:aux_config.file (of_array [| loss |] 1 1));
+          let new_state = O.step ~config:aux_config.config ~info:adam_true_g state in
           if iter < aux_config.steps
-          then aux_loop ~iter:(iter + 1) ~state:new_state
+          then aux_loop ~iter:Int.(iter + 1) ~state:new_state
           else new_state
         in
         aux_loop ~iter:1 ~state:state.aux
@@ -240,11 +296,19 @@ module SOFO (P : Prms.T) (A : Auxiliary) = struct
         if aux_learn then config.aux |> Option.value_exn |> update_aux else state.aux
       in
       let new_theta = U.update ~learning_rate:eta ~theta:(params state) delta in
-      { theta = new_theta; aux = new_aux }
+      { theta = new_theta
+      ; aux = new_aux
+      ; t = Int.(state.t + 1)
+      ; sampling_state = new_sampling_state
+      }
 
   let manual_state_update state f =
     let p = P.value state.theta in
-    { theta = U.manual_replace ~theta:state.theta (f p) }
+    { theta = U.manual_replace ~theta:state.theta (f p)
+    ; aux = state.aux
+    ; t = Int.(state.t + 1)
+    ; sampling_state = state.sampling_state
+    }
 end
 
 module SGDm (P : Prms.T) = struct

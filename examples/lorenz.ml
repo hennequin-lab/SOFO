@@ -152,7 +152,12 @@ module O = Optimizer.SOFO (RNN.P)
 
 let config =
   Optimizer.Config.SOFO.
-    { base; learning_rate = Some 1.; n_tangents = 128; damping = `relative_from_top 1e-5 ; aux=None}
+    { base
+    ; learning_rate = Some 1.
+    ; n_tangents = 128
+    ; damping = `relative_from_top 1e-5
+    ; aux = None
+    }
 
 let rec loop ~t ~out ~state running_avg =
   Stdlib.Gc.major ();
