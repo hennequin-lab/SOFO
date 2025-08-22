@@ -44,28 +44,6 @@ module Config = struct
       }
   end
 
-  module SOFO = struct
-    type ('a, 'b) t =
-      { base : ('a, 'b) Base.t
-      ; learning_rate : float option
-      ; n_tangents : int
-      ; damping : [ `none | `relative_from_top of float | `relative_from_bottom of float ]
-      }
-
-    let default =
-      { base = Base.default; learning_rate = None; n_tangents = 10; damping = `none }
-  end
-
-  module SGDm = struct
-    type ('a, 'b) t =
-      { base : ('a, 'b) Base.t
-      ; learning_rate : float option
-      ; momentum : float
-      }
-
-    let default = { base = Base.default; learning_rate = None; momentum = 0.9 }
-  end
-
   module Adam = struct
     type ('a, 'b) t =
       { base : ('a, 'b) Base.t
@@ -84,5 +62,53 @@ module Config = struct
       ; eps = 1e-8
       ; weight_decay = None
       }
+  end
+
+  module SOFO = struct
+    (* alternate between learning the ggn for learn_steps then exploiting the learned ggn
+       and sample tangents from it for exploit_steps. *)
+    type ('a, 'b) aux =
+      { steps : int
+      ; file : string
+      ; config : ('a, 'b) Adam.t
+      ; learn_steps : int
+      ; exploit_steps : int
+      ; local : bool (* if use localised tangents during learning phase *)
+      }
+
+    type ('a, 'b) t =
+      { base : ('a, 'b) Base.t
+      ; learning_rate : float option
+      ; n_tangents : int
+      ; damping : [ `none | `relative_from_top of float | `relative_from_bottom of float ]
+      ; aux : ('a, 'b) aux option
+      }
+
+    let default_aux file =
+      { steps = 10
+      ; file
+      ; config = Adam.default
+      ; learn_steps = 1
+      ; exploit_steps = 1
+      ; local = true
+      }
+
+    let default =
+      { base = Base.default
+      ; learning_rate = None
+      ; n_tangents = 10
+      ; damping = `none
+      ; aux = None
+      }
+  end
+
+  module SGDm = struct
+    type ('a, 'b) t =
+      { base : ('a, 'b) Base.t
+      ; learning_rate : float option
+      ; momentum : float
+      }
+
+    let default = { base = Base.default; learning_rate = None; momentum = 0.9 }
   end
 end
