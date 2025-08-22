@@ -152,8 +152,20 @@ end
 module O = Optimizer.SOFO (Model.P) (GGN)
 
 let config =
+  let aux =
+    Optimizer.Config.SOFO.
+      { (default_aux (in_dir "aux")) with
+        config =
+          Optimizer.Config.Adam.
+            { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
+      ; steps = 5
+      ; learn_steps = 1
+      ; exploit_steps = 1
+      ; local = true
+      }
+  in
   Optimizer.Config.SOFO.
-    { base; learning_rate = Some 0.1; n_tangents = _K; damping = `none; aux = None }
+    { base; learning_rate = Some 0.1; n_tangents = _K; damping = `none; aux = Some aux }
 
 let rec loop ~t ~out ~(state : O.state) =
   let open Maths in
@@ -174,5 +186,6 @@ let rec loop ~t ~out ~(state : O.state) =
 (* Start the loop. *)
 let _ =
   let out = in_dir "loss" in
-  Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
+  Bos.Cmd.(v "rm" % "-f" % in_dir "loss") |> Bos.OS.Cmd.run |> ignore;
+  Bos.Cmd.(v "rm" % "-f" % in_dir "aux") |> Bos.OS.Cmd.run |> ignore;
   loop ~t:0 ~out ~state:(O.init (Model.init ~d_in ~d_out))
