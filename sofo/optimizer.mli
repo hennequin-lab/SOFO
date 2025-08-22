@@ -4,8 +4,10 @@ open Maths
 (** Four types of optimizers supported in this library. *)
 include module type of Optimizer_typ
 
+include module type of Wrapper_typ
+
 (** SOFO optimizer *)
-module SOFO (P : Prms.T) : sig
+module SOFO (P : Prms.T) (A : Auxiliary with module P=P) : sig
   include
     T
     with module P = P
