@@ -1,5 +1,5 @@
 (executables
- (names linear_regression lorenz)
+ (names linear_regression lorenz delayed_addition)
  (libraries cmdargs domainslib bos sofo owl owl-ode)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch ppx_jane)))

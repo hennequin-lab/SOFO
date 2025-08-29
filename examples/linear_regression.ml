@@ -1,4 +1,5 @@
 (* Example a simple linear regression task to learn W where y = W x. *)
+open Utils
 open Base
 open Torch
 open Forward_torch
@@ -89,21 +90,7 @@ module GGN : Auxiliary with module P = P = struct
 
   let eigenvectors ~(lambda : _ Maths.some A.t) ~switch_to_learn t (_K : int) =
     let left, right, n_per_param = lambda.theta_left, lambda.theta_right, _K in
-    let u_left, s_left, _ =
-      Tensor.svd ~some:true ~compute_uv:true Maths.(to_tensor left)
-    in
-    let u_right, s_right, _ =
-      Tensor.svd ~some:true ~compute_uv:true Maths.(to_tensor right)
-    in
-    let s_left = Tensor.to_float1_exn s_left |> Array.to_list in
-    let s_right = Tensor.to_float1_exn s_right |> Array.to_list in
-    let s_all =
-      List.mapi s_left ~f:(fun il sl ->
-        List.mapi s_right ~f:(fun ir sr -> il, ir, Float.(sl * sr)))
-      |> List.concat
-      |> List.sort ~compare:(fun (_, _, a) (_, _, b) -> Float.compare b a)
-      |> Array.of_list
-    in
+    let s_all, u_left, u_right = get_svals_u_left_right left right in
     (* randomly select the indices *)
     let n_params =
       Int.((Maths.shape left |> List.hd_exn) * (Maths.shape right |> List.hd_exn))
@@ -111,26 +98,7 @@ module GGN : Auxiliary with module P = P = struct
     let selection =
       List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
     in
-    let vs =
-      List.map selection ~f:(fun idx ->
-        let il, ir, _ = s_all.(idx) in
-        let u_left =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_left ~dim:1 ~start:(Some il) ~end_:(Some Int.(il + 1)) ~step:1))
-        in
-        let u_right =
-          Tensor.(
-            squeeze_dim
-              ~dim:1
-              (slice u_right ~dim:1 ~start:(Some ir) ~end_:(Some Int.(ir + 1)) ~step:1))
-        in
-        let tmp = Tensor.einsum ~path:None ~equation:"i,j->ij" [ u_left; u_right ] in
-        Tensor.unsqueeze tmp ~dim:0)
-      |> Tensor.concatenate ~dim:0
-      |> Maths.of_tensor
-    in
+    let vs = get_local_vs ~selection ~s_all ~u_left ~u_right |> Maths.of_tensor in
     (* reset s_u_cache and set sampling state to 0 if learn again *)
     if switch_to_learn then s_u_cache := [];
     let new_sampling_state = if switch_to_learn then 0 else Int.(t + 1) in
@@ -158,7 +126,6 @@ let config =
       ; steps = 5
       ; learn_steps = 1
       ; exploit_steps = 1
-      ; local = true
       }
   in
   Optimizer.Config.SOFO.

@@ -74,7 +74,6 @@ module Config = struct
       ; config : ('a, 'b) Adam.t
       ; learn_steps : int
       ; exploit_steps : int
-      ; local : bool (* if use localised tangents during learning phase *)
       }
 
     type ('a, 'b) t =
@@ -91,7 +90,6 @@ module Config = struct
       ; config = Adam.default
       ; learn_steps = 1
       ; exploit_steps = 1
-      ; local = true
       }
 
     let default =
