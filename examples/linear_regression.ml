@@ -75,8 +75,6 @@ module GGN : Auxiliary with module P = P = struct
   (* module A = AA.Make (Prms.Single) *)
   module A = Make (Prms.Single)
 
-  type sampling_state = int
-
   let init_sampling_state () = 0
 
   (* cache storage with a ref to memoize computed results *)
@@ -148,7 +146,6 @@ module GGN : Auxiliary with module P = P = struct
     { theta_left = init_eye d_in; theta_right = init_eye d_out }
 end
 
-(* TODO: need to write the aux loop inside optimisation. *)
 module O = Optimizer.SOFO (Model.P) (GGN)
 
 let config =
@@ -171,11 +168,16 @@ let rec loop ~t ~out ~(state : O.state) =
   let open Maths in
   Stdlib.Gc.major ();
   let x, y = data_minibatch batch_size in
-  let theta, tangents = O.prepare ~config state in
+  let theta, tangents, new_sampling_state = O.prepare ~config state in
   let y_pred = Model.f ~theta x in
   let loss = Loss.mse ~output_dims:[ 1 ] (y - y_pred) in
   let ggn = Loss.mse_ggn ~output_dims:[ 1 ] (const y) ~vtgt:(tangent_exn y_pred) in
-  let new_state = O.step ~config ~info:{ loss; ggn; tangents } state in
+  let new_state =
+    O.step
+      ~config
+      ~info:{ loss; ggn; tangents; sampling_state = new_sampling_state }
+      state
+  in
   if t % 100 = 0
   then (
     let loss = to_float_exn (const loss) in

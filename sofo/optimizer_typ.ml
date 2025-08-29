@@ -25,6 +25,7 @@ type 'v sofo_info =
   { loss : Maths.any Maths.t
   ; ggn : Maths.const Maths.t
   ; tangents : 'v
+  ; sampling_state : int
   }
 
 module Config = struct

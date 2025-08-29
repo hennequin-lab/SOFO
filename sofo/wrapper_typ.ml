@@ -7,10 +7,8 @@ module type Auxiliary = sig
   module P : Prms.T
   module A : Prms.T
 
-  type sampling_state
-
   (* initialise sampling state of tangents *)
-  val init_sampling_state : unit -> sampling_state
+  val init_sampling_state : unit -> int
 
   (* given aux parameters [lambda] and tangents v, compute \hat{G}^{1/2}v where \hat{G} is the approximated ggn *)
   val g12v : lambda:([< `const | `dual ] as 'a) A.t -> 'a P.t -> any P.t
@@ -24,9 +22,9 @@ module type Auxiliary = sig
   val eigenvectors
     :  lambda:_ some A.t
     -> switch_to_learn:bool
-    -> sampling_state
     -> int
-    -> const t P.p * sampling_state
+    -> int
+    -> const t P.p * int
 
   (* initialise aux parameters *)
   val init : unit -> A.param
