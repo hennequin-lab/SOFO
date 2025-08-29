@@ -24,7 +24,7 @@ module SOFO (P : Prms.T) (A : Auxiliary with module P = P) : sig
       (* carry on with the new optimizer state *)
       ]}
      *)
-  val prepare : config:(_, _) config -> state -> dual P.t * const P.t
+  val prepare : config:(_, _) config -> state -> dual P.t * const P.t * int
 end
 
 (** Stochastic gradient descent *)

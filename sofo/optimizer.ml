@@ -114,7 +114,7 @@ module SOFO (P : Prms.T) (A : Auxiliary with module P = P) = struct
     { theta : P.param
     ; aux : O.state
     ; t : int
-    ; sampling_state : A.sampling_state
+    ; sampling_state : int
     }
 
   type info = const P.t sofo_info
@@ -170,8 +170,30 @@ module SOFO (P : Prms.T) (A : Auxiliary with module P = P) = struct
 
   let prepare ~(config : (_, _) config) state =
     let theta = params state in
-    let vs = random_tangents ~n_tangents:config.n_tangents theta in
-    P.dual ~tangent:vs (P.value theta), vs
+    let aux_learn, aux_exploit, switch_to_learn =
+      match config.aux with
+      | None -> false, false, false
+      | Some { learn_steps; exploit_steps; _ } ->
+        let rem = state.t % Int.(learn_steps + exploit_steps) in
+        let learn = rem < learn_steps in
+        learn, not learn, rem = Int.(learn_steps + exploit_steps - 1)
+    in
+    let tangents, new_sampling_state =
+      match aux_exploit, aux_learn with
+      | true, _ ->
+        let lambda =
+          state.aux |> O.params |> O.P.map ~f:(fun x -> Maths.const (Prms.value x))
+        in
+        A.eigenvectors ~lambda ~switch_to_learn state.sampling_state config.n_tangents
+      | false, true ->
+        let _vs = A.random_localised_vs () in
+        _vs, state.sampling_state
+      | false, false ->
+        let _vs = random_tangents ~n_tangents:config.n_tangents theta in
+        _vs, state.sampling_state
+    in
+    let tangents = orthonormalise tangents in
+    P.dual ~tangent:tangents (P.value theta), tangents, new_sampling_state
 
   (* fold vs over sets of v_i s, multiply with associated weights. *)
   let weighted_vs_sum ~vs weights =
@@ -253,26 +275,14 @@ module SOFO (P : Prms.T) (A : Auxiliary with module P = P) = struct
     loss, true_g
 
   let step ~(config : ('a, 'b) config) ~info state =
-    let aux_learn, aux_exploit, switch_to_learn =
+    let aux_learn =
       match config.aux with
-      | None -> false, false, false
+      | None -> false
       | Some { learn_steps; exploit_steps; _ } ->
         let rem = state.t % Int.(learn_steps + exploit_steps) in
-        let learn = rem < learn_steps in
-        learn, not learn, rem = Int.(learn_steps + exploit_steps - 1)
+        rem < learn_steps
     in
-    let tangents, new_sampling_state =
-      match aux_exploit, aux_learn with
-      | true, _ ->
-        let lambda =
-          state.aux |> O.params |> O.P.map ~f:(fun x -> Maths.const (Prms.value x))
-        in
-        A.eigenvectors ~lambda ~switch_to_learn state.sampling_state config.n_tangents
-      | false, true ->
-        let _vs = A.random_localised_vs () in
-        _vs, state.sampling_state
-      | false, false -> info.tangents, state.sampling_state
-    in
+    let tangents = info.tangents in
     match config.learning_rate with
     | None -> state
     | Some eta ->
@@ -299,7 +309,7 @@ module SOFO (P : Prms.T) (A : Auxiliary with module P = P) = struct
       { theta = new_theta
       ; aux = new_aux
       ; t = Int.(state.t + 1)
-      ; sampling_state = new_sampling_state
+      ; sampling_state = info.sampling_state
       }
 
   let manual_state_update state f =

@@ -450,7 +450,7 @@ module Ops = struct
       let values =
         let tmp = Tensor.(square x + f 4.) in
         let tmp2 = Tensor.(f 1. / sqrt tmp) in
-        Tensor.(div_scalar ((tmp2 * x) + f 1.) (Scalar.f 2.))
+        Tensor.(((tmp2 * x) + f 1.) / f 2.)
       in
       Tensor.mul dx values
     in
