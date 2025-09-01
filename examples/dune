@@ -1,5 +1,11 @@
 (executables
- (names linear_regression lorenz delayed_addition)
+ (names
+  bit_flipflop_small_net
+  linear_regression
+  lorenz
+  delayed_addition
+  kalman_rnn
+  random_class)
  (libraries cmdargs domainslib bos sofo owl owl-ode)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch ppx_jane)))
