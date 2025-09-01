@@ -1,4 +1,4 @@
-(** Learning a delayed addition task to compare SOFO with adam. *)
+(** Learning a b-bit flip-flop task as in (Sussillo, 2013) to compare SOFO with FORCE. *)
 open Utils
 
 open Base
@@ -9,159 +9,184 @@ open Sofo
 module Arr = Dense.Ndarray.S
 module Mat = Dense.Matrix.S
 
-let batch_size = 256
-let max_iter = 20000
+let batch_size = 32
 
 let _ =
   Random.init 1999;
-  (* Random.self_init (); *)
-  Owl_stats_prng.init (Random.int 100000);
-  Torch_core.Wrapper.manual_seed (Random.int 100000)
+  Owl_stats_prng.init 2000;
+  Torch_core.Wrapper.manual_seed 2000
 
 let in_dir = Cmdargs.in_dir "-d"
 let base = Optimizer.Config.Base.default
+let max_iter = 100000
 
 module Settings = struct
-  (* length of data *)
-  let n_steps = 1000 (* 20 to 600 *)
-
-  (* first signal upper bound *)
-  let t1_bound = 10
-  let t2_bound = Int.(n_steps / 2)
+  (* can we still train with more flips? *)
+  let b = 10
+  let n_steps = 200
+  let pulse_prob = 0.02
+  let pulse_duration = 2
+  let pulse_refr = 10
 end
 
-(* net parameters *)
-let n = 128 (* number of neurons *)
-let alpha = 0.25
+let n = 128
 
 module RNN_P = struct
   type 'a p =
-    { c : 'a
+    { j : 'a
+    ; fb : Maths.const Prms.Single.t
     ; b : 'a
-    ; o : 'a
+    ; w : 'a
     }
   [@@deriving prms]
 end
 
 module P = RNN_P.Make (Prms.Single)
 
+(* net parameters *)
+let g = 0.5
+
+let fb =
+  Mat.(uniform ~a:(-1.) ~b:1. Settings.b n)
+  |> Tensor.of_bigarray ~device:base.device
+  |> Maths.of_tensor
+
 (* neural network *)
 module RNN = struct
   module P = P
 
-  let phi x = Maths.relu x
+  let tau = 10.
 
-  (* input is the (number, signal) pair and z is the internal state *)
+  let init () : P.param =
+    let w =
+      Mat.(gaussian n Settings.b /$ Float.(sqrt (of_int n)))
+      |> Tensor.of_bigarray ~device:base.device
+      |> Maths.of_tensor
+      |> Prms.Single.free
+    in
+    let j =
+      Mat.(gaussian Int.(n + 1) n *$ Float.(g / sqrt (of_int n)))
+      |> Tensor.of_bigarray ~device:base.device
+      |> Maths.of_tensor
+      |> Prms.Single.free
+    in
+    let fb = Prms.Single.const fb in
+    let b =
+      Mat.(uniform ~a:(-1.) ~b:1. Settings.b n)
+      |> Tensor.of_bigarray ~device:base.device
+      |> Maths.of_tensor
+      |> Prms.Single.free
+    in
+    { j; fb; b; w }
+
+  let phi = Maths.relu
+
   let forward ~(theta : _ Maths.some P.t) ~input z =
     let bs = Tensor.shape input |> List.hd_exn in
-    let input =
-      Maths.C.concat
-        [ Maths.of_tensor input
-        ; Maths.of_tensor (Tensor.ones ~device:base.device ~kind:base.kind [ bs; 1 ])
+    let input = Maths.(of_tensor input *@ theta.b) in
+    let phi_z = phi z in
+    let prev_outputs = Maths.(phi_z *@ theta.w) in
+    let feedback = Maths.(prev_outputs *@ theta.fb) in
+    let phi_z =
+      Maths.concat
+        [ phi_z
+        ; Maths.any
+            (Maths.of_tensor (Tensor.ones ~device:base.device ~kind:base.kind [ bs; 1 ]))
         ]
         ~dim:1
     in
-    match z with
-    | Some z ->
-      let leak = Maths.(Float.(1. - alpha) $* z) in
-      Maths.(leak + (alpha $* phi ((z *@ theta.c) + (input *@ theta.b))))
-    | None ->
-      (* this is the equivalent of initialising at z = 0 *)
-      Maths.(phi (input *@ theta.b))
+    let dz = Maths.((neg z + (phi_z *@ theta.j) + feedback + input) / f tau) in
+    Maths.(z + dz)
 
-  let prediction ~(theta : _ Maths.some P.t) z = Maths.(z *@ theta.o)
-
-  let init : P.param =
-    let c =
-      Sofo.gaussian_tensor_normed ~kind:base.kind ~device:base.device ~sigma:1.0 [ n; n ]
-      |> Maths.of_tensor
-      |> Prms.Single.free
+  let f ~data:(inputs, targets) (theta : _ Maths.some P.t) =
+    let[@warning "-8"] [ n_steps; bs; _ ] = Tensor.shape inputs in
+    let z0 =
+      Tensor.(f 0.1 * randn ~device:base.device [ bs; n ]) |> Maths.of_tensor |> Maths.any
     in
-    let b =
-      Sofo.gaussian_tensor_normed ~kind:base.kind ~device:base.device ~sigma:1.0 [ 3; n ]
-      |> Maths.of_tensor
-      |> Prms.Single.free
-    in
-    (* initialise to repeat observation *)
-    let o =
-      Sofo.gaussian_tensor_normed ~kind:base.kind ~device:base.device ~sigma:1.0 [ n; 2 ]
-      |> Maths.of_tensor
-      |> Prms.Single.free
-    in
-    { c; b; o }
-
-  (* here data is a list of (x_t, optional labels). labels is x_t. *)
-  let f ~data theta =
+    let scaling = Float.(1. / of_int Settings.n_steps) in
     let result, _ =
-      let input_all, labels_all = data in
-      let top_2, _ = List.split_n (Tensor.shape input_all) 2 in
-      let time_list = List.range 0 Settings.n_steps in
-      List.fold time_list ~init:(None, None) ~f:(fun (accu, z) t ->
-        if t % 1 = 0 then Stdlib.Gc.major ();
+      List.fold (List.range 0 n_steps) ~init:(None, z0) ~f:(fun (accu, z) t ->
+        Stdlib.Gc.major ();
         let input =
-          let tmp =
-            Tensor.slice ~dim:2 ~start:(Some t) ~end_:(Some (t + 1)) ~step:1 input_all
-          in
-          Tensor.reshape tmp ~shape:top_2
+          Tensor.slice inputs ~step:1 ~dim:0 ~start:(Some t) ~end_:(Some (t + 1))
+          |> Tensor.squeeze
         in
-        (* loss only calculated at the final timestep *)
-        let labels = if t = Settings.n_steps - 1 then Some labels_all else None in
+        let target =
+          Tensor.slice targets ~step:1 ~dim:0 ~start:(Some t) ~end_:(Some (t + 1))
+          |> Tensor.squeeze
+        in
         let z = forward ~theta ~input z in
+        let pred = Maths.(phi z *@ theta.w) in
         let accu =
-          match labels with
-          | None -> accu
-          | Some labels ->
-            let pred = prediction ~theta z in
-            let delta_ell = Loss.mse ~output_dims:[ 1 ] Maths.(of_tensor labels - pred) in
-            let delta_ggn =
-              Loss.mse_ggn
-                ~output_dims:[ 1 ]
-                (Maths.const pred)
-                ~vtgt:(Maths.tangent_exn pred)
-            in
-            (match accu with
-             | None -> Some (delta_ell, delta_ggn)
-             | Some accu ->
-               let ell_accu, ggn_accu = accu in
-               Some (Maths.(ell_accu + delta_ell), Maths.C.(ggn_accu + delta_ggn)))
+          let delta_ell =
+            Maths.(scaling $* Loss.mse ~output_dims:[ 1 ] Maths.(of_tensor target - pred))
+          in
+          let delta_ggn =
+            Maths.C.(
+              scaling
+              $* Loss.mse_ggn
+                   ~output_dims:[ 1 ]
+                   (Maths.const pred)
+                   ~vtgt:(Maths.tangent_exn pred))
+          in
+          match accu with
+          | None -> Some (delta_ell, delta_ggn)
+          | Some accu ->
+            let ell_accu, ggn_accu = accu in
+            Some (Maths.(ell_accu + delta_ell), Maths.C.(ggn_accu + delta_ggn))
         in
-        accu, Some z)
+        accu, z)
     in
     Option.value_exn result
+
+  let simulate ~data:(inputs, _) (theta : _ Maths.some P.t) =
+    let[@warning "-8"] [ n_steps; bs; n_bits ] = Tensor.shape inputs in
+    let z0 =
+      Tensor.(f 0.1 * randn ~device:base.device [ bs; n ]) |> Maths.of_tensor |> Maths.any
+    in
+    let result, _ =
+      List.fold (List.range 0 n_steps) ~init:([], z0) ~f:(fun (accu, z) t ->
+        Stdlib.Gc.major ();
+        let input =
+          Tensor.slice inputs ~step:1 ~dim:0 ~start:(Some t) ~end_:(Some (t + 1))
+          |> Tensor.squeeze
+        in
+        let z = forward ~theta ~input z in
+        let pred = Maths.(phi z *@ theta.w) |> Maths.to_tensor in
+        let accu = pred :: accu in
+        accu, z)
+    in
+    List.rev_map result ~f:(fun x -> Tensor.reshape x ~shape:[ 1; bs; n_bits ])
+    |> Tensor.concatenate ~dim:0
+    |> Tensor.to_bigarray ~kind:base.ba_kind
 end
 
 (* -----------------------------------------
-   -- Generate addition data    ------
+   -- Generate Flipflop data            ------
    ----------------------------------------- *)
 
-let data_shape = [| 1; 2; Settings.n_steps |]
+open Bit_flipflop_common
 
-let sample () =
-  let number_trace = Mat.uniform 1 Settings.n_steps in
-  let signal_trace = Mat.zeros 1 Settings.n_steps in
-  (* set indicator *)
-  let t1 = Random.int_incl 0 (Settings.t1_bound - 1) in
-  let t2 = Random.int_incl (t1 + 1) Settings.t2_bound in
-  Mat.set signal_trace 0 t1 1.;
-  Mat.set signal_trace 0 t2 1.;
-  let target = Mat.(get number_trace 0 t1) +. Mat.(get number_trace 0 t2) in
-  let target_mat = Mat.of_array [| target |] 1 1 in
-  let input_mat = Mat.concat_horizontal number_trace signal_trace in
-  let input_array = Arr.reshape input_mat data_shape in
-  input_array, target_mat
+let sample_batch_train =
+  sample_batch
+    ~pulse_prob:Settings.pulse_prob
+    ~pulse_duration:Settings.pulse_duration
+    ~pulse_refr:Settings.pulse_refr
+    ~n_steps:Settings.n_steps
+    ~b:Settings.b
+    ~device:base.device
 
-let sample_data batch_size =
-  let data_minibatch = Array.init batch_size ~f:(fun _ -> sample ()) in
-  let input_array = Array.map data_minibatch ~f:fst in
-  let target_array = Array.map data_minibatch ~f:snd in
-  let input_tensor = Arr.concatenate ~axis:0 input_array in
-  let target_mat = Mat.concatenate ~axis:0 target_array in
-  let to_device = Tensor.of_bigarray ~device:base.device in
-  to_device input_tensor, to_device target_mat
-
-(* -----------------------------------------
-   -- Optimization with SOFO    ------
-   ----------------------------------------- *)
+let sim_traj theta_prev =
+  let data = sample_batch_train batch_size in
+  let network = RNN.simulate ~data theta_prev in
+  let first_trial x = x |> Arr.get_slice [ []; [ 0 ] ] |> Arr.squeeze in
+  let targets = snd data |> Tensor.to_bigarray ~kind:base.ba_kind in
+  let inputs = fst data |> Tensor.to_bigarray ~kind:base.ba_kind in
+  Mat.save_txt (first_trial network) ~out:(in_dir "network");
+  Mat.save_txt (first_trial targets) ~out:(in_dir "targets");
+  Mat.save_txt (first_trial inputs) ~out:(in_dir "inputs");
+  let err = Mat.(mean' (sqr (network - targets))) in
+  Mat.(save_txt ~append:true ~out:(in_dir "true_err") (create 1 1 err))
 
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
@@ -170,35 +195,35 @@ let _K = 128
 
 module RNN_Spec = struct
   type param_name =
-    | C
+    | J
     | B
-    | O
+    | W
   [@@deriving compare, sexp]
 
-  let all = [ C; B; O ]
+  let all = [ J; B; W ]
 
   let shape = function
-    | C -> [ n; n ]
-    | B -> [ 3; n ]
-    | O -> [ n; 2 ]
+    | J -> [ Int.(n + 1); n ]
+    | B -> [ Settings.b; n ]
+    | W -> [ n; Settings.b ]
 
   let n_params = function
-    | C -> Int.(_K - 4)
-    | B -> 2
-    | O -> 2
+    | J -> 50
+    | B -> 50
+    | W -> Int.(_K - 100)
 
-  let n_params_list = [ Int.(_K - 4); 2; 2 ]
+  let n_params_list = [ 50; 50; Int.(_K - 100) ]
   let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
 end
 
 module RNN_Aux = struct
   type 'a p =
-    { c_left : 'a
-    ; c_right : 'a
+    { j_left : 'a
+    ; j_right : 'a
     ; b_left : 'a
     ; b_right : 'a
-    ; o_left : 'a
-    ; o_right : 'a
+    ; w_left : 'a
+    ; w_right : 'a
     }
   [@@deriving prms]
 end
@@ -225,30 +250,32 @@ module GGN : Auxiliary with module P = P = struct
     let n_params_prefix_suffix_sums = prefix_suffix_sums RNN_Spec.n_params_list in
     let param_idx =
       match param_name with
-      | RNN_Spec.C -> 0
+      | RNN_Spec.J -> 0
       | RNN_Spec.B -> 1
-      | RNN_Spec.O -> 2
+      | RNN_Spec.W -> 2
     in
     List.nth_exn n_params_prefix_suffix_sums param_idx
 
   let g12v ~(lambda : ([< `const | `dual ] as 'a) A.t) (v : 'a P.t) : Maths.any P.t =
     let open Maths in
     let tmp_einsum left right w = einsum [ left, "in"; w, "aij"; right, "jm" ] "anm" in
-    let c = tmp_einsum lambda.c_left lambda.c_right v.c in
+    let j = tmp_einsum lambda.j_left lambda.j_right v.j in
     let b = tmp_einsum lambda.b_left lambda.b_right v.b in
-    let o = tmp_einsum lambda.o_left lambda.o_right v.o in
-    { c; b; o }
+    let w = tmp_einsum lambda.w_left lambda.w_right v.w in
+    { j; b; w; fb }
 
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~(param_name : RNN_Spec.param_name) ~n_per_param v =
     let zero name =
       Tensor.zeros ~device:base.device ~kind:base.kind (n_per_param :: RNN_Spec.shape name)
     in
-    let params_tmp = RNN_P.{ c = zero C; b = zero B; o = zero O } in
+    let params_tmp = RNN_P.{ j = zero J; b = zero B; w = zero W; fb } in
     match param_name with
-    | C -> { params_tmp with c = v }
+    | J -> { params_tmp with j = v }
     | B -> { params_tmp with b = v }
-    | O -> { params_tmp with o = v }
+    | W -> { params_tmp with w = v }
+
+  (* set tangents = zero for other parameters but v for this parameter *)
 
   let random_localised_vs () =
     let random_localised_param_name param_name =
@@ -261,21 +288,19 @@ module GGN : Auxiliary with module P = P = struct
       Maths.of_tensor final
     in
     RNN_P.
-      { c = random_localised_param_name C
+      { j = random_localised_param_name J
       ; b = random_localised_param_name B
-      ; o = random_localised_param_name O
+      ; w = random_localised_param_name W
+      ; fb
       }
 
   (* compute sorted eigenvalues, u_left and u_right. *)
-  let eigenvectors_for_params
-        ~(lambda : ([< `const | `dual ] as 'a) A.t)
-        ~(param_name : RNN_Spec.param_name)
-    =
+  let eigenvectors_for_params ~(lambda : ([< `const | `dual ] as 'a) A.t) ~param_name =
     let left, right =
       match param_name with
-      | C -> lambda.c_left, lambda.c_right
-      | B -> lambda.b_left, lambda.b_right
-      | O -> lambda.o_left, lambda.o_right
+      | RNN_Spec.J -> lambda.j_left, lambda.j_right
+      | RNN_Spec.B -> lambda.b_left, lambda.b_right
+      | RNN_Spec.W -> lambda.w_left, lambda.w_right
     in
     get_svals_u_left_right left right
 
@@ -329,14 +354,18 @@ module GGN : Auxiliary with module P = P = struct
       Maths.(0.1 $* eye ~device:base.device ~kind:base.kind size) |> Prms.Single.free
     in
     RNN_Aux.
-      { c_left = init_eye n
-      ; c_right = init_eye n
-      ; b_left = init_eye 3
+      { j_left = init_eye Int.(n + 1)
+      ; j_right = init_eye n
+      ; b_left = init_eye Settings.b
       ; b_right = init_eye n
-      ; o_left = init_eye n
-      ; o_right = init_eye 2
+      ; w_left = init_eye n
+      ; w_right = init_eye Settings.b
       }
 end
+
+(* -----------------------------------------
+   -- Optimization with SOFO    ------
+   ----------------------------------------- *)
 
 module O = Optimizer.SOFO (RNN.P) (GGN)
 
@@ -354,15 +383,15 @@ let config =
   in
   Optimizer.Config.SOFO.
     { base
-    ; learning_rate = Some 0.1
+    ; learning_rate = Some 1.
     ; n_tangents = _K
     ; damping = `relative_from_top 1e-5
     ; aux = Some aux
     }
 
-let rec loop ~t ~out ~state running_avg =
+let rec sofo_loop ~t ~out ~state running_avg =
   Stdlib.Gc.major ();
-  let data = sample_data batch_size in
+  let data = sample_batch_train batch_size in
   let theta, tangents, new_sampling_state = O.prepare ~config state in
   let loss, ggn = RNN.f ~data theta in
   let new_state =
@@ -380,14 +409,16 @@ let rec loop ~t ~out ~state running_avg =
     in
     if t % 10 = 0
     then (
+      (* simulate trajectory *)
+      sim_traj theta;
       print [%message (t : int) (loss_avg : float)];
       Owl.Mat.(save_txt ~append:true ~out (of_array [| Float.of_int t; loss_avg |] 1 2)));
     []
   in
-  if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state (loss :: running_avg)
+  if t < max_iter then sofo_loop ~t:Int.(t + 1) ~out ~state:new_state (loss :: running_avg)
 
 (* Start the sofo loop. *)
 let _ =
-  Bos.Cmd.(v "rm" % "-f" % in_dir "loss") |> Bos.OS.Cmd.run |> ignore;
-  Bos.Cmd.(v "rm" % "-f" % in_dir "aux") |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out:(in_dir "loss") ~state:(O.init RNN.init) []
+  let out = in_dir "loss" in
+  Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
+  sofo_loop ~t:0 ~out ~state:(O.init (RNN.init ())) []

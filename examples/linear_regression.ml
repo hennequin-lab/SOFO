@@ -58,23 +58,36 @@ let data_minibatch =
 let batch_size = 512
 let max_iter = 10_000
 let _K = 10
+let n_per_param = _K
 
-(* ------------------------------------------------
-   --- Kronecker approximation of the GGN
-   ------------------------------------------------ *)
+module RNN_Spec = struct
+  type param_name = W [@@deriving compare, sexp]
+
+  let all = [ W ]
+
+  let shape = function
+    | W -> [ d_in; d_out ]
+
+  let n_params = function
+    | W -> _K
+
+  let n_params_list = [ _K ]
+  let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
+end
+
+module RNN_Aux = struct
+  type 'a p =
+    { w_left : 'a
+    ; w_right : 'a
+    }
+  [@@deriving prms]
+end
+
+module A = RNN_Aux.Make (Prms.Single)
+
 module GGN : Auxiliary with module P = P = struct
-  include struct
-    type 'a p =
-      { theta_left : 'a
-      ; theta_right : 'a
-      }
-    [@@deriving prms]
-  end
-
   module P = P
-
-  (* module A = AA.Make (Prms.Single) *)
-  module A = Make (Prms.Single)
+  module A = A
 
   let init_sampling_state () = 0
 
@@ -82,14 +95,14 @@ module GGN : Auxiliary with module P = P = struct
   let s_u_cache = ref []
 
   let g12v ~(lambda : ([< `const | `dual ] as 'a) A.t) (v : 'a P.t) : Maths.any P.t =
-    Maths.einsum [ lambda.theta_left, "in"; v, "aij"; lambda.theta_right, "jm" ] "anm"
+    Maths.einsum [ lambda.w_left, "in"; v, "aij"; lambda.w_right, "jm" ] "anm"
 
   let random_localised_vs () =
     Tensor.randn ~device:base.device ~kind:base.kind [ _K; d_in; d_out ]
     |> Maths.of_tensor
 
   let eigenvectors ~(lambda : _ Maths.some A.t) ~switch_to_learn t (_K : int) =
-    let left, right, n_per_param = lambda.theta_left, lambda.theta_right, _K in
+    let left, right, n_per_param = lambda.w_left, lambda.w_right, _K in
     let s_all, u_left, u_right = get_svals_u_left_right left right in
     (* randomly select the indices *)
     let n_params =
@@ -111,7 +124,7 @@ module GGN : Auxiliary with module P = P = struct
       |> Maths.of_tensor
       |> Prms.Single.free
     in
-    { theta_left = init_eye d_in; theta_right = init_eye d_out }
+    RNN_Aux.{ w_left = init_eye d_in; w_right = init_eye d_out }
 end
 
 module O = Optimizer.SOFO (Model.P) (GGN)

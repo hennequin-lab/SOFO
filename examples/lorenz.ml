@@ -154,34 +154,46 @@ let simulate ~f_name n_trials =
    ------------------------------------------------ *)
 let _K = 128
 
-type param_name =
-  | W
-  | C
-  | A
-[@@deriving compare]
+module RNN_Spec = struct
+  type param_name =
+    | W
+    | C
+    | A
+  [@@deriving compare, sexp]
 
-let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
-let n_params_w, n_params_c, n_params_a = 60, 60, Int.(_K - 120)
-let n_params_list = [ n_params_w; n_params_c; n_params_a ]
-let param_names_list = [ W; C; A ]
+  let all = [ W; C; A ]
+
+  let shape = function
+    | W -> [ dh; d ]
+    | C -> [ d + 1; dh ]
+    | A -> [ d; d ]
+
+  let n_params = function
+    | W -> 60
+    | C -> 60
+    | A -> Int.(_K - 120)
+
+  let n_params_list = [ 60; 60; Int.(_K - 120) ]
+  let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
+end
+
+module RNN_Aux = struct
+  type 'a p =
+    { w_left : 'a
+    ; w_right : 'a
+    ; c_left : 'a
+    ; c_right : 'a
+    ; a_left : 'a
+    ; a_right : 'a
+    }
+  [@@deriving prms]
+end
+
+module A = RNN_Aux.Make (Prms.Single)
 
 module GGN : Auxiliary with module P = P = struct
-  include struct
-    type 'a p =
-      { w_left : 'a
-      ; w_right : 'a
-      ; c_left : 'a
-      ; c_right : 'a
-      ; a_left : 'a
-      ; a_right : 'a
-      }
-    [@@deriving prms]
-  end
-
   module P = P
-
-  (* module A = AA.Make (Prms.Single) *)
-  module A = Make (Prms.Single)
+  module A = A
 
   let init_sampling_state () = 0
 
@@ -191,29 +203,17 @@ module GGN : Auxiliary with module P = P = struct
   let random_params ~shape _K =
     Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
 
-  let get_shapes (param_name : param_name) =
-    match param_name with
-    | W -> [ dh; d ]
-    | C -> [ d + 1; dh ]
-    | A -> [ d; d ]
-
-  let get_n_params (param_name : param_name) =
-    match param_name with
-    | W -> n_params_w
-    | C -> n_params_c
-    | A -> n_params_a
-
-  let get_total_n_params (param_name : param_name) =
+  let get_total_n_params param_name =
     let list_prod l = List.fold l ~init:1 ~f:(fun accu i -> accu * i) in
-    list_prod (get_shapes param_name)
+    list_prod (RNN_Spec.shape param_name)
 
-  let get_n_params_before_after (param_name : param_name) =
-    let n_params_prefix_suffix_sums = prefix_suffix_sums n_params_list in
+  let get_n_params_before_after param_name =
+    let n_params_prefix_suffix_sums = prefix_suffix_sums RNN_Spec.n_params_list in
     let param_idx =
       match param_name with
-      | W -> 0
-      | C -> 1
-      | A -> 2
+      | RNN_Spec.W -> 0
+      | RNN_Spec.C -> 1
+      | RNN_Spec.A -> 2
     in
     List.nth_exn n_params_prefix_suffix_sums param_idx
 
@@ -226,11 +226,11 @@ module GGN : Auxiliary with module P = P = struct
     { w; c; a }
 
   (* set tangents = zero for other parameters but v for this parameter *)
-  let localise ~param_name ~n_per_param v =
-    let w = zero_params ~shape:(get_shapes W) n_per_param in
-    let c = zero_params ~shape:(get_shapes C) n_per_param in
-    let a = zero_params ~shape:(get_shapes A) n_per_param in
-    let params_tmp = PP.{ w; c; a } in
+  let localise ~(param_name : RNN_Spec.param_name) ~n_per_param v =
+    let zero name =
+      Tensor.zeros ~device:base.device ~kind:base.kind (n_per_param :: RNN_Spec.shape name)
+    in
+    let params_tmp = PP.{ w = zero W; c = zero C; a = zero A } in
     match param_name with
     | W -> { params_tmp with w = v }
     | C -> { params_tmp with c = v }
@@ -238,9 +238,9 @@ module GGN : Auxiliary with module P = P = struct
 
   let random_localised_vs () =
     let random_localised_param_name param_name =
-      let w_shape = get_shapes param_name in
+      let w_shape = RNN_Spec.shape param_name in
       let before, after = get_n_params_before_after param_name in
-      let w = random_params ~shape:w_shape (get_n_params param_name) in
+      let w = random_params ~shape:w_shape (RNN_Spec.n_params param_name) in
       let zeros_before = zero_params ~shape:w_shape before in
       let zeros_after = zero_params ~shape:w_shape after in
       let final = Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0 in
@@ -253,12 +253,12 @@ module GGN : Auxiliary with module P = P = struct
       }
 
   (* compute sorted eigenvalues, u_left and u_right. *)
-  let eigenvectors_for_params ~lambda ~param_name =
+  let eigenvectors_for_params ~(lambda : ([< `const | `dual ] as 'a) A.t) ~param_name =
     let left, right =
       match param_name with
-      | W -> lambda.w_left, lambda.w_right
-      | C -> lambda.c_left, lambda.c_right
-      | A -> lambda.a_left, lambda.a_right
+      | RNN_Spec.W -> lambda.w_left, lambda.w_right
+      | RNN_Spec.C -> lambda.c_left, lambda.c_right
+      | RNN_Spec.A -> lambda.a_left, lambda.a_right
     in
     get_svals_u_left_right left right
 
@@ -267,7 +267,7 @@ module GGN : Auxiliary with module P = P = struct
 
   (* given param name, get eigenvalues and eigenvectors. *)
   let get_s_u ~lambda ~param_name =
-    match List.Assoc.find !s_u_cache param_name ~equal:equal_param_name with
+    match List.Assoc.find !s_u_cache param_name ~equal:RNN_Spec.equal_param_name with
     | Some s -> s
     | None ->
       let s = eigenvectors_for_params ~lambda ~param_name in
@@ -275,12 +275,12 @@ module GGN : Auxiliary with module P = P = struct
       s
 
   let extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection =
-    let n_per_param = get_n_params param_name in
+    let n_per_param = RNN_Spec.n_params param_name in
     let local_vs = get_local_vs ~selection ~s_all ~u_left ~u_right in
     localise ~param_name ~n_per_param local_vs
 
   let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:_ =
-    let n_per_param = get_n_params param_name in
+    let n_per_param = RNN_Spec.n_params param_name in
     let n_params = get_total_n_params param_name in
     let s_all, u_left, u_right = get_s_u ~lambda ~param_name in
     let selection =
@@ -292,7 +292,7 @@ module GGN : Auxiliary with module P = P = struct
 
   let eigenvectors ~(lambda : _ Maths.some A.t) ~switch_to_learn t (_K : int) =
     let eigenvectors_each =
-      List.map param_names_list ~f:(fun param_name ->
+      List.map RNN_Spec.all ~f:(fun param_name ->
         eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:t)
     in
     let vs =
@@ -311,13 +311,14 @@ module GGN : Auxiliary with module P = P = struct
     let init_eye size =
       Maths.(0.1 $* eye ~device:base.device ~kind:base.kind size) |> Prms.Single.free
     in
-    { w_left = init_eye dh
-    ; w_right = init_eye d
-    ; c_left = init_eye (d + 1)
-    ; c_right = init_eye dh
-    ; a_left = init_eye d
-    ; a_right = init_eye d
-    }
+    RNN_Aux.
+      { w_left = init_eye dh
+      ; w_right = init_eye d
+      ; c_left = init_eye (d + 1)
+      ; c_right = init_eye dh
+      ; a_left = init_eye d
+      ; a_right = init_eye d
+      }
 end
 
 module O = Optimizer.SOFO (RNN.P) (GGN)

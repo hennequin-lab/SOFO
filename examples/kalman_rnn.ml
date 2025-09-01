@@ -1,7 +1,7 @@
-(** Learning a delayed addition task to compare SOFO with adam. *)
-open Utils
-
+(** Meta learning a kalman filter with a vanilla rnn. *)
 open Base
+
+open Utils
 open Owl
 open Torch
 open Forward_torch
@@ -9,8 +9,16 @@ open Sofo
 module Arr = Dense.Ndarray.S
 module Mat = Dense.Matrix.S
 
+(* state dimension *)
+let s = 1
+
+module Data = Kalman_data.Make (Kalman_data.Default)
+
+let tmax = 500
 let batch_size = 256
-let max_iter = 20000
+let max_iter = 4000
+(* let n_trials_simulation = 500 *)
+(* let n_trials_baseline = 1000 *)
 
 let _ =
   Random.init 1999;
@@ -21,18 +29,31 @@ let _ =
 let in_dir = Cmdargs.in_dir "-d"
 let base = Optimizer.Config.Base.default
 
-module Settings = struct
-  (* length of data *)
-  let n_steps = 1000 (* 20 to 600 *)
+(* generate some random data to get baseline performance of kalman *)
+(* let kalman_baseline =
+   let open Data in
+   Array.init 2 ~f:(fun _ ->
+   let data = minibatch ~tmax n_trials_baseline in
+   (* save [x; y; b; kalman_x]*)
+   let _ =
+   Mat.save_txt ~out:(in_dir "example_session") (to_save ~random:false data.(0))
+   in
+   mse ~filter_fun:(kalman_filter ~random:false) data)
+   |> Stats.mean
 
-  (* first signal upper bound *)
-  let t1_bound = 10
-  let t2_bound = Int.(n_steps / 2)
-end
+   let kalman_random_baseline =
+   let open Data in
+   Array.init 2 ~f:(fun _ ->
+   let data = minibatch ~tmax n_trials_baseline in
+   (* save [x; y; b; kalman_random_x]*)
+   let _ =
+   Mat.save_txt ~out:(in_dir "example_session_random") (to_save ~random:true data.(0))
+   in
+   mse ~filter_fun:(kalman_filter ~random:true) data)
+   |> Stats.mean *)
 
-(* net parameters *)
-let n = 128 (* number of neurons *)
-let alpha = 0.25
+(* let kalman_baseline = 0.4896232
+let kalman_random_baseline = 1.3612788 *)
 
 module RNN_P = struct
   type 'a p =
@@ -45,13 +66,16 @@ end
 
 module P = RNN_P.Make (Prms.Single)
 
+let n = 100
+let alpha = 0.25
+
 (* neural network *)
 module RNN = struct
   module P = P
 
   let phi x = Maths.relu x
 
-  (* input is the (number, signal) pair and z is the internal state *)
+  (* input is the noisy observation and z is the internal state *)
   let forward ~(theta : _ Maths.some P.t) ~input z =
     let bs = Tensor.shape input |> List.hd_exn in
     let input =
@@ -78,46 +102,54 @@ module RNN = struct
       |> Prms.Single.free
     in
     let b =
-      Sofo.gaussian_tensor_normed ~kind:base.kind ~device:base.device ~sigma:1.0 [ 3; n ]
+      Sofo.gaussian_tensor_normed
+        ~kind:base.kind
+        ~device:base.device
+        ~sigma:1.0
+        [ s + 1; n ]
       |> Maths.of_tensor
       |> Prms.Single.free
     in
     (* initialise to repeat observation *)
     let o =
-      Sofo.gaussian_tensor_normed ~kind:base.kind ~device:base.device ~sigma:1.0 [ n; 2 ]
-      |> Maths.of_tensor
-      |> Prms.Single.free
+      let b =
+        Prms.value b
+        |> Maths.to_tensor
+        |> Tensor.slice ~dim:0 ~start:(Some 0) ~end_:(Some s) ~step:1
+      in
+      if s = 1
+      then (
+        let b2 = Tensor.(square_ (norm b)) in
+        Tensor.(div_ (transpose ~dim0:1 ~dim1:0 b) b2)
+        |> Maths.of_tensor
+        |> Prms.Single.free)
+      else Tensor.pinverse b ~rcond:0. |> Maths.of_tensor |> Prms.Single.free
     in
     { c; b; o }
 
   (* here data is a list of (x_t, optional labels). labels is x_t. *)
   let f ~data theta =
+    let scaling = Float.(1. / of_int tmax) in
     let result, _ =
-      let input_all, labels_all = data in
-      let top_2, _ = List.split_n (Tensor.shape input_all) 2 in
-      let time_list = List.range 0 Settings.n_steps in
-      List.fold time_list ~init:(None, None) ~f:(fun (accu, z) t ->
+      List.foldi data ~init:(None, None) ~f:(fun t (accu, z) (input, labels) ->
         if t % 1 = 0 then Stdlib.Gc.major ();
-        let input =
-          let tmp =
-            Tensor.slice ~dim:2 ~start:(Some t) ~end_:(Some (t + 1)) ~step:1 input_all
-          in
-          Tensor.reshape tmp ~shape:top_2
-        in
-        (* loss only calculated at the final timestep *)
-        let labels = if t = Settings.n_steps - 1 then Some labels_all else None in
         let z = forward ~theta ~input z in
+        let pred = prediction ~theta z in
         let accu =
           match labels with
           | None -> accu
           | Some labels ->
-            let pred = prediction ~theta z in
-            let delta_ell = Loss.mse ~output_dims:[ 1 ] Maths.(of_tensor labels - pred) in
+            let delta_ell =
+              Maths.(
+                scaling $* Loss.mse ~output_dims:[ 1 ] Maths.(of_tensor labels - pred))
+            in
             let delta_ggn =
-              Loss.mse_ggn
-                ~output_dims:[ 1 ]
-                (Maths.const pred)
-                ~vtgt:(Maths.tangent_exn pred)
+              Maths.C.(
+                scaling
+                $* Loss.mse_ggn
+                     ~output_dims:[ 1 ]
+                     (Maths.const pred)
+                     ~vtgt:(Maths.tangent_exn pred))
             in
             (match accu with
              | None -> Some (delta_ell, delta_ggn)
@@ -128,40 +160,67 @@ module RNN = struct
         accu, Some z)
     in
     Option.value_exn result
+
+  (* TODO: make sure the batch size is 1 here, otherwise nonsensical results. Simulate one sample trajectory *)
+  let simulate_1d (data : (float, Kalman_data.lds) Kalman_data.state array) theta =
+    Array.foldi data ~init:([], None) ~f:(fun t (accu, z) datum ->
+      if t % 1 = 0 then Stdlib.Gc.major ();
+      let input =
+        Tensor.of_bigarray
+          ~device:base.device
+          Mat.(of_array [| datum.Kalman_data.y |] 1 1)
+      in
+      let z = forward ~theta ~input z in
+      let pred =
+        prediction ~theta z |> Maths.to_tensor |> fun x -> Tensor.get_float2 x 0 0
+      in
+      let accu =
+        Mat.of_array
+          [| datum.Kalman_data.lds.tau
+           ; datum.Kalman_data.lds.b
+           ; datum.Kalman_data.lds.beta
+           ; datum.Kalman_data.lds.sigma_eps
+           ; datum.Kalman_data.y
+           ; datum.Kalman_data.x
+           ; pred
+          |]
+          1
+          7
+        :: accu
+      in
+      accu, Some z)
+    |> fst
+    |> List.rev
+    |> Array.of_list
+    |> Mat.concatenate ~axis:0
 end
 
-(* -----------------------------------------
-   -- Generate addition data    ------
-   ----------------------------------------- *)
+let sample_data bs =
+  Data.minibatch ~tmax bs
+  |> Data.minibatch_as_data
+  |> List.map ~f:(fun datum ->
+    let to_device = Tensor.of_bigarray ~device:base.device in
+    to_device datum.Kalman_data.y, Some (to_device datum.Kalman_data.x))
 
-let data_shape = [| 1; 2; Settings.n_steps |]
-
-let sample () =
-  let number_trace = Mat.uniform 1 Settings.n_steps in
-  let signal_trace = Mat.zeros 1 Settings.n_steps in
-  (* set indicator *)
-  let t1 = Random.int_incl 0 (Settings.t1_bound - 1) in
-  let t2 = Random.int_incl (t1 + 1) Settings.t2_bound in
-  Mat.set signal_trace 0 t1 1.;
-  Mat.set signal_trace 0 t2 1.;
-  let target = Mat.(get number_trace 0 t1) +. Mat.(get number_trace 0 t2) in
-  let target_mat = Mat.of_array [| target |] 1 1 in
-  let input_mat = Mat.concat_horizontal number_trace signal_trace in
-  let input_array = Arr.reshape input_mat data_shape in
-  input_array, target_mat
-
-let sample_data batch_size =
-  let data_minibatch = Array.init batch_size ~f:(fun _ -> sample ()) in
-  let input_array = Array.map data_minibatch ~f:fst in
-  let target_array = Array.map data_minibatch ~f:snd in
-  let input_tensor = Arr.concatenate ~axis:0 input_array in
-  let target_mat = Mat.concatenate ~axis:0 target_array in
-  let to_device = Tensor.of_bigarray ~device:base.device in
-  to_device input_tensor, to_device target_mat
-
-(* -----------------------------------------
-   -- Optimization with SOFO    ------
-   ----------------------------------------- *)
+let simulate_1d ~f_name n_trials =
+  let module Data = Kalman_data.Make (Kalman_data.Default) in
+  let n_list = List.range 0 n_trials in
+  List.iter n_list ~f:(fun i ->
+    let data = (Data.minibatch ~tmax 1).(0) in
+    (* 1d *)
+    let kf_prediction = Mat.of_array (Data.kalman_filter ~random:false data) (-1) 1 in
+    let kf_random_prediction =
+      Mat.of_array (Data.kalman_filter ~random:true data) (-1) 1
+    in
+    let model_params =
+      let params_ba = RNN.P.C.load (in_dir f_name ^ "_params") in
+      RNN.P.map params_ba ~f:(fun x -> x |> Maths.const)
+    in
+    let model_prediction = RNN.simulate_1d data model_params in
+    (* the columns are tau, b, beta, sigma_eps, observed_y, x, model prediction, kalman prediction and kalman random prediction *)
+    let to_save = Mat.((model_prediction @|| kf_prediction) @|| kf_random_prediction) in
+    Mat.(
+      save_txt to_save ~out:(in_dir f_name ^ "_" ^ Int.to_string i ^ "_model_prediction")))
 
 (* ------------------------------------------------
    --- Kronecker approximation of the GGN
@@ -179,8 +238,8 @@ module RNN_Spec = struct
 
   let shape = function
     | C -> [ n; n ]
-    | B -> [ 3; n ]
-    | O -> [ n; 2 ]
+    | B -> [ s + 1; n ]
+    | O -> [ n; s ]
 
   let n_params = function
     | C -> Int.(_K - 4)
@@ -250,6 +309,8 @@ module GGN : Auxiliary with module P = P = struct
     | B -> { params_tmp with b = v }
     | O -> { params_tmp with o = v }
 
+  (* set tangents = zero for other parameters but v for this parameter *)
+
   let random_localised_vs () =
     let random_localised_param_name param_name =
       let w_shape = RNN_Spec.shape param_name in
@@ -267,15 +328,12 @@ module GGN : Auxiliary with module P = P = struct
       }
 
   (* compute sorted eigenvalues, u_left and u_right. *)
-  let eigenvectors_for_params
-        ~(lambda : ([< `const | `dual ] as 'a) A.t)
-        ~(param_name : RNN_Spec.param_name)
-    =
+  let eigenvectors_for_params ~(lambda : ([< `const | `dual ] as 'a) A.t) ~param_name =
     let left, right =
       match param_name with
-      | C -> lambda.c_left, lambda.c_right
-      | B -> lambda.b_left, lambda.b_right
-      | O -> lambda.o_left, lambda.o_right
+      | RNN_Spec.C -> lambda.c_left, lambda.c_right
+      | RNN_Spec.B -> lambda.b_left, lambda.b_right
+      | RNN_Spec.O -> lambda.o_left, lambda.o_right
     in
     get_svals_u_left_right left right
 
@@ -331,12 +389,16 @@ module GGN : Auxiliary with module P = P = struct
     RNN_Aux.
       { c_left = init_eye n
       ; c_right = init_eye n
-      ; b_left = init_eye 3
+      ; b_left = init_eye (s + 1)
       ; b_right = init_eye n
       ; o_left = init_eye n
-      ; o_right = init_eye 2
+      ; o_right = init_eye s
       }
 end
+
+(* -----------------------------------------
+   -- Optimization with SOFO    ------
+   ----------------------------------------- *)
 
 module O = Optimizer.SOFO (RNN.P) (GGN)
 
@@ -347,16 +409,16 @@ let config =
         config =
           Optimizer.Config.Adam.
             { default with base; learning_rate = Some 1e-3; eps = 1e-8 }
-      ; steps = 5
-      ; learn_steps = 1
-      ; exploit_steps = 1
+      ; steps = 500
+      ; learn_steps = 10
+      ; exploit_steps = 10
       }
   in
   Optimizer.Config.SOFO.
     { base
     ; learning_rate = Some 0.1
     ; n_tangents = _K
-    ; damping = `relative_from_top 1e-5
+    ; damping = `relative_from_top 1e-3
     ; aux = Some aux
     }
 
@@ -380,6 +442,11 @@ let rec loop ~t ~out ~state running_avg =
     in
     if t % 10 = 0
     then (
+      (* save params *)
+      O.P.C.save
+        (RNN.P.value (O.params new_state))
+        ~kind:base.ba_kind
+        ~out:(in_dir "sofo_params");
       print [%message (t : int) (loss_avg : float)];
       Owl.Mat.(save_txt ~append:true ~out (of_array [| Float.of_int t; loss_avg |] 1 2)));
     []
@@ -388,6 +455,10 @@ let rec loop ~t ~out ~state running_avg =
 
 (* Start the sofo loop. *)
 let _ =
-  Bos.Cmd.(v "rm" % "-f" % in_dir "loss") |> Bos.OS.Cmd.run |> ignore;
-  Bos.Cmd.(v "rm" % "-f" % in_dir "aux") |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out:(in_dir "loss") ~state:(O.init RNN.init) []
+  let out = in_dir "loss" in
+  Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
+  loop ~t:0 ~out ~state:(O.init RNN.init) []
+
+(* let _ =
+      let f_name = "sofo" in
+      simulate_1d ~f_name n_trials_simulation *)
