@@ -6,7 +6,7 @@
   delayed_addition
   kalman_rnn
   random_class)
- (libraries cmdargs domainslib bos sofo owl owl-ode)
+ (libraries cmdargs domainslib bos sofo owl owl-ode ggn_common)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch ppx_jane)))
 

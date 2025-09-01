@@ -1,0 +1,10 @@
+(library
+ (name ggn_common)
+ (libraries sofo)
+ (preprocess
+  (pps ppx-forward-torch ppx_sexp_message ppx_jane)))
+
+(env
+ (dev
+  (flags
+   (:standard -warn-error -A))))
