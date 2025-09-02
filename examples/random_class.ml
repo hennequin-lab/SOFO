@@ -1,7 +1,6 @@
 (** Meta learning a Settings.classification with randomised labels across different sessions with a vanilla rnn *)
 open Base
 
-open Utils
 open Owl
 open Torch
 open Forward_torch

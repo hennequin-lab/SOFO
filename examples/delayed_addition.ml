@@ -1,5 +1,4 @@
 (** Learning a delayed addition task to compare SOFO with adam. *)
-open Utils
 
 open Base
 open Owl
