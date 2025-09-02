@@ -1,4 +1,3 @@
-open Utils
 open Printf
 open Base
 open Owl

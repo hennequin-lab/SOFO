@@ -1,5 +1,5 @@
 (* Example a simple linear regression task to learn W where y = W x. *)
-open Utils
+
 open Base
 open Torch
 open Forward_torch

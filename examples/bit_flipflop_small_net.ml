@@ -1,5 +1,4 @@
 (** Learning a b-bit flip-flop task as in (Sussillo, 2013) to compare SOFO with FORCE. *)
-open Utils
 
 open Base
 open Owl

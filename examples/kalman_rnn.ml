@@ -1,7 +1,6 @@
 (** Meta learning a kalman filter with a vanilla rnn. *)
 open Base
 
-open Utils
 open Owl
 open Torch
 open Forward_torch
