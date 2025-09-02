@@ -233,28 +233,9 @@ module A = RNN_Aux.Make (Prms.Single)
 module GGN : Auxiliary with module P = P = struct
   module P = P
   module A = A
+  module C = Ggn_common.GGN_Common (RNN_Spec)
 
   let init_sampling_state () = 0
-
-  let zero_params ~shape _K =
-    Tensor.zeros ~device:base.device ~kind:base.kind (_K :: shape)
-
-  let random_params ~shape _K =
-    Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
-
-  let get_total_n_params param_name =
-    let list_prod l = List.fold l ~init:1 ~f:(fun accu i -> accu * i) in
-    list_prod (RNN_Spec.shape param_name)
-
-  let get_n_params_before_after param_name =
-    let n_params_prefix_suffix_sums = prefix_suffix_sums RNN_Spec.n_params_list in
-    let param_idx =
-      match param_name with
-      | RNN_Spec.J -> 0
-      | RNN_Spec.B -> 1
-      | RNN_Spec.W -> 2
-    in
-    List.nth_exn n_params_prefix_suffix_sums param_idx
 
   let g12v ~(lambda : ([< `const | `dual ] as 'a) A.t) (v : 'a P.t) : Maths.any P.t =
     let open Maths in
@@ -263,6 +244,38 @@ module GGN : Auxiliary with module P = P = struct
     let b = tmp_einsum lambda.b_left lambda.b_right v.b in
     let w = tmp_einsum lambda.w_left lambda.w_right v.w in
     { j; b; w; fb }
+
+  let get_sides (lambda : ([< `const | `dual ] as 'a) A.t) = function
+    | RNN_Spec.J -> lambda.j_left, lambda.j_right
+    | RNN_Spec.B -> lambda.b_left, lambda.b_right
+    | RNN_Spec.W -> lambda.w_left, lambda.w_right
+
+  let random_localised_vs () =
+    let random_localised_param_name param_name =
+      let w_shape = RNN_Spec.shape param_name in
+      let before, after = C.get_n_params_before_after param_name in
+      let w =
+        C.random_params
+          ~shape:w_shape
+          ~device:base.device
+          ~kind:base.kind
+          (RNN_Spec.n_params param_name)
+      in
+      let zeros_before =
+        C.zero_params ~shape:w_shape ~device:base.device ~kind:base.kind before
+      in
+      let zeros_after =
+        C.zero_params ~shape:w_shape ~device:base.device ~kind:base.kind after
+      in
+      let final = Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0 in
+      Maths.of_tensor final
+    in
+    RNN_P.
+      { j = random_localised_param_name J
+      ; b = random_localised_param_name B
+      ; w = random_localised_param_name W
+      ; fb
+      }
 
   (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~(param_name : RNN_Spec.param_name) ~n_per_param v =
@@ -275,79 +288,24 @@ module GGN : Auxiliary with module P = P = struct
     | B -> { params_tmp with b = v }
     | W -> { params_tmp with w = v }
 
-  (* set tangents = zero for other parameters but v for this parameter *)
+  let combine x y = P.map2 x y ~f:(fun a b -> Tensor.concat ~dim:0 [ a; b ])
+  let wrap = P.map ~f:Maths.of_tensor
 
-  let random_localised_vs () =
-    let random_localised_param_name param_name =
-      let w_shape = RNN_Spec.shape param_name in
-      let before, after = get_n_params_before_after param_name in
-      let w = random_params ~shape:w_shape (RNN_Spec.n_params param_name) in
-      let zeros_before = zero_params ~shape:w_shape before in
-      let zeros_after = zero_params ~shape:w_shape after in
-      let final = Tensor.concat [ zeros_before; w; zeros_after ] ~dim:0 in
-      Maths.of_tensor final
-    in
-    RNN_P.
-      { j = random_localised_param_name J
-      ; b = random_localised_param_name B
-      ; w = random_localised_param_name W
-      ; fb
-      }
-
-  (* compute sorted eigenvalues, u_left and u_right. *)
-  let eigenvectors_for_params ~(lambda : ([< `const | `dual ] as 'a) A.t) ~param_name =
-    let left, right =
-      match param_name with
-      | RNN_Spec.J -> lambda.j_left, lambda.j_right
-      | RNN_Spec.B -> lambda.b_left, lambda.b_right
-      | RNN_Spec.W -> lambda.w_left, lambda.w_right
-    in
-    get_svals_u_left_right left right
-
-  (* cache storage with a ref to memoize computed results *)
-  let s_u_cache = ref []
-
-  (* given param name, get eigenvalues and eigenvectors. *)
-  let get_s_u ~lambda ~param_name =
-    match List.Assoc.find !s_u_cache param_name ~equal:RNN_Spec.equal_param_name with
-    | Some s -> s
-    | None ->
-      let s = eigenvectors_for_params ~lambda ~param_name in
-      s_u_cache := (param_name, s) :: !s_u_cache;
-      s
-
-  let extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection =
-    let n_per_param = RNN_Spec.n_params param_name in
-    let local_vs = get_local_vs ~selection ~s_all ~u_left ~u_right in
-    localise ~param_name ~n_per_param local_vs
-
-  let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:_ =
-    let n_per_param = RNN_Spec.n_params param_name in
-    let n_params = get_total_n_params param_name in
-    let s_all, u_left, u_right = get_s_u ~lambda ~param_name in
-    let selection =
-      (* List.init n_per_param ~f:(fun i ->
-          ((sampling_state * n_per_param) + i) % n_params) *)
-      List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
-    in
-    extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection
-
-  let eigenvectors ~(lambda : _ Maths.some A.t) ~switch_to_learn t (_K : int) =
-    let eigenvectors_each =
-      List.map RNN_Spec.all ~f:(fun param_name ->
-        eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:t)
-    in
-    let vs =
-      List.fold eigenvectors_each ~init:None ~f:(fun accu local_vs ->
-        match accu with
-        | None -> Some local_vs
-        | Some a -> Some (P.map2 a local_vs ~f:(fun x y -> Tensor.concat ~dim:0 [ x; y ])))
-    in
-    let vs = Option.map vs ~f:(fun v -> P.map v ~f:Maths.of_tensor) in
-    (* reset s_u_cache and set sampling state to 0 if learn again *)
-    if switch_to_learn then s_u_cache := [];
-    let new_sampling_state = if switch_to_learn then 0 else t + 1 in
-    Option.value_exn vs, new_sampling_state
+  let eigenvectors
+        ~(lambda : [< `const | `dual ] A.t)
+        ~switch_to_learn
+        (t : int)
+        (_k : int)
+    : Forward_torch.Maths.const P.elt P.p * int
+    =
+    C.eigenvectors
+      ~lambda
+      ~switch_to_learn
+      ~sampling_state:t
+      ~get_sides
+      ~combine
+      ~wrap
+      ~localise
 
   let init () =
     let init_eye size =

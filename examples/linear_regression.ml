@@ -88,34 +88,40 @@ module A = RNN_Aux.Make (Prms.Single)
 module GGN : Auxiliary with module P = P = struct
   module P = P
   module A = A
+  module C = Ggn_common.GGN_Common (RNN_Spec)
 
   let init_sampling_state () = 0
 
-  (* cache storage with a ref to memoize computed results *)
-  let s_u_cache = ref []
-
   let g12v ~(lambda : ([< `const | `dual ] as 'a) A.t) (v : 'a P.t) : Maths.any P.t =
     Maths.einsum [ lambda.w_left, "in"; v, "aij"; lambda.w_right, "jm" ] "anm"
+
+  let get_sides (lambda : ([< `const | `dual ] as 'a) A.t) = function
+    | RNN_Spec.W -> lambda.w_left, lambda.w_right
 
   let random_localised_vs () =
     Tensor.randn ~device:base.device ~kind:base.kind [ _K; d_in; d_out ]
     |> Maths.of_tensor
 
-  let eigenvectors ~(lambda : _ Maths.some A.t) ~switch_to_learn t (_K : int) =
-    let left, right, n_per_param = lambda.w_left, lambda.w_right, _K in
-    let s_all, u_left, u_right = get_svals_u_left_right left right in
-    (* randomly select the indices *)
-    let n_params =
-      Int.((Maths.shape left |> List.hd_exn) * (Maths.shape right |> List.hd_exn))
-    in
-    let selection =
-      List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
-    in
-    let vs = get_local_vs ~selection ~s_all ~u_left ~u_right |> Maths.of_tensor in
-    (* reset s_u_cache and set sampling state to 0 if learn again *)
-    if switch_to_learn then s_u_cache := [];
-    let new_sampling_state = if switch_to_learn then 0 else Int.(t + 1) in
-    vs, new_sampling_state
+  (* set tangents = zero for other parameters but v for this parameter *)
+  let localise ~param_name:_ ~n_per_param:_ v = v
+  let combine x y = P.map2 x y ~f:(fun a b -> Tensor.concat ~dim:0 [ a; b ])
+  let wrap = P.map ~f:Maths.of_tensor
+
+  let eigenvectors
+        ~(lambda : [< `const | `dual ] A.t)
+        ~switch_to_learn
+        (t : int)
+        (_k : int)
+    : Forward_torch.Maths.const P.elt P.p * int
+    =
+    C.eigenvectors
+      ~lambda
+      ~switch_to_learn
+      ~sampling_state:t
+      ~get_sides
+      ~combine
+      ~wrap
+      ~localise
 
   let init () =
     let init_eye size =
