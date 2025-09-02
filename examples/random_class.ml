@@ -345,7 +345,6 @@ module RNN_Spec = struct
   let equal_param_name p1 p2 = compare_param_name p1 p2 = 0
 end
 
-(* instantiate common helpers *)
 module GGN : Auxiliary with module P = P = struct
   module P = P
   module A = A
@@ -398,9 +397,7 @@ module GGN : Auxiliary with module P = P = struct
       ; o = random_localised_param_name O
       }
 
-  let combine x y = P.map2 x y ~f:(fun a b -> Tensor.concat ~dim:0 [ a; b ])
-  let wrap = P.map ~f:Maths.of_tensor
-
+  (* set tangents = zero for other parameters but v for this parameter *)
   let localise ~(param_name : RNN_Spec.param_name) ~n_per_param v =
     let zero name =
       Tensor.zeros ~device:base.device ~kind:base.kind (n_per_param :: RNN_Spec.shape name)
@@ -414,6 +411,9 @@ module GGN : Auxiliary with module P = P = struct
     | B -> { params_tmp with b = v }
     | A -> { params_tmp with a = v }
     | O -> { params_tmp with o = v }
+
+  let combine x y = P.map2 x y ~f:(fun a b -> Tensor.concat ~dim:0 [ a; b ])
+  let wrap = P.map ~f:Maths.of_tensor
 
   let eigenvectors
         ~(lambda : [< `const | `dual ] A.t)

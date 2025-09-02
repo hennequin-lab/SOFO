@@ -209,14 +209,9 @@ module A = RNN_Aux.Make (Prms.Single)
 module GGN : Auxiliary with module P = P = struct
   module P = P
   module A = A
+  module C = Ggn_common.GGN_Common (RNN_Spec)
 
   let init_sampling_state () = 0
-
-  let zero_params ~shape _K =
-    Tensor.zeros ~device:base.device ~kind:base.kind (_K :: shape)
-
-  let random_params ~shape _K =
-    Tensor.randn ~device:base.device ~kind:base.kind (_K :: shape)
 
   let g12v ~(lambda : ([< `const | `dual ] as 'a) A.t) (v : 'a P.t) : Maths.any P.t =
     let open Maths in
@@ -224,53 +219,43 @@ module GGN : Auxiliary with module P = P = struct
     let w = tmp_einsum lambda.w_left lambda.w_right v.w in
     { j; fb; w; b }
 
-  (* set tangents = zero for other parameters but v for this parameter *)
-  let localise ~param_name:_ ~n_per_param:_ v = RNN_P.{ j; fb; b; w = v }
+  let get_sides (lambda : ([< `const | `dual ] as 'a) A.t) = function
+    | RNN_Spec.W -> lambda.w_left, lambda.w_right
 
   let random_localised_vs () =
-    RNN_P.{ w = Maths.of_tensor (random_params ~shape:[ n; Settings.b ] _K); j; fb; b }
+    RNN_P.
+      { w =
+          Maths.of_tensor
+            (C.random_params
+               ~shape:[ n; Settings.b ]
+               ~device:base.device
+               ~kind:base.kind
+               _K)
+      ; j
+      ; fb
+      ; b
+      }
 
-  (* compute sorted eigenvalues, u_left and u_right. *)
-  let eigenvectors_for_params ~(lambda : ([< `const | `dual ] as 'a) A.t) ~param_name:_ =
-    let left, right = lambda.w_left, lambda.w_right in
-    get_svals_u_left_right left right
+  (* set tangents = zero for other parameters but v for this parameter *)
+  let localise ~param_name:_ ~n_per_param:_ v = RNN_P.{ j; fb; b; w = v }
+  let combine x y = P.map2 x y ~f:(fun a b -> Tensor.concat ~dim:0 [ a; b ])
+  let wrap = P.map ~f:Maths.of_tensor
 
-  (* cache storage with a ref to memoize computed results *)
-  let s_u_cache = ref None
-
-  (* given param name, get eigenvalues and eigenvectors. *)
-  let get_s_u ~lambda =
-    (* match List.Assoc.find !s_u_cache param_name ~equal:equal_param_name with *)
-    match !s_u_cache with
-    | Some s -> s
-    | None ->
-      let s = eigenvectors_for_params ~lambda in
-      s_u_cache := Some s;
-      s
-
-  let extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection =
-    let local_vs = get_local_vs ~selection ~s_all ~u_left ~u_right in
-    localise ~param_name ~n_per_param local_vs
-
-  let eigenvectors_for_each_param ~lambda ~param_name ~sampling_state:_ =
-    let n_params = n * Settings.b in
-    let s_all, u_left, u_right = get_s_u ~lambda ~param_name in
-    let selection =
-      (* List.init n_per_param ~f:(fun i ->
-             ((sampling_state * n_per_param) + i) % n_params) *)
-      List.permute (List.range 0 n_params) |> List.sub ~pos:0 ~len:n_per_param
-    in
-    extract_local_vs ~s_all ~param_name ~u_left ~u_right ~selection
-
-  let eigenvectors ~(lambda : _ Maths.some A.t) ~switch_to_learn t (_K : int) =
-    let eigenvectors_w =
-      eigenvectors_for_each_param ~lambda ~param_name:None ~sampling_state:t
-    in
-    let vs = P.map eigenvectors_w ~f:Maths.of_tensor in
-    (* reset s_u_cache and set sampling state to 0 if learn again *)
-    if switch_to_learn then s_u_cache := None;
-    let new_sampling_state = if switch_to_learn then 0 else t + 1 in
-    vs, new_sampling_state
+  let eigenvectors
+        ~(lambda : [< `const | `dual ] A.t)
+        ~switch_to_learn
+        (t : int)
+        (_k : int)
+    : Forward_torch.Maths.const P.elt P.p * int
+    =
+    C.eigenvectors
+      ~lambda
+      ~switch_to_learn
+      ~sampling_state:t
+      ~get_sides
+      ~combine
+      ~wrap
+      ~localise
 
   let init () =
     let init_eye size =
