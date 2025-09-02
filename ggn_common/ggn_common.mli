@@ -2,7 +2,6 @@ open Base
 open Torch
 open Forward_torch
 
-module Spec_typ = Spec_typ
 (** Functor to generate GGN utilities from a [Spec] module. *)
 module GGN_Common (Spec : Spec_typ.SPEC) : sig
   val zero_params

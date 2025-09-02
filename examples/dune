@@ -5,6 +5,8 @@
   lorenz
   delayed_addition
   kalman_rnn
+  mlp_classification
+  mlp_mixer
   random_class)
  (libraries cmdargs domainslib bos sofo owl owl-ode ggn_common)
  (preprocess
