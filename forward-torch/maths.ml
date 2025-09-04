@@ -316,15 +316,22 @@ module Ops = struct
 
   let trace =
     let f x =
-      assert (
-        match Tensor.shape x with
-        | [ a; b ] when a = b -> true
-        | _ -> false);
-      Tensor.(reshape (trace x) ~shape:[ 1 ])
+      match Tensor.shape x with
+      | [ a; b ] when a = b -> Tensor.(reshape (trace x) ~shape:[ 1 ])
+      | [ _; a; b ] when a = b ->
+        Tensor.einsum [ x ] ~equation:"qii->q" ~path:None
+        |> Tensor.reshape ~shape:[ -1; 1 ]
+      | _ -> invalid_arg "trace: expected square matrix or batch of square matrices"
     in
     let df ~f:_ ~x:_ ~dx =
-      Tensor.einsum [ dx ] ~equation:"qii->q" ~path:None
-      |> Tensor.reshape ~shape:[ -1; 1 ]
+      match Tensor.shape dx with
+      | [ _; a; b ] when a = b ->
+        Tensor.einsum [ dx ] ~equation:"kii->k" ~path:None
+        |> Tensor.reshape ~shape:[ -1; 1 ]
+      | k :: _ :: a :: b :: _ when a = b ->
+        Tensor.einsum [ dx ] ~equation:"kqii->kq" ~path:None
+        |> Tensor.reshape ~shape:[ k; -1; 1 ]
+      | _ -> invalid_arg "trace.df: unexpected dx shape"
     in
     { f; df }
 

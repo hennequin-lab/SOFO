@@ -159,6 +159,8 @@ let unary_tests =
     ; "sqr", [], any_shape sqr
     ; "neg", [], any_shape neg
     ; "trace", [ `specified_unary [ 10; 10 ] ], any_shape trace
+    ; "trace", [ `specified_unary [ 8;10; 10 ] ], any_shape trace
+
     ; ( "trace_with_einsum"
       , [ `specified_unary [ 10; 10 ] ]
       , any_shape (fun a -> einsum [ a, "ii" ] "") )
