@@ -465,6 +465,11 @@ module Ops = struct
     let df ~f:_ ~x ~dx = Tensor.(mul (sigmoid x) dx) in
     { f; df }
 
+  let lgamma =
+    let f = Tensor.lgamma in
+    let df ~f:_ ~x ~dx = Tensor.(mul (digamma x) dx) in
+    { f; df }
+
   (* like Torch's slice but not sharing data *)
   let[@warning "-16"] slice ?start ?end_ ?(step = 1) ~dim =
     let f = Tensor.slice_copy ~dim ~start ~end_ ~step in
@@ -1001,6 +1006,7 @@ let relu x = make_unary Ops.relu x
 let soft_relu x = make_unary Ops.soft_relu x
 let sigmoid x = make_unary Ops.sigmoid x
 let softplus x = make_unary Ops.softplus x
+let lgamma x = make_unary Ops.lgamma x
 let slice ?start ?end_ ?step ~dim = make_unary Ops.(slice ?start ?end_ ?step ~dim)
 let mean ?keepdim ?dim x = make_unary (Ops.mean ?keepdim ?dim) x
 let sum ?keepdim ?dim x = make_unary (Ops.sum ?keepdim ?dim) x
@@ -1234,6 +1240,7 @@ module C = struct
   let soft_relu x = make_unary Ops.soft_relu x
   let sigmoid = make_unary Ops.sigmoid
   let softplus = make_unary Ops.softplus
+  let lgamma = make_unary Ops.lgamma
   let sign = direct_unary Tensor.sign
   let slice ?start ?end_ ?step ~dim = make_unary Ops.(slice ?start ?end_ ?step ~dim)
   let sum ?keepdim ?dim = make_unary (Ops.sum ?keepdim ?dim)

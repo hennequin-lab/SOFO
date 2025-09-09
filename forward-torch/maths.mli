@@ -112,6 +112,7 @@ val relu : 'a some t -> 'a t
 val soft_relu : 'a some t -> 'a t
 val sigmoid : 'a some t -> 'a t
 val softplus : 'a some t -> 'a t
+val lgamma : 'a some t -> 'a t
 val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> 'a some t -> 'a t
 val sum : ?keepdim:bool -> ?dim:int list -> 'a some t -> 'a t
 val mean : ?keepdim:bool -> ?dim:int list -> 'a some t -> 'a t
@@ -197,6 +198,7 @@ module C : sig
   val soft_relu : const t -> const t
   val sigmoid : const t -> const t
   val softplus : const t -> const t
+  val lgamma : const t -> const t
   val sign : const t -> const t
   val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> const t -> const t
   val sum : ?keepdim:bool -> ?dim:int list -> const t -> const t

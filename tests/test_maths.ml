@@ -159,8 +159,7 @@ let unary_tests =
     ; "sqr", [], any_shape sqr
     ; "neg", [], any_shape neg
     ; "trace", [ `specified_unary [ 10; 10 ] ], any_shape trace
-    ; "trace", [ `specified_unary [ 8;10; 10 ] ], any_shape trace
-
+    ; "trace", [ `specified_unary [ 8; 10; 10 ] ], any_shape trace
     ; ( "trace_with_einsum"
       , [ `specified_unary [ 10; 10 ] ]
       , any_shape (fun a -> einsum [ a, "ii" ] "") )
@@ -177,6 +176,7 @@ let unary_tests =
     ; "exp", [], any_shape exp
     ; "sigmoid", [], any_shape sigmoid
     ; "softplus", [], any_shape softplus
+    ; "lgamma", [ `positive ], any_shape lgamma
     ; "tanh", [], any_shape tanh
     ; "pdf", [], any_shape pdf (* ; "cdf", [], any_shape cdf *)
     ; "erf", [], any_shape erf
