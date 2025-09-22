@@ -85,9 +85,9 @@ let build_map2 ~loc fields =
 let build_fold ~loc fields =
   let (module Ast) = Ast_builder.make loc in
   let fold_expr =
-    List.fold_right
+    List.fold_left
       fields
-      ~f:(fun (ld, name) accu ->
+      ~f:(fun accu (ld, name) ->
         let field_id = Ast.Located.lident ld.pld_name.txt in
         let field_name = Ast.pexp_constant (Pconst_string (ld.pld_name.txt, loc, None)) in
         let z = Ast.pexp_field [%expr x] field_id in
@@ -106,9 +106,9 @@ let build_fold ~loc fields =
 let build_fold2 ~loc fields =
   let (module Ast) = Ast_builder.make loc in
   let fold_expr =
-    List.fold_right
+    List.fold
       fields
-      ~f:(fun (ld, name) accu ->
+      ~f:(fun accu (ld, name) ->
         let field_id = Ast.Located.lident ld.pld_name.txt in
         let field_name = Ast.pexp_constant (Pconst_string (ld.pld_name.txt, loc, None)) in
         let zx = Ast.pexp_field [%expr x] field_id in
