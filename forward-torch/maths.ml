@@ -134,8 +134,9 @@ let f x = E (C (Tensor.f x))
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
 
+(* detach primal tensor from graph *)
 let primal_tensor_detach x =
-  let x_t = to_tensor x in
+  let x_t = to_tensor x |> Tensor.detach in
   E (C x_t)
 
 let eye ?device ?kind n =

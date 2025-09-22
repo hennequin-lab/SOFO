@@ -52,7 +52,7 @@ val f : float -> const t
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
 
-val primal_tensor_detach :  _ some t -> const t
+val primal_tensor_detach : _ some t -> const t
 val eye : (int -> const t) with_tensor_params
 val zeros : (int list -> const t) with_tensor_params
 val ones : (?scale:float -> int list -> const t) with_tensor_params
