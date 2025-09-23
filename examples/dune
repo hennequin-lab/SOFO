@@ -5,6 +5,7 @@
   lorenz
   delayed_addition
   kalman_rnn
+  rnn_model_recovery
   mlp_adaptive
   mlp_classification
   mlp_mixer
