@@ -1342,6 +1342,14 @@ module C = struct
       of_tensor u, of_tensor s, of_tensor vt
     | _ -> raise Not_const
 
+  (* x = Q diag(l) Q^H *)
+  let eigh ?(uplo = "l") (E x) =
+    match x with
+    | C x ->
+      let l, q = Tensor.linalg_eigh ~uplo x in
+      of_tensor l, of_tensor q
+    | _ -> raise Not_const
+
   let qr (E x) =
     match x with
     | C x ->

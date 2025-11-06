@@ -231,6 +231,7 @@ module C : sig
   val block_diag : const t list -> const t
   val gumbel_softmax : tau:float -> with_noise:bool -> discrete:bool -> const t -> const t
   val svd : const t -> const t * const t * const t
+  val eigh : ?uplo:string -> const t -> const t * const t
   val qr : const t -> const t * const t
   val cholesky : const t -> const t
   val linsolve_triangular : ?left:bool -> ?upper:bool -> const t -> const t -> const t
