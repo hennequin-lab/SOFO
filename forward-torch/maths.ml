@@ -681,31 +681,21 @@ module Ops = struct
     in
     { f; dfx; dfy; dfxy }
 
-  (* x = x + z *)
   let ( $+ ) z =
     let f x = Tensor.add_scalar x (Scalar.f z) in
     let df ~f:_ ~x:_ ~dx = dx in
     { f; df }
 
-  (* x = x - z *)
   let ( $- ) z =
-    let f x = Tensor.sub_scalar x (Scalar.f z) in
-    let df ~f:_ ~x:_ ~dx = dx in
-    { f; df }
-
-  (* x = z - x *)
-  let ( -$ ) z =
     let f x = Tensor.(f z - x) in
     let df ~f:_ ~x:_ ~dx = dx in
     { f; df }
 
-  (* x = x * z *)
   let ( $* ) z =
     let f x = Tensor.mul_scalar x (Scalar.f z) in
     let df ~f:_ ~x:_ ~dx = Tensor.(mul_scalar dx Scalar.(f z)) in
     { f; df }
 
-  (* x = z/ x *)
   let ( $/ ) z =
     let f x = Tensor.(mul_scalar (reciprocal x) (Scalar.f z)) in
     let df ~f:_ ~x ~dx =
@@ -714,13 +704,11 @@ module Ops = struct
     in
     { f; df }
 
-  (* x = x/z *)
   let ( /$ ) z =
     let f x = Tensor.(mul_scalar x (Scalar.f Float.(1. / z))) in
     let df ~f:_ ~x:_ ~dx = Tensor.(mul_scalar dx (Scalar.f Float.(1. / z))) in
     { f; df }
 
-  (* z = xy, dz = dx y + x dy *)
   let ( *@ ) =
     let f x y =
       if List.length (Tensor.shape x) < 2 && List.length (Tensor.shape y) < 2
@@ -1023,7 +1011,6 @@ let ( * ) x = make_binary Ops.( * ) x
 let ( / ) x = make_binary Ops.( / ) x
 let ( $+ ) z = make_unary Ops.(( $+ ) z)
 let ( $- ) z = make_unary Ops.(( $- ) z)
-let ( -$ ) z = make_unary Ops.(( -$ ) z)
 let ( $* ) z = make_unary Ops.(( $* ) z)
 let ( $/ ) z = make_unary Ops.(( $/ ) z)
 let ( /$ ) z = make_unary Ops.(( /$ ) z)
@@ -1258,7 +1245,6 @@ module C = struct
   let ( / ) = make_binary Ops.( / )
   let ( $+ ) z = make_unary Ops.(( $+ ) z)
   let ( $- ) z = make_unary Ops.(( $- ) z)
-  let ( -$ ) z = make_unary Ops.(( -$ ) z)
   let ( $* ) z = make_unary Ops.(( $* ) z)
   let ( $/ ) z = make_unary Ops.(( $/ ) z)
   let ( /$ ) z = make_unary Ops.(( /$ ) z)

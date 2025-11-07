@@ -134,7 +134,6 @@ val ( * ) : _ some t -> _ some t -> any t
 val ( / ) : _ some t -> _ some t -> any t
 val ( $+ ) : float -> 'a some t -> 'a t
 val ( $- ) : float -> 'a some t -> 'a t
-val ( -$ ) : float -> 'a some t -> 'a t
 val ( $* ) : float -> 'a some t -> 'a t
 val ( $/ ) : float -> 'a some t -> 'a t
 val ( /$ ) : float -> 'a some t -> 'a t
@@ -221,7 +220,6 @@ module C : sig
   val ( / ) : const t -> const t -> const t
   val ( $+ ) : float -> const t -> const t
   val ( $- ) : float -> const t -> const t
-  val ( -$ ) : float -> const t -> const t
   val ( $* ) : float -> const t -> const t
   val ( $/ ) : float -> const t -> const t
   val ( /$ ) : float -> const t -> const t
