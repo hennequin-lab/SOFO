@@ -233,7 +233,7 @@ module Adam (P : Prms.T) = struct
       let g_squared = P.map ~f:Maths.C.sqr g in
       let m = M.apply ~momentum:config.beta_1 ~avg:state.m g in
       let v = M.apply ~momentum:config.beta_2 ~avg:state.v g_squared in
-      let m_hat = P.C.(Float.(1. / (1. - beta1_t)) $* m) in
+      let m_hat = if config.debias then P.C.(Float.(1. / (1. - beta1_t)) $* m) else m in
       let v_hat = P.C.(Float.(1. / (1. - beta2_t)) $* v) in
       let v_hat_sqrt = P.map ~f:Maths.C.sqrt v_hat in
       (* momentum correction of learning rate *)

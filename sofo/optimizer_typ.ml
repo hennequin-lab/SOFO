@@ -74,6 +74,7 @@ module Config = struct
       ; beta_2 : float
       ; eps : float
       ; weight_decay : float option
+      ; debias : bool
       }
 
     let default =
@@ -83,6 +84,7 @@ module Config = struct
       ; beta_2 = 0.999
       ; eps = 1e-8
       ; weight_decay = None
+      ; debias = true
       }
   end
 end
