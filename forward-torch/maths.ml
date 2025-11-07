@@ -134,8 +134,9 @@ let f x = E (C (Tensor.f x))
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
 
+(* detach primal tensor from graph *)
 let primal_tensor_detach x =
-  let x_t = to_tensor x in
+  let x_t = to_tensor x |> Tensor.detach in
   E (C x_t)
 
 let eye ?device ?kind n =
@@ -1339,6 +1340,14 @@ module C = struct
     | C x ->
       let u, s, vt = Tensor.svd ~some:true ~compute_uv:true x in
       of_tensor u, of_tensor s, of_tensor vt
+    | _ -> raise Not_const
+
+  (* x = Q diag(l) Q^H *)
+  let eigh ?(uplo = "l") (E x) =
+    match x with
+    | C x ->
+      let l, q = Tensor.linalg_eigh ~uplo x in
+      of_tensor l, of_tensor q
     | _ -> raise Not_const
 
   let qr (E x) =

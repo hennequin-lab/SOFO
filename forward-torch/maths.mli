@@ -52,7 +52,7 @@ val f : float -> const t
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
 
-val primal_tensor_detach :  _ some t -> const t
+val primal_tensor_detach : _ some t -> const t
 val eye : (int -> const t) with_tensor_params
 val zeros : (int list -> const t) with_tensor_params
 val ones : (?scale:float -> int list -> const t) with_tensor_params
@@ -231,6 +231,7 @@ module C : sig
   val block_diag : const t list -> const t
   val gumbel_softmax : tau:float -> with_noise:bool -> discrete:bool -> const t -> const t
   val svd : const t -> const t * const t * const t
+  val eigh : ?uplo:string -> const t -> const t * const t
   val qr : const t -> const t * const t
   val cholesky : const t -> const t
   val linsolve_triangular : ?left:bool -> ?upper:bool -> const t -> const t -> const t
