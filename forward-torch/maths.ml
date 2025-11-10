@@ -1104,56 +1104,32 @@ let block_diag x_list =
     in
     E (D (y, Explicit dy)))
 
-let gumbel_softmax ~tau ~with_noise ~discrete x =
-  let x_p = to_tensor x in
+(* if [hard], the returned samples will be discretized as one-hot vectors, 
+  but will be differentiated as if it is the soft sample in autograd. *)
+let gumbel_softmax ~tau ~hard logits =
+  let logits_p = to_tensor logits in
   let gumbel_noise =
-    if with_noise
-    then (
-      let uniform_noise = Tensor.uniform x_p ~from:0. ~to_:1. in
-      Some Tensor.(neg_ (log_ (neg_ (log_ uniform_noise)))))
-    else None
+    let uniform_noise = Tensor.uniform logits_p ~from:0. ~to_:1. in
+    Tensor.(neg_ (log_ (neg_ (log_ uniform_noise))))
   in
-  let logits =
-    match gumbel_noise with
-    | None -> Tensor.(div_scalar x_p (Scalar.f tau))
-    | Some gumbel_noise -> Tensor.(div_scalar (x_p + gumbel_noise) (Scalar.f tau))
-  in
-  let reduce_dim_list = List.tl_exn (Tensor.shape x_p) in
-  let num_classes = List.nth_exn (Tensor.shape x_p) 1 in
-  let summed_exp_logits =
-    Tensor.(
-      sum_dim_intlist
-        (exp logits)
-        ~dim:(Some reduce_dim_list)
-        ~keepdim:true
-        ~dtype:(Tensor.type_ x_p))
-  in
-  let y = Tensor.(exp (logits - logsumexp ~dim:reduce_dim_list ~keepdim:true logits)) in
+  let logits_ = Tensor.(div_scalar (logits_p + gumbel_noise) (Scalar.f tau)) in
+  let reduce_dim_list = List.tl_exn (Tensor.shape logits_p) in
+  let num_classes = List.nth_exn (Tensor.shape logits_p) 1 in
+  let y = Tensor.(exp (logits_ - logsumexp ~dim:reduce_dim_list ~keepdim:true logits_)) in
   let y_final =
-    if discrete
+    if hard
     then (
       let pos = Tensor.argmax y ~dim:1 ~keepdim:true in
       Tensor.one_hot pos ~num_classes |> Tensor.squeeze)
     else y
   in
-  match x with
+  match logits with
   | E (C _) -> E (C y_final)
   | E (D _) ->
     let dy =
-      let dx = tangent_tensor_exn x in
-      let tmp1 = Tensor.(div_scalar (y * dx) (Scalar.f tau)) in
-      let reduce_dim_list_dx = List.map reduce_dim_list ~f:Int.succ in
-      let tmp2 =
-        let logits_diff = Tensor.(div_scalar (exp logits * dx) (Scalar.f tau)) in
-        let logits_diff_summed =
-          Tensor.sum_dim_intlist
-            logits_diff
-            ~dim:(Some reduce_dim_list_dx)
-            ~keepdim:true
-            ~dtype:(Tensor.type_ dx)
-        in
-        Tensor.(logits_diff_summed * y / summed_exp_logits)
-      in
+      let dlogits = tangent_tensor_exn logits in
+      let tmp1 = Tensor.(div_scalar (y * dlogits) (Scalar.f tau)) in
+      let tmp2 = Tensor.(div_scalar (y * y * dlogits) (Scalar.f tau)) in
       Tensor.(tmp1 - tmp2)
     in
     E (D (y_final, Explicit dy))

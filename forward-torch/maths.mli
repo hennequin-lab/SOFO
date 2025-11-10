@@ -141,7 +141,7 @@ val ( *@ ) : _ some t -> _ some t -> any t
 val einsum : (_ some t * string) list -> string -> any t
 val concat : dim:int -> _ some t list -> any t
 val block_diag : _ some t list -> any t
-val gumbel_softmax : tau:float -> with_noise:bool -> discrete:bool -> 'a some t -> any t
+val gumbel_softmax : tau:float -> hard:bool -> 'a some t -> any t
 val cholesky : 'a some t -> 'a some t
 val linsolve_triangular : ?left:bool -> ?upper:bool -> _ some t -> _ some t -> any t
 val linsolve : left:bool -> _ some t -> _ some t -> any t
