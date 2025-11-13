@@ -79,7 +79,7 @@ let device x = x |> to_tensor |> Tensor.device
 let kind x = x |> to_tensor |> Tensor.type_
 
 let numel x =
-  x |> to_tensor |> Tensor.shape |> List.fold ~init:0 ~f:Int.( + ) |> Int.max 1
+  x |> to_tensor |> Tensor.shape |> List.fold ~init:1 ~f:Int.( * ) |> Int.max 1
 
 let tangent_exn (E x : _ some t) : const t =
   match x with
