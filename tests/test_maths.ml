@@ -226,6 +226,13 @@ let unary_tests =
             | false -> None
           in
           mean ?dim ~keepdim )
+    ; ( "max"
+      , []
+      , fun shape ->
+          let n_dims = List.length shape in
+          let keepdim = Random.bool () in
+          let dim = Int.(Random.int n_dims) in
+          max ~dim ~keepdim )
     ; ( "transpose"
       , [ `order_greater_than 2 ]
       , fun shape ->

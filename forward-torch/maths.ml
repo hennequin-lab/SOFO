@@ -510,6 +510,70 @@ module Ops = struct
     in
     { f; df }
 
+  (* let[@warning "-16"] max ?(keepdim = false) ~dim =
+    let f x =
+      let values, indices = Tensor.(max_dim x ~dim ~keepdim) in
+      values
+    in
+    let df ~f ~x ~dx =
+      let values, indices = f in 
+    in
+    { f; df } *)
+
+  (* let[@warning "-16"] max ?(keepdim = false) ~dim =
+    let f x =
+      let values, _ = Tensor.(max_dim x ~dim ~keepdim) in
+      values
+    in
+    let df ~f:_ ~x ~dx =
+      let print s = Stdio.print_endline (Sexp.to_string_hum s) in
+      (* dx : [k; xshape...] *)
+      (* indices : xshape with dim removed *)
+      let values, indices = Tensor.(max_dim x ~dim ~keepdim) in
+      print [%message (dim : int) (keepdim : bool)];
+      print [%message (Tensor.shape x : int list)];
+      print [%message (Tensor.shape dx : int list)];
+      print [%message (Tensor.shape values : int list)];
+      print [%message (Tensor.shape indices : int list)];
+      (* Put back the reduced dimension for gather *)
+      let indices = if keepdim then indices else Tensor.unsqueeze indices ~dim in
+      (* Expand indices so k matches dx's leading dim *)
+      let dx_shape = Tensor.shape dx in
+      let k = List.hd_exn dx_shape in
+      let target_shape =
+        if keepdim
+        then dx_shape |> List.mapi ~f:(fun i s -> if i = dim + 1 then 1 else s)
+        else
+          k :: Tensor.shape values
+          |> List.mapi ~f:(fun i s -> if i = dim + 1 then 1 else s)
+      in
+      print [%message (target_shape : int list)];
+      let indices = Tensor.expand indices ~size:target_shape ~implicit:true in
+      print [%message (Tensor.shape indices : int list)];
+      (* gather the tangent along the max locations *)
+      Tensor.gather dx ~dim:(dim + 1) ~index:indices ~sparse_grad:false
+    in
+    { f; df } *)
+
+  let[@warning "-16"] max ?(keepdim = false) ~dim =
+    let f x =
+      let values, _ = Tensor.max_dim x ~dim ~keepdim in
+      values
+    in
+    let df ~f:_ ~x ~dx =
+      let _, indices = Tensor.(max_dim x ~dim ~keepdim) in
+      let indices = if keepdim then indices else Tensor.unsqueeze indices ~dim in
+      let indices =
+        let k = List.hd_exn (Tensor.shape dx) in
+        Tensor.unsqueeze indices ~dim:0
+        |> Tensor.expand ~size:(k :: Tensor.shape indices) ~implicit:true
+      in
+      let gather_dim = dim + 1 in
+      let out = Tensor.gather dx ~dim:gather_dim ~index:indices ~sparse_grad:false in
+      if keepdim then out else Tensor.squeeze_dim out ~dim:gather_dim
+    in
+    { f; df }
+
   let[@warning "-16"] logsumexp ?(keepdim = false) ~dim =
     let f x = Tensor.logsumexp x ~dim ~keepdim in
     let df ~f:y ~x ~dx =
@@ -998,6 +1062,7 @@ let softplus x = make_unary Ops.softplus x
 let lgamma x = make_unary Ops.lgamma x
 let slice ?start ?end_ ?step ~dim = make_unary Ops.(slice ?start ?end_ ?step ~dim)
 let mean ?keepdim ?dim x = make_unary (Ops.mean ?keepdim ?dim) x
+let max ?keepdim ~dim x = make_unary (Ops.max ?keepdim ~dim) x
 let sum ?keepdim ?dim x = make_unary (Ops.sum ?keepdim ?dim) x
 let logsumexp ?keepdim ~dim = make_unary (Ops.logsumexp ?keepdim ~dim)
 let max_2d_dim1 ~keepdim = make_unary (Ops.max_2d_dim1 ~keepdim)
@@ -1209,6 +1274,7 @@ module C = struct
   let slice ?start ?end_ ?step ~dim = make_unary Ops.(slice ?start ?end_ ?step ~dim)
   let sum ?keepdim ?dim = make_unary (Ops.sum ?keepdim ?dim)
   let mean ?keepdim ?dim = make_unary (Ops.mean ?keepdim ?dim)
+  let max ?keepdim ~dim = make_unary (Ops.max ?keepdim ~dim)
   let logsumexp ?keepdim ~dim = make_unary (Ops.logsumexp ?keepdim ~dim)
   let max_2d_dim1 ~keepdim = make_unary (Ops.max_2d_dim1 ~keepdim)
 

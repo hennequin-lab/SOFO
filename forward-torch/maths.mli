@@ -116,6 +116,7 @@ val lgamma : 'a some t -> 'a t
 val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> 'a some t -> 'a t
 val sum : ?keepdim:bool -> ?dim:int list -> 'a some t -> 'a t
 val mean : ?keepdim:bool -> ?dim:int list -> 'a some t -> 'a t
+val max : ?keepdim:bool -> dim:int -> 'a some t -> 'a t
 val logsumexp : ?keepdim:bool -> dim:int list -> 'a some t -> 'a t
 val max_2d_dim1 : keepdim:bool -> 'a some t -> 'a t
 
@@ -202,6 +203,7 @@ module C : sig
   val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> const t -> const t
   val sum : ?keepdim:bool -> ?dim:int list -> const t -> const t
   val mean : ?keepdim:bool -> ?dim:int list -> const t -> const t
+  val max : ?keepdim:bool -> dim:int -> const t -> const t
   val logsumexp : ?keepdim:bool -> dim:int list -> const t -> const t
   val max_2d_dim1 : keepdim:bool -> const t -> const t
 
