@@ -61,11 +61,11 @@ let max_iter = 10_000
 let rec loop ~t ~out ~state =
   Stdlib.Gc.major ();
   let x, y = data_minibatch batch_size in
-  let theta, tangents = O.prepare ~config state in
+  let theta, tangents, mask = O.prepare ~config state in
   let y_pred = Model.f ~theta x in
   let loss = Loss.mse ~output_dims:[ 1 ] (y - y_pred) in
   let ggn = Loss.mse_ggn ~output_dims:[ 1 ] (const y) ~vtgt:(tangent_exn y_pred) in
-  let new_state = O.step ~config ~info:{ loss; ggn; tangents } state in
+  let new_state = O.step ~config ~info:{ loss; ggn; tangents; mask } state in
   if t % 100 = 0
   then (
     let loss = to_float_exn (const loss) in

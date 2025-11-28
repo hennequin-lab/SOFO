@@ -85,10 +85,33 @@ module SOFO (P : Prms.T) = struct
        won't be udpated *)
     P.map theta ~f:(fun x -> randn_like_k ~k (Prms.value x)) |> orthonormalise
 
-  let prepare ~(config : (_, _) config) state =
+  (* mask params and tangents similarly. *)
+  let prepare ?(mask = false) ~(config : (_, _) config) state =
     let theta = params state in
     let vs = random_tangents ~n_tangents:config.n_tangents theta in
-    P.dual ~tangent:vs (P.value theta), vs
+    if mask
+    then (
+      let theta_t = P.value theta |> P.map ~f:to_tensor in
+      let masks =
+        P.map theta_t ~f:(fun x ->
+          (* value 1 with probability [p] *)
+          let mask = Tensor.bernoulli_float_ x ~p:0.1 in
+          mask)
+      in
+      let theta_p_masked =
+        P.map2 theta_t masks ~f:(fun x m ->
+          Tensor.masked_fill x ~mask:m ~value:(Scalar.f 0.) |> of_tensor)
+      in
+      let vs_masked =
+        P.map2 vs masks ~f:(fun v m ->
+          let v_t = to_tensor v in
+          let m_u =
+            Tensor.unsqueeze m ~dim:0 |> Tensor.broadcast_to ~size:(Tensor.shape v_t)
+          in
+          Tensor.masked_fill v_t ~mask:m_u ~value:(Scalar.f 0.) |> of_tensor)
+      in
+      P.dual ~tangent:vs_masked theta_p_masked, vs_masked, Some (P.map ~f:of_tensor masks))
+    else P.dual ~tangent:vs (P.value theta), vs, None
 
   (* fold vs over sets of v_i s, multiply with associated weights. *)
   let weighted_vs_sum ~vs weights =
@@ -127,6 +150,12 @@ module SOFO (P : Prms.T) = struct
       let loss_t = tangent_exn info.loss in
       let delta =
         sofo_update ~damping:config.damping ~tangents:info.tangents ~ggn:info.ggn loss_t
+      in
+      (* TODO: mask delta *)
+      let delta =
+        match info.mask with
+        | None -> delta
+        | Some mask -> P.map2 delta mask ~f:(fun x m -> Maths.(const (x * m)))
       in
       let new_theta = U.update ~learning_rate:eta ~theta:(params state) delta in
       { theta = new_theta }
