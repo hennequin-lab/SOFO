@@ -11,16 +11,21 @@ let base = Optimizer.Config.Base.default
 (* -----------------------------------------
    -- Model setup and optimizer
    ----------------------------------------- *)
+let d_in, d_out = 100, 3
+
+module P = Prms.Single
+
+let theta_init () : const P.t =
+  let sigma = Float.(1. / sqrt (of_int d_in)) in
+  sigma $* randn ~kind:base.kind ~device:base.device [ d_in; d_out ]
+
+let theta_0 = theta_init ()
 
 module Model = struct
-  module P = Prms.Single
+  module P = P
 
   let f ~(theta : _ some P.t) input = Maths.(input *@ theta)
-
-  let init ~d_in ~d_out : P.param =
-    let sigma = Float.(1. / sqrt (of_int d_in)) in
-    let theta = sigma $* randn ~kind:base.kind ~device:base.device [ d_in; d_out ] in
-    P.free theta
+  let init : P.param = P.free theta_0
 end
 
 module O = Optimizer.SOFO (Model.P)
@@ -33,10 +38,8 @@ let config =
    -- Generate linear regression data.
    ----------------------------------------- *)
 
-let d_in, d_out = 100, 3
-
 let data_minibatch =
-  let teacher = Model.init ~d_in ~d_out |> Model.P.value in
+  let teacher = theta_init () in
   let input_cov_sqrt =
     let u, _ = C.qr (randn ~device:base.device [ d_in; d_in ]) in
     let lambda =
@@ -58,14 +61,21 @@ let data_minibatch =
 let batch_size = 512
 let max_iter = 10_000
 
+let mask =
+  O.P.map theta_0 ~f:(fun x ->
+    (* value 1 with probability [p] *)
+    let x_t = to_tensor x in
+    let mask = Torch.Tensor.bernoulli_float_ x_t ~p:0.1 in
+    of_tensor mask)
+
 let rec loop ~t ~out ~state =
   Stdlib.Gc.major ();
   let x, y = data_minibatch batch_size in
-  let theta, tangents, mask = O.prepare ~config state in
+  let theta, tangents = O.prepare ~mask ~config state in
   let y_pred = Model.f ~theta x in
   let loss = Loss.mse ~output_dims:[ 1 ] (y - y_pred) in
   let ggn = Loss.mse_ggn ~output_dims:[ 1 ] (const y) ~vtgt:(tangent_exn y_pred) in
-  let new_state = O.step ~config ~info:{ loss; ggn; tangents; mask } state in
+  let new_state = O.step ~config ~info:{ loss; ggn; tangents; mask = Some mask } state in
   if t % 100 = 0
   then (
     let loss = to_float_exn (const loss) in
@@ -77,4 +87,4 @@ let rec loop ~t ~out ~state =
 let _ =
   let out = in_dir "loss" in
   Bos.Cmd.(v "rm" % "-f" % out) |> Bos.OS.Cmd.run |> ignore;
-  loop ~t:0 ~out ~state:(O.init (Model.init ~d_in ~d_out))
+  loop ~t:0 ~out ~state:(O.init Model.init)

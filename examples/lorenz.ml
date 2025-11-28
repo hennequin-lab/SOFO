@@ -168,9 +168,9 @@ let rec loop ~t ~out ~state running_avg =
           (), Some x)
         else (), None) )
   in
-  let theta, tangents, mask = O.prepare ~config state in
+  let theta, tangents = O.prepare ~config state in
   let loss, ggn = RNN.f ~data ~y0:init_cond theta in
-  let new_state = O.step ~config ~info:{ loss; ggn; tangents; mask } state in
+  let new_state = O.step ~config ~info:{ loss; ggn; tangents; mask = None } state in
   let loss = Maths.to_float_exn (Maths.const loss) in
   let running_avg =
     let loss_avg =

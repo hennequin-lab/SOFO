@@ -86,32 +86,27 @@ module SOFO (P : Prms.T) = struct
     P.map theta ~f:(fun x -> randn_like_k ~k (Prms.value x)) |> orthonormalise
 
   (* mask params and tangents similarly. *)
-  let prepare ?(mask = false) ~(config : (_, _) config) state =
+  let prepare ?mask ~(config : (_, _) config) state =
     let theta = params state in
     let vs = random_tangents ~n_tangents:config.n_tangents theta in
-    if mask
-    then (
+    match mask with
+    | None -> P.dual ~tangent:vs (P.value theta), vs
+    | Some mask ->
+      let mask = P.map mask ~f:to_tensor in
       let theta_t = P.value theta |> P.map ~f:to_tensor in
-      let masks =
-        P.map theta_t ~f:(fun x ->
-          (* value 1 with probability [p] *)
-          let mask = Tensor.bernoulli_float_ x ~p:0.1 in
-          mask)
-      in
       let theta_p_masked =
-        P.map2 theta_t masks ~f:(fun x m ->
+        P.map2 theta_t mask ~f:(fun x m ->
           Tensor.masked_fill x ~mask:m ~value:(Scalar.f 0.) |> of_tensor)
       in
       let vs_masked =
-        P.map2 vs masks ~f:(fun v m ->
+        P.map2 vs mask ~f:(fun v m ->
           let v_t = to_tensor v in
           let m_u =
             Tensor.unsqueeze m ~dim:0 |> Tensor.broadcast_to ~size:(Tensor.shape v_t)
           in
           Tensor.masked_fill v_t ~mask:m_u ~value:(Scalar.f 0.) |> of_tensor)
       in
-      P.dual ~tangent:vs_masked theta_p_masked, vs_masked, Some (P.map ~f:of_tensor masks))
-    else P.dual ~tangent:vs (P.value theta), vs, None
+      P.dual ~tangent:vs_masked theta_p_masked, vs_masked
 
   (* fold vs over sets of v_i s, multiply with associated weights. *)
   let weighted_vs_sum ~vs weights =

@@ -23,10 +23,10 @@ module SOFO (P : Prms.T) : sig
       ]}
      *)
   val prepare
-    :  ?mask:bool
+    :  ?mask:const P.t
     -> config:(_, _) config
     -> state
-    -> dual P.t * const P.t * const P.t option
+    -> dual P.t * const P.t
 end
 
 (** Stochastic gradient descent *)
