@@ -96,7 +96,7 @@ module SOFO (P : Prms.T) = struct
       let theta_t = P.value theta |> P.map ~f:to_tensor in
       let theta_p_masked =
         P.map2 theta_t mask ~f:(fun x m ->
-          Tensor.masked_fill x ~mask:m ~value:(Scalar.f 0.) |> of_tensor)
+          Tensor.(x * m) |> of_tensor)
       in
       let vs_masked =
         P.map2 vs mask ~f:(fun v m ->
@@ -104,7 +104,7 @@ module SOFO (P : Prms.T) = struct
           let m_u =
             Tensor.unsqueeze m ~dim:0 |> Tensor.broadcast_to ~size:(Tensor.shape v_t)
           in
-          Tensor.masked_fill v_t ~mask:m_u ~value:(Scalar.f 0.) |> of_tensor)
+          Tensor.(v_t * m_u) |> of_tensor)
       in
       P.dual ~tangent:vs_masked theta_p_masked, vs_masked
 
