@@ -19,7 +19,7 @@ let base = Optimizer.Config.Base.default
    ----------------------------------------- *)
 let d_in, d_out = 100, 3
 
-module P = Prms.Single 
+module P = Prms.Single
 
 let theta_init () : const P.t =
   let sigma = Float.(1. / sqrt (of_int d_in)) in
@@ -38,75 +38,123 @@ module Model = struct
 end
 
 (* -----------------------------------------
-   -- Utility functions
+   -- Pruning functions
    ----------------------------------------- *)
-(* self define mask *)
-let mask_p ~p theta =
-  P.map theta ~f:(fun x ->
-    (* value 1 with probability [p] *)
-    let x_t = to_tensor x in
-    let mask = Torch.Tensor.bernoulli_float_ x_t ~p in
-    of_tensor mask)
+module Prune = struct
+  open Torch
 
-let flatten (x : _ some P.t) =
-  P.fold x ~init:[] ~f:(fun accu (x, _) ->
-    let x_reshaped = Torch.Tensor.reshape (to_tensor x) ~shape:[ -1; 1 ] in
-    x_reshaped :: accu)
-  |> Torch.Tensor.concat ~dim:0
+  (* self define mask *)
+  let mask_p ~p theta =
+    P.map theta ~f:(fun x ->
+      (* value 1 with probability [p] *)
+      let x_t = to_tensor x in
+      let mask = Torch.Tensor.bernoulli_float_ x_t ~p in
+      of_tensor mask)
 
-let count_remaining mask =
-  let mask_flattened = flatten mask in
-  (* masked_select to pick only entries where prev_mask == 1 *)
-  Torch.Tensor.masked_select mask_flattened ~mask:mask_flattened
-  |> Torch.Tensor.reshape ~shape:[ -1; 1 ]
-  |> Torch.Tensor.shape
-  |> List.hd_exn
+  let flatten (x : _ some P.t) =
+    P.fold x ~init:[] ~f:(fun accu (x, _) ->
+      let x_reshaped = Torch.Tensor.reshape (to_tensor x) ~shape:[ -1; 1 ] in
+      x_reshaped :: accu)
+    |> Torch.Tensor.concat ~dim:0
 
-let pruning_mask ?(n_surviving_min = 10) ~p ~mask_prev (theta : _ some P.t) : const P.t =
-  let open Torch in
-  let theta_flattened_abs = P.map ~f:Tensor.abs (flatten theta) in
-  (* If previous mask present, build a flattened mask tensor and select only surviving values *)
-  let surviving_values =
+  let count_mask mask =
+    Torch.Tensor.masked_select mask ~mask
+    |> Torch.Tensor.reshape ~shape:[ -1; 1 ]
+    |> Torch.Tensor.shape
+    |> List.hd_exn
+
+  let count_remaining mask =
+    let mask_flattened = flatten mask in
+    (* masked_select to pick only entries where prev_mask == 1 *)
+    count_mask mask_flattened
+
+  let n_params x =
+    let x_shape = Maths.shape x in
+    List.fold x_shape ~init:1 ~f:(fun accu x -> Int.(accu * x))
+
+  (* Flatten a P.t into a single tensor *)
+  let flatten_abs theta = P.map ~f:Tensor.abs (flatten theta)
+
+  (* Select only entries that are 1 in prev mask, or pass through unchanged *)
+  let surviving_values ~mask_prev flat_values =
     match mask_prev with
-    | None -> theta_flattened_abs
-    | Some prev_mask ->
-      (* flatten and concat prev_mask to a single mask tensor *)
-      let prev_mask_t = flatten prev_mask in
-      (* masked_select to pick only entries where prev_mask == 1 *)
-      Tensor.masked_select theta_flattened_abs ~mask:prev_mask_t
-      |> Tensor.reshape ~shape:[ -1; 1 ]
-  in
-  (* Number of surviving parameters *)
-  let n_surviving = Tensor.shape surviving_values |> List.hd_exn in
-  let theta_sorted, _ = Tensor.sort surviving_values ~dim:0 ~descending:false in
-  let idx =
-    let idx = Int.(of_float Float.(p * of_int n_surviving)) in
-    (* clamp index into valid range [0, n_surviving - 1] *)
-    if idx >= n_surviving then Int.(n_surviving - 1) else idx
-  in
-  let threshold = Tensor.get_float2 theta_sorted idx 0 in
-  (* Build new mask: keep weights if |weights| > threshold *)
-  let new_mask =
+    | None -> flat_values
+    | Some prev ->
+      let prev_flat = flatten prev in
+      Tensor.masked_select flat_values ~mask:prev_flat |> Tensor.reshape ~shape:[ -1; 1 ]
+
+  (* Generic threshold computation *)
+  let threshold_of_values ~p surviving_values =
+    let v = Tensor.reshape surviving_values ~shape:[ -1; 1 ] in
+    let n = List.hd_exn (Tensor.shape v) in
+    let sorted, _ = Tensor.sort v ~dim:0 ~descending:false in
+    let idx = Int.(clamp_exn (of_float Float.(p *. of_int n))) ~min:0 ~max:Int.(n - 1) in
+    Tensor.get_float2 sorted idx 0
+
+  (* Build a per-tensor mask given a global threshold *)
+  let mask_from_threshold theta threshold =
     P.map theta ~f:(fun w ->
-      (* mapped to 1 if greater than threshold *)
-      let m = Tensor.gt (Tensor.abs (to_tensor w)) (Scalar.f threshold) in
-      of_tensor m)
-  in
-  let n_surviving_new = count_remaining new_mask in
-  print [%message (n_surviving : int)];
-  if n_surviving_new < n_surviving_min
-  then (
-    (* do not prune anymore *)
-    match mask_prev with
-    | Some prev -> prev
-    | None -> P.map theta ~f:Maths.ones_like)
-  else (
-    (* combine with previous mask if exists: final = prev AND new_mask *)
+      Tensor.abs (to_tensor w) |> fun a -> Tensor.gt a (Scalar.f threshold) |> of_tensor)
+
+  (* Combine with previous mask *)
+  let combine mask_prev new_mask =
     match mask_prev with
     | None -> new_mask
     | Some prev ->
       P.map2 prev new_mask ~f:(fun m_prev m_new ->
-        Tensor.logical_and (to_tensor m_prev) (to_tensor m_new) |> of_tensor))
+        Tensor.logical_and (to_tensor m_prev) (to_tensor m_new) |> of_tensor)
+end
+
+let pruning_mask_layerwise ?(p_surviving_min = 0.1) ~p ~mask_prev (theta : _ some P.t)
+  : const P.t
+  =
+  let open Torch in
+  let open Prune in
+  let prune_tensor theta mask_prev_opt =
+    let theta_t = to_tensor theta in
+    (* Current surviving values *)
+    let curr_values =
+      match mask_prev_opt with
+      | None -> Tensor.reshape theta_t ~shape:[ -1; 1 ]
+      | Some m_prev ->
+        Tensor.masked_select theta_t ~mask:(to_tensor m_prev)
+        |> Tensor.reshape ~shape:[ -1; 1 ]
+    in
+    let threshold = threshold_of_values ~p curr_values in
+    let new_mask_t = Tensor.gt (Tensor.abs theta_t) (Scalar.f threshold) in
+    let new_mask = of_tensor new_mask_t in
+    let n_new = count_mask new_mask_t in
+    let min_required = Int.(of_float Float.(p_surviving_min * of_int (n_params theta))) in
+    match mask_prev_opt with
+    | None -> new_mask
+    | Some prev ->
+      if n_new < min_required
+      then prev
+      else Tensor.logical_and (to_tensor prev) new_mask_t |> of_tensor
+  in
+  match mask_prev with
+  | None -> P.map theta ~f:(fun t -> prune_tensor t None)
+  | Some prev -> P.map2 theta prev ~f:(fun t m -> prune_tensor t (Some m))
+
+let pruning_mask_global ?(n_surviving_min = 10) ~p ~mask_prev (theta : _ some P.t)
+  : const P.t
+  =
+  let open Prune in
+  (* Global surviving values *)
+  let flat_abs = flatten_abs theta in
+  let surviving = surviving_values ~mask_prev flat_abs in
+  (* Threshold for global pruning *)
+  let threshold = threshold_of_values ~p surviving in
+  (* Build new masks using this threshold *)
+  let new_mask = mask_from_threshold theta threshold in
+  let n_new = count_remaining new_mask in
+  (* only use new mask if n_new is larger than n_surviving_min *)
+  if n_new < n_surviving_min
+  then (
+    match mask_prev with
+    | Some prev -> prev
+    | None -> P.map theta ~f:Maths.ones_like)
+  else combine mask_prev new_mask
 
 module O = Optimizer.SOFO (Model.P)
 
@@ -177,7 +225,7 @@ let traine_prune ~p =
   (* first train the network with no mask *)
   let state_0 = train ~mask:None ~prune_iter:0 in
   let rec pruning_loop ~prune_iter ~state ~mask =
-    let mask_new = pruning_mask ~p ~mask_prev:mask (O.P.value (O.params state)) in
+    let mask_new = pruning_mask_global ~p ~mask_prev:mask (O.P.value (O.params state)) in
     let state_new = train ~mask:(Some mask_new) ~prune_iter in
     if prune_iter < max_prune_iter
     then
