@@ -1,6 +1,6 @@
 (library
  (name forward_torch)
- (modules maths prms_typ prms)
+ (modules maths prms_typ prms reverse)
  (inline_tests)
  (public_name forward-torch)
  (libraries stdio base torch npy)

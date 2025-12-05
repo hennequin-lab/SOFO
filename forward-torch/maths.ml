@@ -516,7 +516,7 @@ module Ops = struct
       values
     in
     let df ~f ~x ~dx =
-      let values, indices = f in 
+      let values, indices = f in
     in
     { f; df } *)
 
@@ -1169,7 +1169,7 @@ let block_diag x_list =
     in
     E (D (y, Explicit dy)))
 
-(* if [hard], the returned samples will be discretized as one-hot vectors, 
+(* if [hard], the returned samples will be discretized as one-hot vectors,
   but will be differentiated as if it is the soft sample in autograd. *)
 let gumbel_softmax ~tau ~hard logits =
   let logits_p = to_tensor logits in
