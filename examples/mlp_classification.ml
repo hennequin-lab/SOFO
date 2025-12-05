@@ -27,7 +27,7 @@ let batch_size = 256
 let input_size = if cifar then Int.(32 * 32 * 3) else Int.(28 * 28)
 let full_batch_size = 60_000
 let layer_sizes = [ 128; output_dim ]
-let num_epochs_to_run = 200
+let num_epochs_to_run = 1
 let max_iter = Int.(full_batch_size * num_epochs_to_run / batch_size)
 let epoch_of t = Float.(of_int t * of_int batch_size / of_int full_batch_size)
 let max_prune_iter = 50
@@ -191,6 +191,7 @@ module Prune = struct
       let mask = Torch.Tensor.bernoulli_float_ x_t ~p in
       of_tensor mask)
 
+  (* Flatten a P.t into a single vector *)
   let flatten (x : _ some P.t) =
     P.fold x ~init:[] ~f:(fun accu (x, _) ->
       let x_reshaped = Torch.Tensor.reshape (to_tensor x) ~shape:[ -1; 1 ] in
@@ -212,9 +213,6 @@ module Prune = struct
     let x_shape = Maths.shape x in
     List.fold x_shape ~init:1 ~f:(fun accu x -> Int.(accu * x))
 
-  (* Flatten a P.t into a single tensor *)
-  let flatten_abs (theta : _ Maths.some P.t) = Tensor.abs (flatten theta)
-
   (* Select only entries that are 1 in prev mask, or pass through unchanged *)
   let surviving_values ~mask_prev flat_values =
     match mask_prev with
@@ -223,11 +221,11 @@ module Prune = struct
       let prev_flat = flatten prev in
       Tensor.masked_select flat_values ~mask:prev_flat |> Tensor.reshape ~shape:[ -1; 1 ]
 
-  (* Generic threshold computation *)
+  (* Find the pth smallest absolute value in a Tensor *)
   let threshold_of_values ~p surviving_values =
     let v = Tensor.reshape surviving_values ~shape:[ -1; 1 ] in
     let n = List.hd_exn (Tensor.shape v) in
-    let sorted, _ = Tensor.sort v ~dim:0 ~descending:false in
+    let sorted, _ = Tensor.sort (Tensor.abs v) ~dim:0 ~descending:false in
     let idx = Int.(clamp_exn (of_float Float.(p *. of_int n))) ~min:0 ~max:Int.(n - 1) in
     Tensor.get_float2 sorted idx 0
 
@@ -245,7 +243,7 @@ module Prune = struct
         Tensor.logical_and (to_tensor m_prev) (to_tensor m_new) |> of_tensor)
 end
 
-let pruning_mask_layerwise ?(p_surviving_min = 0.1) ~p ~mask_prev (theta : _ some P.t)
+let pruning_mask_layerwise ?(p_surviving_min = 0.001) ~p ~mask_prev (theta : _ some P.t)
   : const P.t
   =
   let open Torch in
@@ -281,8 +279,7 @@ let pruning_mask_global ?(n_surviving_min = 10) ~p ~mask_prev (theta : _ some P.
   =
   let open Prune in
   (* Global surviving values *)
-  let flat_abs = flatten_abs theta in
-  let surviving = surviving_values ~mask_prev flat_abs in
+  let surviving = surviving_values ~mask_prev (flatten theta) in
   (* Threshold for global pruning *)
   let threshold = threshold_of_values ~p surviving in
   (* Build new masks using this threshold *)
@@ -364,7 +361,9 @@ let train_prune ~p =
   (* iteratively prune, then train *)
   let rec pruning_loop ~prune_iter ~state ~mask =
     let mask_new = pruning_mask_global ~p ~mask_prev:mask (O.P.value (O.params state)) in
-    (* save mask *)
+    (* let mask_new =
+      pruning_mask_layerwise ~p ~mask_prev:mask (O.P.value (O.params state))
+    in *)
     let mask_to_save =
       O.P.map mask_new ~f:(fun x ->
         let x_f = Tensor.to_type (to_tensor x) ~type_:base.kind in

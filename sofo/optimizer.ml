@@ -95,8 +95,7 @@ module SOFO (P : Prms.T) = struct
       let mask = P.map mask ~f:to_tensor in
       let theta_t = P.value theta |> P.map ~f:to_tensor in
       let theta_p_masked =
-        P.map2 theta_t mask ~f:(fun x m ->
-          Tensor.(x * m) |> of_tensor)
+        P.map2 theta_t mask ~f:(fun x m -> Tensor.(x * m) |> of_tensor)
       in
       let vs_masked =
         P.map2 vs mask ~f:(fun v m ->
@@ -146,7 +145,7 @@ module SOFO (P : Prms.T) = struct
       let delta =
         sofo_update ~damping:config.damping ~tangents:info.tangents ~ggn:info.ggn loss_t
       in
-      (* TODO: mask delta *)
+      (* CHECKED the update is masked properly *)
       let delta =
         match info.mask with
         | None -> delta

@@ -25,16 +25,11 @@ let theta_init () : const P.t =
   let sigma = Float.(1. / sqrt (of_int d_in)) in
   sigma $* randn ~kind:base.kind ~device:base.device [ d_in; d_out ]
 
-let theta_0 = theta_init ()
-
-(* save params *)
-let _ = P.C.save theta_0 ~kind:base.ba_kind ~out:(in_dir "theta_0")
-
 module Model = struct
   module P = P
 
   let f ~(theta : _ some P.t) input = Maths.(input *@ theta)
-  let init : P.param = P.free theta_0
+  let init () : P.param = P.free (theta_init ())
 end
 
 (* -----------------------------------------
@@ -192,8 +187,12 @@ let max_prune_iter = 10
 
 (* remove p at each round *)
 let p = 0.2
+let init_params = Model.init ()
 
-let train ~mask ~prune_iter =
+let _ =
+  O.P.C.save (Model.P.value init_params) ~kind:base.ba_kind ~out:(in_dir "init_params")
+
+let train ~init_params ~mask ~append =
   let rec loop ~t ~state =
     Stdlib.Gc.major ();
     let x, y = data_minibatch batch_size in
@@ -210,23 +209,35 @@ let train ~mask ~prune_iter =
       O.P.C.save
         (O.P.value (O.params new_state))
         ~kind:base.ba_kind
-        ~out:(in_dir (Printf.sprintf "theta_final_%d" prune_iter));
+        ~out:(in_dir ("sofo_params_" ^ append));
       Owl.Mat.(
         save_txt
           ~append:true
-          ~out:(in_dir (Printf.sprintf "loss_%d" prune_iter))
+          ~out:(in_dir ("loss_" ^ append))
           (of_array [| Float.of_int t; loss |] 1 2)));
     if t < max_iter then loop ~t:Int.(t + 1) ~state:new_state else new_state
   in
-  loop ~t:0 ~state:(O.init Model.init)
+  loop ~t:0 ~state:(O.init init_params)
 
 (* Start training and pruning loop *)
 let train_prune ~p =
   (* first train the network with no mask *)
-  let state_0 = train ~mask:None ~prune_iter:0 in
+  let state_0 = train ~init_params ~mask:None ~append:(Int.to_string 0) in
   let rec pruning_loop ~prune_iter ~state ~mask =
     let mask_new = pruning_mask_global ~p ~mask_prev:mask (O.P.value (O.params state)) in
-    let state_new = train ~mask:(Some mask_new) ~prune_iter in
+    (* save mask *)
+    let mask_to_save =
+      O.P.map mask_new ~f:(fun x ->
+        let x_f = Torch.Tensor.to_type (to_tensor x) ~type_:base.kind in
+        of_tensor x_f)
+    in
+    O.P.C.save
+      mask_to_save
+      ~kind:base.ba_kind
+      ~out:(in_dir (Printf.sprintf "mask_%d" prune_iter));
+    let state_new =
+      train ~init_params ~mask:(Some mask_new) ~append:(Int.to_string prune_iter)
+    in
     if prune_iter < max_prune_iter
     then
       pruning_loop ~prune_iter:Int.(prune_iter + 1) ~state:state_new ~mask:(Some mask_new)
@@ -235,3 +246,17 @@ let train_prune ~p =
   pruning_loop ~prune_iter:1 ~state:state_0 ~mask:None
 
 let _ = train_prune ~p
+
+(* Test performance if using a particular mask, but initialise parameters randomly *)
+let test_performance ~prune_iter =
+  let mask =
+    Model.P.C.load ~device:base.device (in_dir (Printf.sprintf "mask_%d" prune_iter))
+  in
+  let re_init_params = Model.init () in
+  let state_new =
+    train
+      ~init_params:re_init_params
+      ~mask:(Some mask)
+      ~append:(Printf.sprintf "retrain_%s_%d" "mask" prune_iter)
+  in
+  state_new
