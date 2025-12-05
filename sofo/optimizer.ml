@@ -164,7 +164,7 @@ module SGDm (P : Prms.T) = struct
 
   type ('a, 'b) config = ('a, 'b) Config.SGDm.t
   type ('a, 'b, 'c) init_opts = P.param -> 'c
-  type info = const P.t
+  type info = const P.t first_order_info
 
   type state =
     { theta : P.param
@@ -190,16 +190,21 @@ module SGDm (P : Prms.T) = struct
   module M = Momentum (P)
   module U = Update_params (P)
 
-  let step ~(config : ('a, 'b) config) ~info:g state =
+  let step ~(config : ('a, 'b) config) ~info state =
     match config.learning_rate with
     | None -> state
     | Some eta ->
       Stdlib.Gc.major ();
       let beta_t = Float.(config.momentum * state.beta_t) in
-      let g_avg = M.apply ~momentum:config.momentum ~avg:state.g_avg g in
+      let g_avg = M.apply ~momentum:config.momentum ~avg:state.g_avg info.g in
+      let delta =
+        match info.mask with
+        | None -> g_avg
+        | Some mask -> P.map2 g_avg mask ~f:(fun x m -> Maths.(const (x * m)))
+      in
       (* momentum correction of learning rate *)
       let eta = Float.(eta / (1. - beta_t)) in
-      let new_theta = U.update ~learning_rate:eta ~theta:(params state) g_avg in
+      let new_theta = U.update ~learning_rate:eta ~theta:(params state) delta in
       { theta = new_theta; g_avg = Some g_avg; beta_t }
 
   let manual_state_update state f =
@@ -212,7 +217,7 @@ module Adam (P : Prms.T) = struct
 
   type ('a, 'b) config = ('a, 'b) Config.Adam.t
   type (_, _, 'c) init_opts = P.param -> 'c
-  type info = const P.t
+  type info = const P.t first_order_info
 
   type state =
     { theta : P.param
@@ -245,7 +250,7 @@ module Adam (P : Prms.T) = struct
   module M = Momentum (P)
   module U = Update_params (P)
 
-  let step ~(config : ('a, 'b) config) ~info:g state =
+  let step ~(config : ('a, 'b) config) ~info state =
     match config.learning_rate with
     | None -> state
     | Some eta ->
@@ -253,6 +258,7 @@ module Adam (P : Prms.T) = struct
       let c = config in
       let beta1_t = Float.(state.beta1_t * c.beta_1) in
       let beta2_t = Float.(state.beta2_t * c.beta_2) in
+      let g = info.g in
       let g_squared = P.map ~f:Maths.C.sqr g in
       let m = M.apply ~momentum:config.beta_1 ~avg:state.m g in
       let v = M.apply ~momentum:config.beta_2 ~avg:state.v g_squared in
@@ -262,7 +268,12 @@ module Adam (P : Prms.T) = struct
       (* momentum correction of learning rate *)
       let eta = Float.(eta / (1. - beta1_t)) in
       let dtheta = P.C.(m_hat / (c.eps $+ v_hat_sqrt)) in
-      let new_theta = U.update ~learning_rate:eta ~theta:(params state) dtheta in
+      let delta =
+        match info.mask with
+        | None -> dtheta
+        | Some mask -> P.map2 dtheta mask ~f:(fun x m -> Maths.(const (x * m)))
+      in
+      let new_theta = U.update ~learning_rate:eta ~theta:(params state) delta in
       { theta = new_theta; beta1_t; beta2_t; m = Some m; v = Some v }
 
   let manual_state_update state f =

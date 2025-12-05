@@ -25,7 +25,12 @@ type 'v sofo_info =
   { loss : Maths.any Maths.t
   ; ggn : Maths.const Maths.t
   ; tangents : 'v
-  ; mask: 'v option
+  ; mask : 'v option
+  }
+
+type 'v first_order_info =
+  { g : 'v
+  ; mask : 'v option
   }
 
 module Config = struct

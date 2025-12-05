@@ -27,7 +27,7 @@ let batch_size = 256
 let input_size = if cifar then Int.(32 * 32 * 3) else Int.(28 * 28)
 let full_batch_size = 60_000
 let layer_sizes = [ 128; output_dim ]
-let num_epochs_to_run = 1
+let num_epochs_to_run = 200
 let max_iter = Int.(full_batch_size * num_epochs_to_run / batch_size)
 let epoch_of t = Float.(of_int t * of_int batch_size / of_int full_batch_size)
 let max_prune_iter = 50
@@ -84,6 +84,13 @@ module MLP = struct
         ~vtgt:(Maths.tangent_exn pred)
     in
     ell, ggn
+
+  let f_adam ~data:(input, labels) theta =
+    let pred = forward ~theta ~input in
+    let ell =
+      Loss.cross_entropy ~output_dims:[ 1 ] ~labels:(Maths.of_tensor labels) pred
+    in
+    ell
 
   let init () : P.param =
     let open MLP_Layer in
@@ -302,7 +309,7 @@ module O = Optimizer.SOFO (MLP.P)
 let config =
   Optimizer.Config.SOFO.
     { base
-    ; learning_rate = Some 1e-2
+    ; learning_rate = Some 1e-3
     ; n_tangents = 128
     ; damping = `relative_from_top 1e-3
     }
@@ -353,6 +360,88 @@ let train ~init_params ~mask ~append =
     else new_state
   in
   loop ~t:0 ~state:(O.init init_params) []
+
+(* -----------------------------------------
+   -- Optimization with Adam    ------
+   ----------------------------------------- *)
+
+(* module O = Optimizer.Adam (MLP.P)
+
+let config =
+  Optimizer.Config.Adam.
+    { base
+    ; beta_1 = 0.9
+    ; beta_2 = 0.99
+    ; eps = 1e-4
+    ; learning_rate = Some 0.01
+    ; weight_decay = None
+    ; debias = false
+    }
+
+let init_params = MLP.init ()
+
+let _ =
+  O.P.C.save (MLP.P.value init_params) ~kind:base.ba_kind ~out:(in_dir "init_params")
+
+let train ~init_params ~mask ~append =
+  let rec loop ~t ~state running_avg =
+    Stdlib.Gc.major ();
+    let data = sample_data train_set batch_size in
+    let theta = O.params state in
+    let theta_ = O.P.value theta in
+    let theta_dual =
+      O.P.map theta_ ~f:(fun x ->
+        let x =
+          x |> Maths.to_tensor |> Tensor.copy |> Tensor.to_device ~device:base.device
+        in
+        let x = Tensor.set_requires_grad x ~r:true in
+        Tensor.zero_grad x;
+        Maths.of_tensor x)
+    in
+    let loss, true_g =
+      let loss = MLP.f_adam ~data (P.map theta_dual ~f:Maths.any) in
+      let loss = Maths.to_tensor loss in
+      Tensor.backward loss;
+      ( Tensor.to_float0_exn loss
+      , O.P.map2 theta (O.P.to_tensor theta_dual) ~f:(fun tagged p ->
+          match tagged with
+          | Prms.Pinned _ -> Maths.(f 0.)
+          | _ -> Maths.of_tensor (Tensor.grad p)) )
+    in
+    let new_state = O.step ~config ~info:{ g = true_g; mask } state in
+    let running_avg =
+      let loss_avg =
+        match running_avg with
+        | [] -> loss
+        | running_avg -> running_avg |> Array.of_list |> Owl.Stats.mean
+      in
+      if t % 10 = 0
+      then (
+        O.P.C.save
+          (MLP.P.value (O.params state))
+          ~kind:base.ba_kind
+          ~out:(in_dir ("sofo_params_" ^ append));
+        (* save loss & acc *)
+        let e = epoch_of t in
+        let test_acc =
+          test_eval ~train_data:None MLP.P.(const (value (O.params new_state)))
+        in
+        let train_acc =
+          test_eval ~train_data:(Some data) MLP.P.(const (value (O.params new_state)))
+        in
+        print [%message (e : float) (loss_avg : float)];
+        Owl.Mat.(
+          save_txt
+            ~append:true
+            ~out:(in_dir ("loss_" ^ append))
+            (of_array [| Float.of_int t; loss_avg; test_acc; train_acc |] 1 4)));
+      []
+    in
+    if t < max_iter
+    then loop ~t:Int.(t + 1) ~state:new_state (loss :: running_avg)
+    else new_state
+  in
+  loop ~t:0 ~state:(O.init init_params) [] *)
 
 (* Start training and pruning loop *)
 let train_prune ~p =

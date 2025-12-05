@@ -22,11 +22,7 @@ module SOFO (P : Prms.T) : sig
       (* carry on with the new optimizer state *)
       ]}
      *)
-  val prepare
-    :  ?mask:const P.t
-    -> config:(_, _) config
-    -> state
-    -> dual P.t * const P.t
+  val prepare : ?mask:const P.t -> config:(_, _) config -> state -> dual P.t * const P.t
 end
 
 (** Stochastic gradient descent *)
@@ -35,7 +31,7 @@ module SGDm (P : Prms.T) :
   with module P = P
    and type ('a, 'b) config = ('a, 'b) Config.SGDm.t
    and type ('a, 'b, 'c) init_opts = P.param -> 'c
-   and type info = const P.t
+   and type info = const P.t first_order_info
 
 (** Adam optimizer *)
 module Adam (P : Prms.T) :
@@ -43,4 +39,4 @@ module Adam (P : Prms.T) :
   with module P = P
    and type ('a, 'b) config = ('a, 'b) Config.Adam.t
    and type (_, _, 'c) init_opts = P.param -> 'c
-   and type info = const P.t
+   and type info = const P.t first_order_info
