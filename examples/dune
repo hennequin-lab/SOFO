@@ -1,5 +1,5 @@
 (executables
- (names linear_regression lorenz)
+ (names linear_regression lorenz mlp_classification)
  (libraries cmdargs domainslib bos sofo owl owl-ode)
  (preprocess
   (pps ppx_sexp_message ppx-forward-torch)))

@@ -73,7 +73,7 @@ module Prune = struct
     List.fold x_shape ~init:1 ~f:(fun accu x -> Int.(accu * x))
 
   (* Flatten a P.t into a single tensor *)
-  let flatten_abs theta = P.map ~f:Tensor.abs (flatten theta)
+  let flatten_abs theta = Tensor.abs (flatten theta)
 
   (* Select only entries that are 1 in prev mask, or pass through unchanged *)
   let surviving_values ~mask_prev flat_values =
@@ -221,7 +221,7 @@ let train ~mask ~prune_iter =
   loop ~t:0 ~state:(O.init Model.init)
 
 (* Start training and pruning loop *)
-let traine_prune ~p =
+let train_prune ~p =
   (* first train the network with no mask *)
   let state_0 = train ~mask:None ~prune_iter:0 in
   let rec pruning_loop ~prune_iter ~state ~mask =
@@ -234,4 +234,4 @@ let traine_prune ~p =
   in
   pruning_loop ~prune_iter:1 ~state:state_0 ~mask:None
 
-let _ = traine_prune ~p
+let _ = train_prune ~p
