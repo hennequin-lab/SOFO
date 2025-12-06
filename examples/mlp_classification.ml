@@ -250,7 +250,7 @@ module Prune = struct
         Tensor.logical_and (to_tensor m_prev) (to_tensor m_new) |> of_tensor)
 end
 
-let pruning_mask_layerwise ?(p_surviving_min = 0.001) ~p ~mask_prev (theta : _ some P.t)
+let pruning_mask_layerwise ?(p_surviving_min = 0.01) ~p ~mask_prev (theta : _ some P.t)
   : const P.t
   =
   let open Torch in
@@ -281,7 +281,7 @@ let pruning_mask_layerwise ?(p_surviving_min = 0.001) ~p ~mask_prev (theta : _ s
   | None -> P.map theta ~f:(fun t -> prune_tensor t None)
   | Some prev -> P.map2 theta prev ~f:(fun t m -> prune_tensor t (Some m))
 
-let pruning_mask_global ?(n_surviving_min = 10) ~p ~mask_prev (theta : _ some P.t)
+let pruning_mask_global ?(n_surviving_min = 200) ~p ~mask_prev (theta : _ some P.t)
   : const P.t
   =
   let open Prune in
@@ -323,6 +323,7 @@ let train ~init_params ~mask ~append =
   let rec loop ~t ~state running_avg =
     Stdlib.Gc.major ();
     let data = sample_data train_set batch_size in
+    (* CHECKED masking is correct. *)
     let theta, tangents = O.prepare ?mask ~config state in
     let loss, ggn = MLP.f ~data theta in
     let new_state = O.step ~config ~info:{ loss; ggn; tangents; mask } state in
@@ -389,6 +390,12 @@ let train ~init_params ~mask ~append =
     let data = sample_data train_set batch_size in
     let theta = O.params state in
     let theta_ = O.P.value theta in
+    (* mask theta_ with current mask. CHECKED it is correct. *)
+    let theta_ =
+      match mask with
+      | None -> theta_
+      | Some mask -> O.P.map2 theta_ mask ~f:(fun x m -> Maths.C.(x * m))
+    in
     let theta_dual =
       O.P.map theta_ ~f:(fun x ->
         let x =

@@ -6,15 +6,26 @@ include Optimizer_typ
 
 (* update parameters, respecting any specified bounds *)
 module Update_params (P : Prms.T) = struct
-  let update ~learning_rate:eta ~theta delta =
+  let update ~learning_rate:eta ~theta ~mask delta =
     let open Prms in
     let update x delta = Tensor.(sub_ x (mul_scalar_ (to_tensor delta) (Scalar.f eta))) in
-    P.map2 theta delta ~f:(fun theta delta ->
-      match theta with
-      | Pinned x -> Pinned x
-      | Free x -> Free (update x delta)
-      | Bounded { v = x; lb; ub } ->
-        Bounded { v = Prms.enforce_bounds ?lb ?ub (update x delta); lb; ub })
+    let theta_updated =
+      P.map2 theta delta ~f:(fun theta delta ->
+        match theta with
+        | Pinned x -> Pinned x
+        | Free x -> Free (update x delta)
+        | Bounded { v = x; lb; ub } ->
+          Bounded { v = Prms.enforce_bounds ?lb ?ub (update x delta); lb; ub })
+    in
+    match mask with
+    | None -> theta_updated
+    | Some mask ->
+      P.map2 theta_updated mask ~f:(fun theta mask ->
+        match theta with
+        | Pinned x -> Pinned x
+        | Free x -> Free Tensor.(x * to_tensor mask)
+        | Bounded { v = x; lb; ub } ->
+          Bounded { v = Prms.enforce_bounds ?lb ?ub Tensor.(x * to_tensor mask); lb; ub })
 
   let manual_replace ~theta (theta' : const P.t) =
     let open Prms in
@@ -145,13 +156,9 @@ module SOFO (P : Prms.T) = struct
       let delta =
         sofo_update ~damping:config.damping ~tangents:info.tangents ~ggn:info.ggn loss_t
       in
-      (* CHECKED the update is masked properly *)
-      let delta =
-        match info.mask with
-        | None -> delta
-        | Some mask -> P.map2 delta mask ~f:(fun x m -> Maths.(const (x * m)))
+      let new_theta =
+        U.update ~learning_rate:eta ~theta:(params state) ~mask:info.mask delta
       in
-      let new_theta = U.update ~learning_rate:eta ~theta:(params state) delta in
       { theta = new_theta }
 
   let manual_state_update state f =
@@ -197,14 +204,11 @@ module SGDm (P : Prms.T) = struct
       Stdlib.Gc.major ();
       let beta_t = Float.(config.momentum * state.beta_t) in
       let g_avg = M.apply ~momentum:config.momentum ~avg:state.g_avg info.g in
-      let delta =
-        match info.mask with
-        | None -> g_avg
-        | Some mask -> P.map2 g_avg mask ~f:(fun x m -> Maths.(const (x * m)))
-      in
       (* momentum correction of learning rate *)
       let eta = Float.(eta / (1. - beta_t)) in
-      let new_theta = U.update ~learning_rate:eta ~theta:(params state) delta in
+      let new_theta =
+        U.update ~learning_rate:eta ~theta:(params state) ~mask:info.mask g_avg
+      in
       { theta = new_theta; g_avg = Some g_avg; beta_t }
 
   let manual_state_update state f =
@@ -268,12 +272,9 @@ module Adam (P : Prms.T) = struct
       (* momentum correction of learning rate *)
       let eta = Float.(eta / (1. - beta1_t)) in
       let dtheta = P.C.(m_hat / (c.eps $+ v_hat_sqrt)) in
-      let delta =
-        match info.mask with
-        | None -> dtheta
-        | Some mask -> P.map2 dtheta mask ~f:(fun x m -> Maths.(const (x * m)))
+      let new_theta =
+        U.update ~learning_rate:eta ~theta:(params state) ~mask:info.mask dtheta
       in
-      let new_theta = U.update ~learning_rate:eta ~theta:(params state) delta in
       { theta = new_theta; beta1_t; beta2_t; m = Some m; v = Some v }
 
   let manual_state_update state f =
