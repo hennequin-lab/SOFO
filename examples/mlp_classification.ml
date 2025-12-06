@@ -26,11 +26,13 @@ let output_dim = 10
 let batch_size = 256
 let input_size = if cifar then Int.(32 * 32 * 3) else Int.(28 * 28)
 let full_batch_size = 60_000
-let layer_sizes = [ 128; output_dim ]
-let num_epochs_to_run = 200
-let max_iter = Int.(full_batch_size * num_epochs_to_run / batch_size)
+
+(* Lenet, as in the first lottery paper. *)
+let layer_sizes = [ 300; 100; output_dim ]
+let num_epochs_to_run = 200.
+let max_iter = Int.(full_batch_size * of_float num_epochs_to_run / batch_size)
 let epoch_of t = Float.(of_int t * of_int batch_size / of_int full_batch_size)
-let max_prune_iter = 50
+let max_prune_iter = 70
 
 (* remove p at each round *)
 let p = 0.1
@@ -205,28 +207,28 @@ module Prune = struct
       x_reshaped :: accu)
     |> Torch.Tensor.concat ~dim:0
 
-  let count_mask mask =
-    Torch.Tensor.masked_select mask ~mask
-    |> Torch.Tensor.reshape ~shape:[ -1; 1 ]
-    |> Torch.Tensor.shape
-    |> List.hd_exn
+  (* count number of elements given shape *)
+  let numel shape = List.fold ~init:1 ~f:Int.( * ) shape
+  let numel_tensor x = numel (Tensor.shape x)
+  let numel_maths x = numel (Maths.shape x)
 
+  (* count number of ones in mask tensor *)
+  let count_mask_tensor mask = Torch.Tensor.masked_select mask ~mask |> numel_tensor
+
+  (* count number of ones in the entire mask *)
   let count_remaining mask =
-    let mask_flattened = flatten mask in
-    (* masked_select to pick only entries where prev_mask == 1 *)
-    count_mask mask_flattened
+    P.fold mask ~init:0 ~f:(fun accu (mask, _) ->
+      let num = count_mask_tensor (to_tensor mask) in
+      Int.(accu + num))
 
-  let n_params x =
-    let x_shape = Maths.shape x in
-    List.fold x_shape ~init:1 ~f:(fun accu x -> Int.(accu * x))
-
-  (* Select only entries that are 1 in prev mask, or pass through unchanged *)
-  let surviving_values ~mask_prev flat_values =
+  (* Select only entries that are 1 in prev mask *)
+  let surviving_values ~mask_prev values_flat =
     match mask_prev with
-    | None -> flat_values
-    | Some prev ->
-      let prev_flat = flatten prev in
-      Tensor.masked_select flat_values ~mask:prev_flat |> Tensor.reshape ~shape:[ -1; 1 ]
+    | None -> values_flat
+    | Some mask_prev ->
+      let mask_prev_flat = flatten mask_prev in
+      Tensor.masked_select values_flat ~mask:mask_prev_flat
+      |> Tensor.reshape ~shape:[ -1; 1 ]
 
   (* Find the pth smallest absolute value in a Tensor *)
   let threshold_of_values ~p surviving_values =
@@ -242,11 +244,11 @@ module Prune = struct
       Tensor.abs (to_tensor w) |> fun a -> Tensor.gt a (Scalar.f threshold) |> of_tensor)
 
   (* Combine with previous mask *)
-  let combine mask_prev new_mask =
+  let combine ~mask_prev mask_new =
     match mask_prev with
-    | None -> new_mask
+    | None -> mask_new
     | Some prev ->
-      P.map2 prev new_mask ~f:(fun m_prev m_new ->
+      P.map2 prev mask_new ~f:(fun m_prev m_new ->
         Tensor.logical_and (to_tensor m_prev) (to_tensor m_new) |> of_tensor)
 end
 
@@ -266,16 +268,18 @@ let pruning_mask_layerwise ?(p_surviving_min = 0.01) ~p ~mask_prev (theta : _ so
         |> Tensor.reshape ~shape:[ -1; 1 ]
     in
     let threshold = threshold_of_values ~p curr_values in
-    let new_mask_t = Tensor.gt (Tensor.abs theta_t) (Scalar.f threshold) in
-    let new_mask = of_tensor new_mask_t in
-    let n_new = count_mask new_mask_t in
-    let min_required = Int.(of_float Float.(p_surviving_min * of_int (n_params theta))) in
+    let mask_new_t = Tensor.gt (Tensor.abs theta_t) (Scalar.f threshold) in
+    let mask_new = of_tensor mask_new_t in
+    let n_new = count_mask_tensor mask_new_t in
+    let min_required =
+      Int.(of_float Float.(p_surviving_min * of_int (numel_maths theta)))
+    in
     match mask_prev_opt with
-    | None -> new_mask
+    | None -> mask_new
     | Some prev ->
       if n_new < min_required
       then prev
-      else Tensor.logical_and (to_tensor prev) new_mask_t |> of_tensor
+      else Tensor.logical_and (to_tensor prev) mask_new_t |> of_tensor
   in
   match mask_prev with
   | None -> P.map theta ~f:(fun t -> prune_tensor t None)
@@ -290,15 +294,15 @@ let pruning_mask_global ?(n_surviving_min = 200) ~p ~mask_prev (theta : _ some P
   (* Threshold for global pruning *)
   let threshold = threshold_of_values ~p surviving in
   (* Build new masks using this threshold *)
-  let new_mask = mask_from_threshold theta threshold in
-  let n_new = count_remaining new_mask in
+  let mask_new = mask_from_threshold theta threshold in
+  let n_new = count_remaining mask_new in
   (* only use new mask if n_new is larger than n_surviving_min *)
   if n_new < n_surviving_min
   then (
     match mask_prev with
     | Some prev -> prev
     | None -> P.map theta ~f:Maths.ones_like)
-  else combine mask_prev new_mask
+  else combine ~mask_prev mask_new
 
 (* -----------------------------------------
    -- Optimization with SOFO    ------
@@ -314,10 +318,24 @@ let config =
     ; damping = `relative_from_top 1e-3
     }
 
-let init_params = MLP.init ()
+let start_params = MLP.init ()
+let _ = O.P.C.save (O.P.value start_params) ~kind:base.ba_kind ~out:(in_dir "init_params")
 
-let _ =
-  O.P.C.save (MLP.P.value init_params) ~kind:base.ba_kind ~out:(in_dir "init_params")
+(* apply mask to initialised parameters *)
+let mask_init_state ~init_params ~mask =
+  match mask with
+  | None -> O.init init_params
+  | Some mask ->
+    let open Prms in
+    let masked =
+      P.map2 init_params mask ~f:(fun theta mask ->
+        match theta with
+        | Pinned x -> Pinned x
+        | Free x -> Free Tensor.(x * to_tensor mask)
+        | Bounded { v = x; lb; ub } ->
+          Bounded { v = Prms.enforce_bounds ?lb ?ub Tensor.(x * to_tensor mask); lb; ub })
+    in
+    O.init masked
 
 let train ~init_params ~mask ~append =
   let rec loop ~t ~state running_avg =
@@ -360,7 +378,8 @@ let train ~init_params ~mask ~append =
     then loop ~t:Int.(t + 1) ~state:new_state (loss :: running_avg)
     else new_state
   in
-  loop ~t:0 ~state:(O.init init_params) []
+  let init_state = mask_init_state ~init_params ~mask in
+  loop ~t:0 ~state:init_state []
 
 (* -----------------------------------------
    -- Optimization with Adam    ------
@@ -383,6 +402,21 @@ let init_params = MLP.init ()
 
 let _ =
   O.P.C.save (MLP.P.value init_params) ~kind:base.ba_kind ~out:(in_dir "init_params")
+
+let mask_init_state ~init_params ~mask =
+  match mask with
+  | None -> O.init init_params
+  | Some mask ->
+    let open Prms in
+    let masked =
+      P.map2 init_params mask ~f:(fun theta mask ->
+        match theta with
+        | Pinned x -> Pinned x
+        | Free x -> Free Tensor.(x * to_tensor mask)
+        | Bounded { v = x; lb; ub } ->
+          Bounded { v = Prms.enforce_bounds ?lb ?ub Tensor.(x * to_tensor mask); lb; ub })
+    in
+    O.init masked
 
 let train ~init_params ~mask ~append =
   let rec loop ~t ~state running_avg =
@@ -448,12 +482,13 @@ let train ~init_params ~mask ~append =
     then loop ~t:Int.(t + 1) ~state:new_state (loss :: running_avg)
     else new_state
   in
-  loop ~t:0 ~state:(O.init init_params) [] *)
+  let init_state = mask_init_state ~init_params ~mask in
+  loop ~t:0 ~state:init_state [] *)
 
 (* Start training and pruning loop *)
 let train_prune ~p =
   (* first train the network with no mask *)
-  let state_0 = train ~init_params ~mask:None ~append:(Int.to_string 0) in
+  let state_0 = train ~init_params:start_params ~mask:None ~append:(Int.to_string 0) in
   (* iteratively prune, then train *)
   let rec pruning_loop ~prune_iter ~state ~mask =
     let mask_new = pruning_mask_global ~p ~mask_prev:mask (O.P.value (O.params state)) in
@@ -470,7 +505,10 @@ let train_prune ~p =
       ~kind:base.ba_kind
       ~out:(in_dir (Printf.sprintf "mask_%d" prune_iter));
     let state_new =
-      train ~init_params ~mask:(Some mask_new) ~append:(Int.to_string prune_iter)
+      train
+        ~init_params:start_params
+        ~mask:(Some mask_new)
+        ~append:(Int.to_string prune_iter)
     in
     if prune_iter < max_prune_iter
     then
@@ -494,3 +532,14 @@ let test_performance ~prune_iter =
       ~append:(Printf.sprintf "retrain_%s_%d" "mask" prune_iter)
   in
   state_new
+
+(* Test performance if using a particular mask and same initial params without training *)
+let test_performance_train_nomask ~prune_iter =
+  let mask =
+    MLP.P.C.load ~device:base.device (in_dir (Printf.sprintf "mask_%d" prune_iter))
+  in
+  let masked_prms = mask_init_state ~init_params:start_params ~mask:(Some mask) in
+  let test_acc = test_eval ~train_data:None (O.P.value (O.params masked_prms)) in
+  print [%message (test_acc : float)]
+
+(* let _ = test_performance_train_nomask ~prune_iter:44 *)
