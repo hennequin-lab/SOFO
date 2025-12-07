@@ -25,7 +25,7 @@ let cifar =
 let output_dim = 10
 let batch_size = 256
 let input_size = if cifar then Int.(32 * 32 * 3) else Int.(28 * 28)
-let full_batch_size = 60_000
+let full_batch_size = 50_000
 (* let layer_sizes = [ 128; output_dim ] *)
 
 (* Lenet, as in the first lottery paper. *)
@@ -118,7 +118,7 @@ end
 let train_set, test_set =
   if cifar
   then (
-    (* train data has size [10000 x 32 x 32 x 3 ]*)
+    (* train data has size [n_samples x 32 x 32 x 3 ]*)
     let x_train, y_train =
       List.fold
         (List.init 5 ~f:(fun id -> id))
