@@ -26,13 +26,14 @@ let output_dim = 10
 let batch_size = 256
 let input_size = if cifar then Int.(32 * 32 * 3) else Int.(28 * 28)
 let full_batch_size = 60_000
+(* let layer_sizes = [ 128; output_dim ] *)
 
 (* Lenet, as in the first lottery paper. *)
 let layer_sizes = [ 300; 100; output_dim ]
 let num_epochs_to_run = 200.
 let max_iter = Int.(full_batch_size * of_float num_epochs_to_run / batch_size)
 let epoch_of t = Float.(of_int t * of_int batch_size / of_int full_batch_size)
-let max_prune_iter = 70
+let max_prune_iter = 80
 
 (* remove p at each round *)
 let p = 0.1
@@ -304,6 +305,8 @@ let pruning_mask_global ?(n_surviving_min = 200) ~p ~mask_prev (theta : _ some P
     | None -> P.map theta ~f:Maths.ones_like)
   else combine ~mask_prev mask_new
 
+let start_params = MLP.init ()
+
 (* -----------------------------------------
    -- Optimization with SOFO    ------
    ----------------------------------------- *)
@@ -318,7 +321,6 @@ let config =
     ; damping = `relative_from_top 1e-3
     }
 
-let start_params = MLP.init ()
 let _ = O.P.C.save (O.P.value start_params) ~kind:base.ba_kind ~out:(in_dir "init_params")
 
 (* apply mask to initialised parameters *)
@@ -398,10 +400,7 @@ let config =
     ; debias = false
     }
 
-let init_params = MLP.init ()
-
-let _ =
-  O.P.C.save (MLP.P.value init_params) ~kind:base.ba_kind ~out:(in_dir "init_params")
+let _ = O.P.C.save (O.P.value start_params) ~kind:base.ba_kind ~out:(in_dir "init_params")
 
 let mask_init_state ~init_params ~mask =
   match mask with
