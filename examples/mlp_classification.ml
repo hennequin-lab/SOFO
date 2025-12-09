@@ -236,7 +236,11 @@ module Prune = struct
     let v = Tensor.reshape surviving_values ~shape:[ -1; 1 ] in
     let n = List.hd_exn (Tensor.shape v) in
     let sorted, _ = Tensor.sort (Tensor.abs v) ~dim:0 ~descending:false in
-    let idx = Int.(clamp_exn (of_float Float.(p *. of_int n))) ~min:0 ~max:Int.(n - 1) in
+    let idx =
+      if n = 0
+      then 0
+      else Int.(clamp_exn (of_float Float.(p *. of_int n))) ~min:0 ~max:Int.(n - 1)
+    in
     Tensor.get_float2 sorted idx 0
 
   (* Build a per-tensor mask given a global threshold *)
@@ -253,7 +257,7 @@ module Prune = struct
         Tensor.logical_and (to_tensor m_prev) (to_tensor m_new) |> of_tensor)
 end
 
-let pruning_mask_layerwise ?(p_surviving_min = 0.01) ~p ~mask_prev (theta : _ some P.t)
+let pruning_mask_layerwise ?(p_surviving_min = 1e-4) ~p ~mask_prev (theta : _ some P.t)
   : const P.t
   =
   let open Torch in
@@ -482,7 +486,7 @@ let train ~init_params ~mask ~append =
     else new_state
   in
   let init_state = mask_init_state ~init_params ~mask in
-  loop ~t:0 ~state:init_state [] *)
+  loop ~t:0 ~state:init_state []  *)
 
 (* Start training and pruning loop *)
 let train_prune ~p =
@@ -490,10 +494,10 @@ let train_prune ~p =
   let state_0 = train ~init_params:start_params ~mask:None ~append:(Int.to_string 0) in
   (* iteratively prune, then train *)
   let rec pruning_loop ~prune_iter ~state ~mask =
-    let mask_new = pruning_mask_global ~p ~mask_prev:mask (O.P.value (O.params state)) in
-    (* let mask_new =
+    (* let mask_new = pruning_mask_global ~p ~mask_prev:mask (O.P.value (O.params state)) in *)
+    let mask_new =
       pruning_mask_layerwise ~p ~mask_prev:mask (O.P.value (O.params state))
-    in *)
+    in
     let mask_to_save =
       O.P.map mask_new ~f:(fun x ->
         let x_f = Tensor.to_type (to_tensor x) ~type_:base.kind in
@@ -518,8 +522,8 @@ let train_prune ~p =
 
 let _ = train_prune ~p
 
-(* Test performance if using a particular mask, but initialise parameters randomly *)
-let test_performance ~prune_iter =
+(* Test performance if using a particular mask during training, but initialise parameters randomly *)
+let train_mask_random_init ~prune_iter =
   let mask =
     MLP.P.C.load ~device:base.device (in_dir (Printf.sprintf "mask_%d" prune_iter))
   in
@@ -533,7 +537,7 @@ let test_performance ~prune_iter =
   state_new
 
 (* Test performance if using a particular mask and same initial params without training *)
-let test_performance_train_nomask ~prune_iter =
+let test_mask ~prune_iter =
   let mask =
     MLP.P.C.load ~device:base.device (in_dir (Printf.sprintf "mask_%d" prune_iter))
   in
@@ -541,4 +545,4 @@ let test_performance_train_nomask ~prune_iter =
   let test_acc = test_eval ~train_data:None (O.P.value (O.params masked_prms)) in
   print [%message (test_acc : float)]
 
-(* let _ = test_performance_train_nomask ~prune_iter:44 *)
+(* let _ = test_mask ~prune_iter:44 *)
