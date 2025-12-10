@@ -13,6 +13,7 @@ let _ =
   Torch_core.Wrapper.manual_seed (Random.int 100000)
 
 let in_dir = Cmdargs.in_dir "-d"
+let res_dir = Option.value_exn (Cmdargs.get_string "-d")
 let cast = Dense.Matrix.Generic.cast_d2s
 let base = Optimizer.Config.Base.default
 
@@ -33,7 +34,7 @@ let layer_sizes = [ 300; 100; output_dim ]
 let num_epochs_to_run = 200.
 let max_iter = Int.(full_batch_size * of_float num_epochs_to_run / batch_size)
 let epoch_of t = Float.(of_int t * of_int batch_size / of_int full_batch_size)
-let max_prune_iter = 80
+let max_prune_iter = 70
 
 (* remove p at each round *)
 let p = 0.1
@@ -325,7 +326,7 @@ let config =
     ; damping = `relative_from_top 1e-3
     }
 
-let _ = O.P.C.save (O.P.value start_params) ~kind:base.ba_kind ~out:(in_dir "init_params")
+(* let _ = O.P.C.save (O.P.value start_params) ~kind:base.ba_kind ~out:(in_dir "init_params") *)
 
 (* apply mask to initialised parameters *)
 let mask_init_state ~init_params ~mask =
@@ -520,10 +521,10 @@ let train_prune ~p =
   in
   pruning_loop ~prune_iter:1 ~state:state_0 ~mask:None
 
-let _ = train_prune ~p
+(* let _ = train_prune ~p *)
 
 (* Test performance if using a particular mask during training, but initialise parameters randomly *)
-let train_mask_random_init ~prune_iter =
+let train_mask_reinit ~prune_iter =
   let mask =
     MLP.P.C.load ~device:base.device (in_dir (Printf.sprintf "mask_%d" prune_iter))
   in
@@ -532,9 +533,31 @@ let train_mask_random_init ~prune_iter =
     train
       ~init_params:re_init_params
       ~mask:(Some mask)
-      ~append:(Printf.sprintf "retrain_%s_%d" "mask" prune_iter)
+      ~append:(Printf.sprintf "reinit_%s_%d" "mask" prune_iter)
   in
   state_new
+
+(* get list of mask indices from folder [dir] *)
+let mask_indices_from_dir (dir : string) : int list =
+  let files = Stdlib.Sys.readdir dir in
+  let rex = Str.regexp "^mask_\\([0-9]+\\)$" in
+  Array.fold
+    ~f:(fun acc fname ->
+      if Str.string_match rex fname 0
+      then (
+        let i = Int.of_string (Str.matched_group 1 fname) in
+        i :: acc)
+      else acc)
+    ~init:[]
+    files
+  |> List.sort ~compare:Int.compare
+
+let mask_indices = mask_indices_from_dir res_dir
+
+let _ =
+  List.iter mask_indices ~f:(fun i ->
+    let _ = train_mask_reinit ~prune_iter:i in
+    ())
 
 (* Test performance if using a particular mask and same initial params without training *)
 let test_mask ~prune_iter =
