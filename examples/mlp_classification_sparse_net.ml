@@ -194,7 +194,7 @@ module O = Optimizer.SOFO (MLP.P)
 let config =
   Optimizer.Config.SOFO.
     { base
-    ; learning_rate = Some 0.2
+    ; learning_rate = Some 0.01
     ; n_tangents = 128
     ; damping = `relative_from_top 1e-3
     }
@@ -297,12 +297,6 @@ let train ~init_params ~mask ~append =
     let data = sample_data train_set batch_size in
     let theta = O.params state in
     let theta_ = O.P.value theta in
-    (* mask theta_ with current mask. CHECKED it is correct. *)
-    let theta_ =
-      match mask with
-      | None -> theta_
-      | Some mask -> O.P.map2 theta_ mask ~f:(fun x m -> Maths.C.(x * m))
-    in
     let theta_dual =
       O.P.map theta_ ~f:(fun x ->
         let x =
@@ -334,7 +328,7 @@ let train ~init_params ~mask ~append =
         O.P.C.save
           (MLP.P.value (O.params state))
           ~kind:base.ba_kind
-          ~out:(in_dir ("sofo_params_" ^ append));
+          ~out:(in_dir ("adam_params_" ^ append));
         (* save loss & acc *)
         let e = epoch_of t in
         let test_acc =
@@ -356,7 +350,7 @@ let train ~init_params ~mask ~append =
     else new_state
   in
   let init_state = mask_init_state ~init_params ~mask in
-  loop ~t:0 ~state:init_state []  *)
+  loop ~t:0 ~state:init_state [] *)
 
 let numel shape = List.fold ~init:1 ~f:Int.( * ) shape
 let numel_tensor x = numel (Tensor.shape x)
@@ -397,4 +391,4 @@ let train_random_mask sparsity =
   let state_new = train ~init_params:start_params ~mask:(Some random_mask) ~append in
   state_new
 
-let _ = train_random_mask 0.005
+let _ = train_random_mask 0.05
