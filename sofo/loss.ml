@@ -3,9 +3,9 @@ open Forward_torch
 open Maths
 
 (* computes the total number of elements being reduced *)
-(* let n_reduction dim y =
+let n_reduction dim y =
   let s = Array.of_list (shape y) in
-  List.fold dim ~init:1 ~f:(fun accu i -> Int.(accu * s.(i))) *)
+  List.fold dim ~init:1 ~f:(fun accu i -> Int.(accu * s.(i)))
 
 let mse ~output_dims err = mean ~keepdim:false ~dim:(0 :: output_dims) (sqr err)
 
@@ -13,12 +13,11 @@ let mse ~output_dims err = mean ~keepdim:false ~dim:(0 :: output_dims) (sqr err)
   let m = n_reduction average_over y in
   C.(Float.(2. / of_int m) $* vtgt) *)
 
-let mse_ggn ~output_dims:_ y ~vtgt =
+let mse_ggn ~output_dims y ~vtgt =
   let vtgt_shape = Maths.shape vtgt in
   let vtgt_reshaped = C.reshape vtgt ~shape:[ List.hd_exn vtgt_shape; -1 ] in
-  C.(
-    Float.(2. / of_int (List.hd_exn vtgt_shape))
-    $* einsum [ vtgt_reshaped, "ka"; vtgt_reshaped, "la" ] "kl")
+  let m = n_reduction (0 :: output_dims) y in
+  C.(Float.(2. / of_int m) $* einsum [ vtgt_reshaped, "ka"; vtgt_reshaped, "la" ] "kl")
 
 let cross_entropy ~output_dims ~(labels : [ `const ] t) y =
   let lse = logsumexp ~keepdim:true ~dim:output_dims y in
@@ -40,6 +39,5 @@ let cross_entropy_ggn ~output_dims y ~vtgt =
     C.reshape vtgt_h ~shape:[ n_samples; -1 ]
   in
   let vtgt_h = C.(diag_part - rank_1_part) in
-  C.(
-    Float.(2. / of_int (List.nth_exn vtgt_shape 1))
-    $* einsum [ vtgt_h, "ka"; vtgt_mat, "la" ] "kl")
+  let m = n_reduction output_dims y in
+  C.(Float.(1. / of_int m) $* einsum [ vtgt_h, "ka"; vtgt_mat, "la" ] "kl")

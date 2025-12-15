@@ -194,8 +194,8 @@ module O = Optimizer.SOFO (MLP.P)
 let config =
   Optimizer.Config.SOFO.
     { base
-    ; learning_rate = Some 0.01
-    ; n_tangents = 128
+    ; learning_rate = Some 10.
+    ; n_tangents = 5120
     ; damping = `relative_from_top 1e-3
     }
 
@@ -271,7 +271,7 @@ let config =
     ; beta_1 = 0.9
     ; beta_2 = 0.99
     ; eps = 1e-4
-    ; learning_rate = Some 0.05
+    ; learning_rate = Some 0.001
     ; weight_decay = None
     ; debias = false
     }
@@ -379,7 +379,7 @@ let convert_bool_mask_to_float mask =
 
 (* Train with a random mask. *)
 let train_random_mask sparsity =
-  let random_mask = mask_p ~sparsity (P.value start_params) in
+  let random_mask = mask_p ~sparsity (P.value (MLP.init ())) in
   let append = Printf.sprintf "mask_sparsity_%f" sparsity in
   O.P.C.save
     (convert_bool_mask_to_float random_mask)
@@ -391,4 +391,4 @@ let train_random_mask sparsity =
   let state_new = train ~init_params:start_params ~mask:(Some random_mask) ~append in
   state_new
 
-let _ = train_random_mask 0.05
+let _ = train_random_mask 1.

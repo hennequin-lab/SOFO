@@ -81,7 +81,7 @@ module MLP = struct
       Loss.cross_entropy ~output_dims:[ 1 ] ~labels:(Maths.of_tensor labels) pred
     in
     let ggn =
-      Loss.cross_entropy_ggn
+      Loss.mse_ggn
         ~output_dims:[ 1 ]
         (Maths.const pred)
         ~vtgt:(Maths.tangent_exn pred)
