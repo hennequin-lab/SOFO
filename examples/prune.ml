@@ -12,6 +12,16 @@ module Prune (P : Prms.T) = struct
   let numel_tensor x = numel (Tensor.shape x)
   let numel_maths x = numel (Maths.shape x)
 
+  let convert_bool_mask_to_float ~type_ mask =
+    P.map mask ~f:(fun x ->
+      let x_f = Torch.Tensor.to_type (to_tensor x) ~type_ in
+      of_tensor x_f)
+
+  let convert_float_mask_to_bool mask =
+    P.map mask ~f:(fun x ->
+      let x_f = Torch.Tensor.to_type C.(to_tensor x) ~type_:Torch_core.Kind.(T Bool) in
+      of_tensor x_f)
+
   (* self define mask with [sparsity] values are 1 and [1-sparsity] values are 0 *)
   let mask_p ~sparsity theta =
     P.map theta ~f:(fun x ->
@@ -95,7 +105,16 @@ module Prune (P : Prms.T) = struct
       in
       let theta_t = to_tensor theta in
       let curr_values =
-        surviving_values_tensor ~mask_prev:(Option.map mask_prev_opt ~f:to_tensor) theta_t
+        surviving_values_tensor
+          ~mask_prev:
+            (Option.map mask_prev_opt ~f:(fun x ->
+               Torch.Tensor.to_type (to_tensor x) ~type_:Torch_core.Kind.(T Bool)))
+          theta_t
+      in
+      (* TODO: is there a more principaled way of pruning only 10% iteration-wise in last layer? *)
+      let p =
+        let n_out = Tensor.shape theta_t |> List.last_exn in
+        if n_out = 10 then 0.1 else p
       in
       let threshold = threshold_of_values ~p ~min_required curr_values in
       let mask_new = mask_from_threshold ~threshold theta_t in

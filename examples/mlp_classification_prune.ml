@@ -30,13 +30,13 @@ let full_batch_size = 50_000
 
 (* Lenet, as in the first lottery paper. *)
 let layer_sizes = [ 300; 100; output_dim ]
-let num_epochs_to_run = 70.
+let num_epochs_to_run = 50.
 let max_iter = Int.(full_batch_size * of_float num_epochs_to_run / batch_size)
 let epoch_of t = Float.(of_int t * of_int batch_size / of_int full_batch_size)
 let max_prune_iter = 70
 
 (* remove p at each round *)
-let p = 0.1
+let p = 0.2
 
 module MLP_Layer = struct
   type 'a t =
@@ -81,10 +81,7 @@ module MLP = struct
       Loss.cross_entropy ~output_dims:[ 1 ] ~labels:(Maths.of_tensor labels) pred
     in
     let ggn =
-      Loss.mse_ggn
-        ~output_dims:[ 1 ]
-        (Maths.const pred)
-        ~vtgt:(Maths.tangent_exn pred)
+      Loss.mse_ggn ~output_dims:[ 1 ] (Maths.const pred) ~vtgt:(Maths.tangent_exn pred)
     in
     ell, ggn
 
@@ -188,13 +185,13 @@ let test_eval ~train_data theta =
   |> Tensor.to_float0_exn
 
 let start_params = MLP.init ()
-(* let _ = O.P.C.save (O.P.value start_params) ~kind:base.ba_kind ~out:(in_dir "init_params") *)
+let _ = P.C.save (P.value start_params) ~kind:base.ba_kind ~out:(in_dir "init_params")
 
 (* -----------------------------------------
    -- Optimization with SOFO    ------
    ----------------------------------------- *)
 
-module O = Optimizer.SOFO (MLP.P)
+(* module O = Optimizer.SOFO (MLP.P)
 
 let config =
   Optimizer.Config.SOFO.
@@ -262,13 +259,13 @@ let train ~init_params ~mask ~append =
     else new_state
   in
   let init_state = mask_init_state ~init_params ~mask in
-  loop ~t:0 ~state:init_state []
+  loop ~t:0 ~state:init_state [] *)
 
 (* -----------------------------------------
    -- Optimization with Adam    ------
    ----------------------------------------- *)
 
-(* module O = Optimizer.Adam (MLP.P)
+module O = Optimizer.Adam (MLP.P)
 
 let config =
   Optimizer.Config.Adam.
@@ -276,7 +273,7 @@ let config =
     ; beta_1 = 0.9
     ; beta_2 = 0.99
     ; eps = 1e-4
-    ; learning_rate = Some 0.1
+    ; learning_rate = Some 0.001
     ; weight_decay = None
     ; debias = false
     }
@@ -342,7 +339,7 @@ let train ~init_params ~mask ~append =
         let train_acc =
           test_eval ~train_data:(Some data) MLP.P.(const (value (O.params new_state)))
         in
-        print [%message (e : float) (loss_avg : float)];
+        print [%message (e : float) (test_acc : float)];
         Owl.Mat.(
           save_txt
             ~append:true
@@ -355,19 +352,18 @@ let train ~init_params ~mask ~append =
     else new_state
   in
   let init_state = mask_init_state ~init_params ~mask in
-  loop ~t:0 ~state:init_state [] *)
+  loop ~t:0 ~state:init_state []
 
 module Prune_M = Prune (MLP.P)
-
-let convert_bool_mask_to_float mask =
-  MLP.P.map mask ~f:(fun x ->
-    let x_f = Torch.Tensor.to_type (to_tensor x) ~type_:base.kind in
-    of_tensor x_f)
 
 (* Test performance if using a particular mask during training. *)
 let train_mask ?(re_init = false) prune_iter =
   let mask =
-    MLP.P.C.load ~device:base.device (in_dir (Printf.sprintf "mask_%d" prune_iter))
+    if prune_iter = 0
+    then None
+    else
+      Some
+        (MLP.P.C.load ~device:base.device (in_dir (Printf.sprintf "mask_%d" prune_iter)))
   in
   let init_params = if re_init then MLP.init () else start_params in
   let append =
@@ -375,18 +371,15 @@ let train_mask ?(re_init = false) prune_iter =
     then Printf.sprintf "reinit_%s_%d" "mask" prune_iter
     else Printf.sprintf "mask_%d" prune_iter
   in
-  let state_new = train ~init_params ~mask:(Some mask) ~append in
+  let state_new = train ~init_params ~mask ~append in
   (* create a new mask from new state and save. *)
   let mask_new =
-    Prune_M.pruning_mask_layerwise
-      ~p
-      ~mask_prev:(Some mask)
-      (O.P.value (O.params state_new))
+    Prune_M.pruning_mask_layerwise ~p ~mask_prev:mask (O.P.value (O.params state_new))
   in
-  O.P.C.save
-    (convert_bool_mask_to_float mask_new)
+  P.C.save
+    (Prune_M.convert_bool_mask_to_float ~type_:base.kind mask_new)
     ~kind:base.ba_kind
-    ~out:(in_dir (Printf.sprintf "mask_%d" prune_iter));
+    ~out:(in_dir (Printf.sprintf "mask_%d" Int.(prune_iter + 1)));
   state_new
 
 let _ = train_mask ~re_init:false 1
