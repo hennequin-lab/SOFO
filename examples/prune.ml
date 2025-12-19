@@ -45,6 +45,11 @@ module Prune (P : Prms.T) = struct
       let num = count_mask_tensor (to_tensor mask) in
       Int.(accu + num))
 
+  let count_sparsity mask =
+    let n_remaining = count_remaining mask in
+    let n_total = P.numel mask in
+    Float.(of_int n_remaining / of_int n_total)
+
   (* Select only entries that are 1 in prev tensor *)
   let surviving_values_tensor ~mask_prev values =
     let surviving_values =
@@ -114,7 +119,7 @@ module Prune (P : Prms.T) = struct
       (* TODO: is there a more principaled way of pruning only 10% iteration-wise in last layer? *)
       let p =
         let n_out = Tensor.shape theta_t |> List.last_exn in
-        if n_out = 10 then 0.1 else p
+        if n_out = 10 then Float.(p / 2.) else p
       in
       let threshold = threshold_of_values ~p ~min_required curr_values in
       let mask_new = mask_from_threshold ~threshold theta_t in

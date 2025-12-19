@@ -33,7 +33,7 @@ let layer_sizes = [ 300; 100; output_dim ]
 let num_epochs_to_run = 50.
 let max_iter = Int.(full_batch_size * of_float num_epochs_to_run / batch_size)
 let epoch_of t = Float.(of_int t * of_int batch_size / of_int full_batch_size)
-let max_prune_iter = 70
+let max_prune_iter = 18
 
 (* remove p at each round *)
 let p = 0.2
@@ -92,7 +92,7 @@ module MLP = struct
     in
     ell
 
-  let init () : P.param =
+  let init_theta () =
     let open MLP_Layer in
     List.mapi layer_sizes ~f:(fun i n_o ->
       let n_i = if i = 0 then input_size else List.nth_exn layer_sizes Int.(i - 1) in
@@ -103,9 +103,12 @@ module MLP = struct
           ~sigma:1.
           [ Int.(n_i + 1); n_o ]
         |> Maths.of_tensor
-        |> Prms.Single.free
       in
       { id = i; w })
+
+  let map_prms (theta : const t MLP_Layer.t list) =
+    let open MLP_Layer in
+    List.map theta ~f:(fun theta -> { id = theta.id; w = Prms.Single.free theta.w })
 end
 
 (* -----------------------------------------
@@ -184,9 +187,6 @@ let test_eval ~train_data theta =
   |> Tensor.mean
   |> Tensor.to_float0_exn
 
-let start_params = MLP.init ()
-let _ = P.C.save (P.value start_params) ~kind:base.ba_kind ~out:(in_dir "init_params")
-
 (* -----------------------------------------
    -- Optimization with SOFO    ------
    ----------------------------------------- *)
@@ -196,8 +196,8 @@ let _ = P.C.save (P.value start_params) ~kind:base.ba_kind ~out:(in_dir "init_pa
 let config =
   Optimizer.Config.SOFO.
     { base
-    ; learning_rate = Some 0.01
-    ; n_tangents = 128
+    ; learning_rate = Some 0.1
+    ; n_tangents = 512
     ; damping = `relative_from_top 1e-3
     }
 
@@ -246,7 +246,7 @@ let train ~init_params ~mask ~append =
         let train_acc =
           test_eval ~train_data:(Some data) MLP.P.(const (value (O.params new_state)))
         in
-        print [%message (e : float) (loss_avg : float)];
+        print [%message (e : float) (test_acc : float)];
         Owl.Mat.(
           save_txt
             ~append:true
@@ -265,6 +265,7 @@ let train ~init_params ~mask ~append =
    -- Optimization with Adam    ------
    ----------------------------------------- *)
 
+module Prune_M = Prune (MLP.P)
 module O = Optimizer.Adam (MLP.P)
 
 let config =
@@ -273,7 +274,7 @@ let config =
     ; beta_1 = 0.9
     ; beta_2 = 0.99
     ; eps = 1e-4
-    ; learning_rate = Some 0.001
+    ; learning_rate = Some 0.0012 (* from original paper *)
     ; weight_decay = None
     ; debias = false
     }
@@ -353,8 +354,8 @@ let train ~init_params ~mask ~append =
   in
   let init_state = mask_init_state ~init_params ~mask in
   loop ~t:0 ~state:init_state []
-
-module Prune_M = Prune (MLP.P)
+(* 
+module Prune_M = Prune (MLP.P) *)
 
 (* Test performance if using a particular mask during training. *)
 let train_mask ?(re_init = false) prune_iter =
@@ -365,24 +366,50 @@ let train_mask ?(re_init = false) prune_iter =
       Some
         (MLP.P.C.load ~device:base.device (in_dir (Printf.sprintf "mask_%d" prune_iter)))
   in
-  let init_params = if re_init then MLP.init () else start_params in
+  let init_params =
+    let start_params =
+      let init_and_save out_name =
+        let params = MLP.init_theta () in
+        P.C.save params ~kind:base.ba_kind ~out:(in_dir out_name);
+        params
+      in
+      match re_init, prune_iter with
+      | true, _ ->
+        Torch_core.Wrapper.manual_seed Int.(Random.int 100000 + prune_iter);
+        init_and_save (Printf.sprintf "re_init_params_%d" prune_iter)
+      | false, 0 -> init_and_save "init_params"
+      | false, _ -> MLP.P.C.load ~device:base.device (in_dir "init_params")
+    in
+    MLP.map_prms start_params
+  in
+  (* start_params in *)
   let append =
     if re_init
     then Printf.sprintf "reinit_%s_%d" "mask" prune_iter
     else Printf.sprintf "mask_%d" prune_iter
+  in
+  let _ =
+    Bos.Cmd.(v "rm" % "-f" % in_dir ("loss_" ^ append)) |> Bos.OS.Cmd.run |> ignore
   in
   let state_new = train ~init_params ~mask ~append in
   (* create a new mask from new state and save. *)
   let mask_new =
     Prune_M.pruning_mask_layerwise ~p ~mask_prev:mask (O.P.value (O.params state_new))
   in
+  let mask_sparsity = Prune_M.count_sparsity mask_new in
+  Owl.Mat.(
+    save_txt
+      ~append:true
+      ~out:(in_dir "mask_sparsity")
+      (of_array [| Float.of_int prune_iter; mask_sparsity |] 1 2));
   P.C.save
     (Prune_M.convert_bool_mask_to_float ~type_:base.kind mask_new)
     ~kind:base.ba_kind
     ~out:(in_dir (Printf.sprintf "mask_%d" Int.(prune_iter + 1)));
   state_new
 
-let _ = train_mask ~re_init:false 1
+(* pruning rounds *)
+let _ = List.map (List.range 25 30) ~f:(fun i -> train_mask ~re_init:false i)
 
 (* Test performance if using a particular mask and same initial params without training *)
 (* let test_mask ~prune_iter =
