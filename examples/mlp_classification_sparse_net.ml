@@ -29,7 +29,7 @@ let full_batch_size = 50_000
 
 (* Lenet, as in the first lottery paper. *)
 let layer_sizes = [ 300; 100; output_dim ]
-let num_epochs_to_run = 70.
+let num_epochs_to_run = 50.
 let max_iter = Int.(full_batch_size * of_float num_epochs_to_run / batch_size)
 let epoch_of t = Float.(of_int t * of_int batch_size / of_int full_batch_size)
 
@@ -191,11 +191,11 @@ let _ = P.C.save (P.value start_params) ~kind:base.ba_kind ~out:(in_dir "init_pa
 
 module O = Optimizer.SOFO (MLP.P)
 
-let config =
+let config _k =
   Optimizer.Config.SOFO.
     { base
-    ; learning_rate = Some 10.
-    ; n_tangents = 5120
+    ; learning_rate = Some Float.(0.2 / (1. + (0. * sqrt (of_int _k))))
+    ; n_tangents = 512
     ; damping = `relative_from_top 1e-3
     }
 
@@ -218,6 +218,7 @@ let mask_init_state ~init_params ~mask =
 let train ~init_params ~mask ~append =
   let rec loop ~t ~state running_avg =
     Stdlib.Gc.major ();
+    let config = config t in
     let data = sample_data train_set batch_size in
     (* CHECKED masking is correct. *)
     let theta, tangents = O.prepare ?mask ~config state in
@@ -244,7 +245,7 @@ let train ~init_params ~mask ~append =
         let train_acc =
           test_eval ~train_data:(Some data) MLP.P.(const (value (O.params new_state)))
         in
-        print [%message (e : float) (test_acc : float)];
+        print [%message (t : int) (test_acc : float)];
         Owl.Mat.(
           save_txt
             ~append:true
@@ -271,7 +272,7 @@ let config =
     ; beta_1 = 0.9
     ; beta_2 = 0.99
     ; eps = 1e-4
-    ; learning_rate = Some 0.001
+    ; learning_rate = Some 0.03
     ; weight_decay = None
     ; debias = false
     }
@@ -379,16 +380,19 @@ let convert_bool_mask_to_float mask =
 
 (* Train with a random mask. *)
 let train_random_mask sparsity =
-  let random_mask = mask_p ~sparsity (P.value (MLP.init ())) in
   let append = Printf.sprintf "mask_sparsity_%f" sparsity in
-  O.P.C.save
-    (convert_bool_mask_to_float random_mask)
-    ~kind:base.ba_kind
-    ~out:(in_dir append);
+  let random_mask =
+    match sparsity with
+    | 1. -> None
+    | _ ->
+      let mask = mask_p ~sparsity (P.value (MLP.init ())) in
+      O.P.C.save (convert_bool_mask_to_float mask) ~kind:base.ba_kind ~out:(in_dir append);
+      Some mask
+  in
   let _ =
     Bos.Cmd.(v "rm" % "-f" % in_dir ("loss_" ^ append)) |> Bos.OS.Cmd.run |> ignore
   in
-  let state_new = train ~init_params:start_params ~mask:(Some random_mask) ~append in
+  let state_new = train ~init_params:start_params ~mask:random_mask ~append in
   state_new
 
 let _ = train_random_mask 1.
