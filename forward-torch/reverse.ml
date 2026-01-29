@@ -2,66 +2,89 @@ open! Base
 open Torch
 open Maths
 
-module ReverseMode = struct
-  type nonrec dual =
-    { p : const t
-    ; mutable a : const t option
-    }
+type nonrec dual =
+  { p : const t
+  ; mutable a : const t option
+  }
 
-  type _ Stdlib.Effect.t +=
-    | Mul : (dual * dual) -> dual Stdlib.Effect.t
-    | Add : (dual * dual) -> dual Stdlib.Effect.t
+type _ Stdlib.Effect.t +=
+  | Gen1 : ((const t -> const t) * dual) -> dual Stdlib.Effect.t
+  | Gen2 : ((const t -> const t -> const t) * dual * dual) -> dual Stdlib.Effect.t
+  | Einsum : ((dual * string) list * string) -> dual Stdlib.Effect.t
 
-  let ( + ) a b = Stdlib.Effect.perform (Add (a, b))
-  let ( * ) a b = Stdlib.Effect.perform (Mul (a, b))
+let lift1 f a = Stdlib.Effect.perform (Gen1 (f, a))
+let lift2 f a b = Stdlib.Effect.perform (Gen2 (f, a, b))
+let einsum ops rhs = Stdlib.Effect.perform (Einsum (ops, rhs))
 
-  module Grad (P : Prms.T) = struct
-    let eval f (x : const Maths.t P.p) =
-      let x = P.map x ~f:(fun p -> { p; a = None }) in
-      try f x with
-      | effect Add (a, b), k ->
-        Stdlib.Effect.Deep.continue k { p = C.(a.p + b.p); a = None }
-      | effect Mul (a, b), k ->
-        Stdlib.Effect.Deep.continue k { p = C.(a.p * b.p); a = None }
+module Grad (P : Prms.T) = struct
+  let eval f (x : const Maths.t P.p) : 'a =
+    let x = P.map x ~f:(fun p -> { p; a = None }) in
+    match f x with
+    | result -> result
+    | effect Gen1 (f, a), k -> Stdlib.Effect.Deep.continue k { p = f a.p; a = None }
+    | effect Gen2 (f, a, b), k ->
+      Stdlib.Effect.Deep.continue k { p = f a.p b.p; a = None }
 
-    (* f is prms -> scalar function *)
-    let grad f (x : const Maths.t P.p) =
-      let x = P.map x ~f:(fun p -> { p; a = Some (zeros_like p) }) in
-      let fx =
-        match f x with
-        | result ->
-          result.a <- Some (C.f 1.);
-          result
-        | effect Add (a, b), k ->
-          let p = C.(a.p + b.p) in
-          let result = { p; a = Some (zeros_like p) } in
-          ignore (Stdlib.Effect.Deep.continue k result);
-          (* propagate adjoints *)
-          Option.iter result.a ~f:(fun c_bar ->
-            a.a
-            <- Some
-                 (match a.a with
-                  | None -> c_bar
-                  | Some tmp -> C.(tmp + c_bar));
-            b.a
-            <- Some
-                 (match b.a with
-                  | None -> c_bar
-                  | Some tmp -> C.(tmp + c_bar)));
-          result
-        | effect Mul (a, b), k ->
-          (* initialise the torch Tensor gradient of a.p b.p to zero;
-            i.e. prepare them for a reverse pass *)
-            let p = C.(a.p * b.p) in
-        let result = { p; a = Some (zeros_like p) } in
+  let __prepare a =
+    let a = to_tensor a.p in
+    let device = Tensor.device a in
+    let a = Tensor.copy a |> Tensor.to_device ~device in
+    let a = Tensor.set_requires_grad a ~r:true in
+    Tensor.zero_grad a;
+    a
+
+  let zero_adj p = { p; a = Some (zeros_like p) }
+
+  (* f is prms -> scalar function *)
+  let grad f (x : const Maths.t P.p) =
+    let x = P.map x ~f:(fun p -> { p; a = Some (zeros_like p) }) in
+    let fx =
+      match f x with
+      | result ->
+        result.a <- Some (C.f 1.);
+        result
+      | effect Gen1 (f, a), k ->
+        (* prepare a for reverse pass after the continuation *)
+        let a_ = __prepare a in
+        let p = f (of_tensor a_) in
+        let result = zero_adj p in
+        ignore (Stdlib.Effect.Deep.continue k result);
+        (* use Torch's autodiff to propagate adjoints *)
+        Option.iter result.a ~f:(fun r_bar ->
+          let y = Tensor.(sum (to_tensor r_bar * to_tensor result.p)) in
+          Tensor.backward y;
+          a.a <- Some (of_tensor (Tensor.grad a_)));
+        result
+      | effect Gen2 (f, a, b), k ->
+        (* prepare a for reverse pass after the continuation *)
+        let a_ = __prepare a in
+        let b_ = __prepare b in
+        let p = f (of_tensor a_) (of_tensor b_) in
+        let result = zero_adj p in
+        ignore (Stdlib.Effect.Deep.continue k result);
+        (* use Torch's autodiff to propagate adjoints *)
+        Option.iter result.a ~f:(fun r_bar ->
+          let y = Tensor.(sum (to_tensor r_bar * to_tensor result.p)) in
+          Tensor.backward y;
+          a.a <- Some (of_tensor (Tensor.grad a_));
+          b.a <- Some (of_tensor (Tensor.grad b_)));
+        result
+      | effect Einsum (ops, rhs), k ->
+        let ops_ = ops |> Array.of_list |> Array.map ~f:(fun (x, _) -> __prepare x) in
+        let ops__ = List.mapi ops ~f:(fun i (_, idx) -> of_tensor ops_.(i), idx) in
+        let p = C.einsum ops__ rhs in
+        let result = zero_adj p in
         ignore (Stdlib.Effect.Deep.continue k result);
         Option.iter result.a ~f:(fun r_bar ->
-          let aux = Tensor.(sum (to_tensor r_bar * to_tensor p)) in
-          Tensor.backward  aux;
-
-
-          torch_effect_handler_2_1 op (a, b) k
-      in
-      fx.p, P.map x ~f:(fun x -> x.a)
-  end
+          let y = Tensor.(sum (to_tensor r_bar * to_tensor result.p)) in
+          Tensor.backward y;
+          List.iteri ops ~f:(fun i (x, _) ->
+            x.a <- Some (of_tensor (Tensor.grad ops_.(i)))));
+        result
+    in
+    ( fx.p
+    , P.map x ~f:(fun x ->
+        match x.a with
+        | Some g -> g
+        | None -> zeros_like x.p) )
 end
