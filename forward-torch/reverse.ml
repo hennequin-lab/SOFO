@@ -16,7 +16,12 @@ let lift1 f a = Stdlib.Effect.perform (Gen1 (f, a))
 let lift2 f a b = Stdlib.Effect.perform (Gen2 (f, a, b))
 let einsum ops rhs = Stdlib.Effect.perform (Einsum (ops, rhs))
 
-module Grad (P : Prms.T) = struct
+module Make (P : Prms.T) = struct
+  type _ Stdlib.Effect.t +=
+    | Gen : ((const t P.p -> const t) * dual P.p) -> dual Stdlib.Effect.t
+
+  let lift f x = Stdlib.Effect.perform (Gen (f, x))
+
   let eval f (x : const Maths.t P.p) : 'a =
     let x = P.map x ~f:(fun p -> { p; a = None }) in
     match f x with
@@ -42,6 +47,17 @@ module Grad (P : Prms.T) = struct
       match f x with
       | result ->
         result.a <- Some (C.f 1.);
+        result
+      | effect Gen (f, a), k ->
+        let a_ = P.map ~f:__prepare a in
+        let p = f (P.map a_ ~f:of_tensor) in
+        let result = zero_adj p in
+        ignore (Stdlib.Effect.Deep.continue k result);
+        (* use Torch's autodiff to propagate adjoints *)
+        Option.iter result.a ~f:(fun r_bar ->
+          let y = Tensor.(sum (to_tensor r_bar * to_tensor result.p)) in
+          Tensor.backward y;
+          P.iter2 a a_ ~f:(fun a a_ -> a.a <- Some (of_tensor (Tensor.grad a_))));
         result
       | effect Gen1 (f, a), k ->
         (* prepare a for reverse pass after the continuation *)
