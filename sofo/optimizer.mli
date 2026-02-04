@@ -34,9 +34,13 @@ module SGDm (P : Prms.T) :
    and type info = const P.t
 
 (** Adam optimizer *)
-module Adam (P : Prms.T) :
-  T
-  with module P = P
-   and type ('a, 'b) config = ('a, 'b) Config.Adam.t
-   and type (_, _, 'c) init_opts = P.param -> 'c
-   and type info = const P.t
+module Adam (P : Prms.T) : sig
+  include
+    T
+    with module P = P
+     and type ('a, 'b) config = ('a, 'b) Config.Adam.t
+     and type (_, _, 'c) init_opts = P.param -> 'c
+     and type info = const P.t
+
+  val value_and_grad : f:(const P.t -> any t * 'a) -> state -> float * const P.t * 'a
+end

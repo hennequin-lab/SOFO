@@ -245,4 +245,26 @@ module Adam (P : Prms.T) = struct
   let manual_state_update state f =
     let p = P.value state.theta in
     { state with theta = U.manual_replace ~theta:state.theta (f p) }
+
+  let prepare_for_reverse x =
+    let device = Tensor.device x in
+    let x = Tensor.copy x |> Tensor.to_device ~device in
+    let x = Tensor.set_requires_grad x ~r:true in
+    Tensor.zero_grad x;
+    of_tensor x
+
+  let value_and_grad ~f state =
+    let theta =
+      params state
+      |> P.map ~f:(function
+        | Prms.Pinned x -> prepare_for_reverse x
+        | Free x -> prepare_for_reverse x
+        | Bounded { v = x; _ } -> prepare_for_reverse x)
+    in
+    let loss, collateral = f theta in
+    let loss = Tensor.mean (to_tensor loss) in
+    Tensor.backward loss;
+    ( Tensor.to_float0_exn loss
+    , P.map theta ~f:(fun x -> x |> to_tensor |> Tensor.grad |> of_tensor)
+    , collateral )
 end
