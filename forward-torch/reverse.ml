@@ -51,11 +51,11 @@ module Make (P : Prms.T) = struct
       | effect Gen (f, a), k ->
         let a_ = P.map ~f:__prepare a in
         let p = f (P.map a_ ~f:of_tensor) in
-        let result = zero_adj p in
-        ignore (Stdlib.Effect.Deep.continue k result);
+        let o = zero_adj p in
+        let result = Stdlib.Effect.Deep.continue k o in
         (* use Torch's autodiff to propagate adjoints *)
-        Option.iter result.a ~f:(fun r_bar ->
-          let y = Tensor.(sum (to_tensor r_bar * to_tensor result.p)) in
+        Option.iter o.a ~f:(fun r_bar ->
+          let y = Tensor.(sum (to_tensor r_bar * to_tensor o.p)) in
           Tensor.backward y;
           P.iter2 a a_ ~f:(fun a a_ -> a.a <- Some (of_tensor (Tensor.grad a_))));
         result
@@ -63,11 +63,11 @@ module Make (P : Prms.T) = struct
         (* prepare a for reverse pass after the continuation *)
         let a_ = __prepare a in
         let p = f (of_tensor a_) in
-        let result = zero_adj p in
-        ignore (Stdlib.Effect.Deep.continue k result);
+        let o = zero_adj p in
+        let result = Stdlib.Effect.Deep.continue k o in
         (* use Torch's autodiff to propagate adjoints *)
-        Option.iter result.a ~f:(fun r_bar ->
-          let y = Tensor.(sum (to_tensor r_bar * to_tensor result.p)) in
+        Option.iter o.a ~f:(fun r_bar ->
+          let y = Tensor.(sum (to_tensor r_bar * to_tensor o.p)) in
           Tensor.backward y;
           a.a <- Some (of_tensor (Tensor.grad a_)));
         result
@@ -76,11 +76,11 @@ module Make (P : Prms.T) = struct
         let a_ = __prepare a in
         let b_ = __prepare b in
         let p = f (of_tensor a_) (of_tensor b_) in
-        let result = zero_adj p in
-        ignore (Stdlib.Effect.Deep.continue k result);
+        let o = zero_adj p in
+        let result = Stdlib.Effect.Deep.continue k o in
         (* use Torch's autodiff to propagate adjoints *)
-        Option.iter result.a ~f:(fun r_bar ->
-          let y = Tensor.(sum (to_tensor r_bar * to_tensor result.p)) in
+        Option.iter o.a ~f:(fun r_bar ->
+          let y = Tensor.(sum (to_tensor r_bar * to_tensor o.p)) in
           Tensor.backward y;
           a.a <- Some (of_tensor (Tensor.grad a_));
           b.a <- Some (of_tensor (Tensor.grad b_)));
@@ -89,10 +89,10 @@ module Make (P : Prms.T) = struct
         let ops_ = ops |> Array.of_list |> Array.map ~f:(fun (x, _) -> __prepare x) in
         let ops__ = List.mapi ops ~f:(fun i (_, idx) -> of_tensor ops_.(i), idx) in
         let p = C.einsum ops__ rhs in
-        let result = zero_adj p in
-        ignore (Stdlib.Effect.Deep.continue k result);
-        Option.iter result.a ~f:(fun r_bar ->
-          let y = Tensor.(sum (to_tensor r_bar * to_tensor result.p)) in
+        let o = zero_adj p in
+        let result = Stdlib.Effect.Deep.continue k o in
+        Option.iter o.a ~f:(fun r_bar ->
+          let y = Tensor.(sum (to_tensor r_bar * to_tensor o.p)) in
           Tensor.backward y;
           List.iteri ops ~f:(fun i (x, _) ->
             x.a <- Some (of_tensor (Tensor.grad ops_.(i)))));
