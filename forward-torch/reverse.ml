@@ -12,9 +12,26 @@ type _ Stdlib.Effect.t +=
   | Gen2 : ((const t -> const t -> const t) * dual * dual) -> dual Stdlib.Effect.t
   | Einsum : ((dual * string) list * string) -> dual Stdlib.Effect.t
 
+let of_const p = { p; a = None }
+let get_primal { p; _ } = p
+
 let lift1 f a = Stdlib.Effect.perform (Gen1 (f, a))
 let lift2 f a b = Stdlib.Effect.perform (Gen2 (f, a, b))
 let einsum ops rhs = Stdlib.Effect.perform (Einsum (ops, rhs))
+let ( + ) a b = lift2 C.( + ) a b
+let ( - ) a b = lift2 C.( - ) a b
+let ( * ) a b = lift2 C.( * ) a b
+let ( / ) a b = lift2 C.( / ) a b
+(* These take a float - use dual instead *)
+(* let ( $+ ) a b = lift2 C.( $+ ) a b
+let ( $- ) a b = lift2 C.( $- ) a b
+let ( $* ) a b = lift2 C.( $* ) a b *)
+let ( *@ ) a b = lift2 C.( *@ ) a b
+let sigmoid a = lift1 C.sigmoid a
+let tanh a = lift1 C.tanh a
+let mean a = lift1 C.mean a
+let sqr a = lift1 C.sqr a
+
 
 module Make (P : Prms.T) = struct
   type _ Stdlib.Effect.t +=
