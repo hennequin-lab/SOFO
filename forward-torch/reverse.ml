@@ -23,9 +23,14 @@ let ( - ) a b = lift2 C.( - ) a b
 let ( * ) a b = lift2 C.( * ) a b
 let ( / ) a b = lift2 C.( / ) a b
 (* These take a float - use dual instead *)
-(* let ( $+ ) a b = lift2 C.( $+ ) a b
-let ( $- ) a b = lift2 C.( $- ) a b
-let ( $* ) a b = lift2 C.( $* ) a b *)
+(* Better to define an effect for float and dual? *)
+let ( $+ ) a b = 
+  let a_dual = of_const Maths.(a $* ones_like (get_primal b)) in 
+  a_dual + b
+let ( $- ) a b = 
+  let a_dual = of_const Maths.(a $* ones_like (get_primal b)) in 
+  a_dual - b
+(* let ( $* ) a b = lift2 C.( $* ) a b *)
 let ( *@ ) a b = lift2 C.( *@ ) a b
 let sigmoid a = lift1 C.sigmoid a
 let tanh a = lift1 C.tanh a
@@ -36,8 +41,12 @@ let sqr a = lift1 C.sqr a
 module Make (P : Prms.T) = struct
   type _ Stdlib.Effect.t +=
     | Gen : ((const t P.p -> const t) * dual P.p) -> dual Stdlib.Effect.t
+    | GenDual: ((dual P.p -> dual) * dual P.p) -> dual Stdlib.Effect.t
 
   let lift f x = Stdlib.Effect.perform (Gen (f, x))
+  let lift_dual f x = 
+    (* let x = P.map x ~f:(fun p -> { p; a = Some (zeros_like p) }) in *)
+    Stdlib.Effect.perform (GenDual (f, x))
 
   let eval f (x : const Maths.t P.p) : 'a =
     let x = P.map x ~f:(fun p -> { p; a = None }) in
@@ -56,19 +65,31 @@ module Make (P : Prms.T) = struct
     a
 
   let zero_adj p = { p; a = Some (zeros_like p) }
+  let zero_adj_prms p = P.map p ~f:(fun p -> { p; a = Some (zeros_like p) })
 
   (* f is prms -> scalar function *)
-  let grad f (x : const Maths.t P.p) =
-    let x = P.map x ~f:(fun p -> { p; a = Some (zeros_like p) }) in
+  let grad f (x : dual P.p) =
+    (* let x = P.map x ~f:(fun p -> { p; a = Some (zeros_like p) }) in *)
     let fx =
       match f x with
       | result ->
         result.a <- Some (C.f 1.);
         result
+      (* Gen is not used *)
       | effect Gen (f, a), k ->
         let a_ = P.map ~f:__prepare a in
         let p = f (P.map a_ ~f:of_tensor) in
         let o = zero_adj p in
+        let result = Stdlib.Effect.Deep.continue k o in
+        (* use Torch's autodiff to propagate adjoints *)
+        Option.iter o.a ~f:(fun r_bar ->
+          let y = Tensor.(sum (to_tensor r_bar * to_tensor o.p)) in
+          Tensor.backward y;
+          P.iter2 a a_ ~f:(fun a a_ -> a.a <- Some (of_tensor (Tensor.grad a_))));
+        result
+      | effect GenDual (f, a), k ->
+        let a_ = P.map ~f:__prepare a in
+        let o = f (P.map a_ ~f:(fun x -> of_tensor x |> zero_adj)) in
         let result = Stdlib.Effect.Deep.continue k o in
         (* use Torch's autodiff to propagate adjoints *)
         Option.iter o.a ~f:(fun r_bar ->
