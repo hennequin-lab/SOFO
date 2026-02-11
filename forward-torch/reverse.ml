@@ -53,17 +53,12 @@ let __prepare a =
 
 let zero_adj p = { p; a = Some (zeros_like p) }
 
-module Make (P : Prms.T) = struct
-  let const p = P.map p ~f:(fun p -> { p; a = Some (zeros_like p) })
-
-  let update_adj adj delta =
+let update_adj adj delta =
     match adj with
     | None -> Some delta
     | Some a -> Some Maths.C.(a + delta)
 
-  (* f is prms -> scalar function *)
-  let grad f (x : dual P.p) =
-    let fx =
+  let grad f x =
       match f x with
       | result ->
         result.a <- Some (C.f 1.);
@@ -96,10 +91,18 @@ module Make (P : Prms.T) = struct
           a.a <- update_adj a.a (of_tensor (Tensor.grad a_));
           b.a <- update_adj b.a (of_tensor (Tensor.grad b_)));
         result
-    in
-    ( fx.p
-    , P.map x ~f:(fun x ->
+
+module Make (P : Prms.T) = struct
+  let const p = P.map p ~f:(fun p -> { p; a = Some (zeros_like p) })
+
+  (* do we need another function name or it is ok to use grad since it is under Make *)
+  let grad f (x : dual P.p) =
+    let fx = grad f x in
+    let g =
+      P.map x ~f:(fun x ->
         match x.a with
         | Some g -> g
-        | None -> zeros_like x.p) )
+        | None -> zeros_like x.p)
+    in
+    (fx.p, g)
 end
