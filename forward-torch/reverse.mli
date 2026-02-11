@@ -19,8 +19,9 @@ val tanh : dual -> dual
 val mean : dual -> dual
 val sqr : dual -> dual
 val eval : ('a -> 'b) -> 'a -> 'b
+val grad : ('a -> dual) -> 'a -> dual
 
 module Make (P : Prms.T) : sig
   val const : any t P.p -> dual P.p
-  val grad : (dual P.p -> dual) -> dual P.p -> any t * const t P.p
+  val grad : ((dual P.p -> dual) -> dual P.p -> dual) -> (dual P.p -> dual) -> dual P.p -> any t * const t P.p
 end

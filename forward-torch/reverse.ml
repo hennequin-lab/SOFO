@@ -96,13 +96,17 @@ module Make (P : Prms.T) = struct
   let const p = P.map p ~f:(fun p -> { p; a = Some (zeros_like p) })
 
   (* do we need another function name or it is ok to use grad since it is under Make *)
-  let grad f (x : dual P.p) =
-    let fx = grad f x in
+  let grad
+      (run : (dual P.p -> dual) -> dual P.p -> dual) (* effect handler *)
+      (f   : dual P.p -> dual)
+      (x   : dual P.p)
+    : any t * const t P.p =
+    let fx = run f x in
     let g =
       P.map x ~f:(fun x ->
         match x.a with
         | Some g -> g
         | None -> zeros_like x.p)
     in
-    (fx.p, g)
+    fx.p, g
 end
