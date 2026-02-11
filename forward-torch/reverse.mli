@@ -5,6 +5,7 @@ type dual
 
 val const : any t -> dual
 val primal : dual -> any t
+val adjoint : dual -> const t option
 val lift1 : (any t -> any t) -> dual -> dual
 val lift2 : (any t -> any t -> any t) -> dual -> dual -> dual
 val ( + ) : dual -> dual -> dual
@@ -19,6 +20,8 @@ val tanh : dual -> dual
 val mean : dual -> dual
 val sqr : dual -> dual
 val eval : ('a -> 'b) -> 'a -> 'b
+val zero_adj: any t -> dual
+val update_adj : dual -> const t -> unit
 val grad : ('a -> dual) -> 'a -> dual
 
 module Make (P : Prms.T) : sig
