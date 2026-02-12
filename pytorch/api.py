@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 
+
 # Jacobian-vector product
 def jmp(f, W, M, has_aux=False):
     """Batched Jacobian-vector products.
@@ -55,8 +56,9 @@ def ggn_ce(tangents, h):
     Returns:
         torch.Tensor: GGN matrix. size (k, k).
     """
-    Jgh = (tangents @ h)[:,None]
-    return (tangents * h) @ tangents.T - Jgh @ Jgh.T  
+    Jgh = (tangents @ h)[:, None]
+    return (tangents * h) @ tangents.T - Jgh @ Jgh.T
+
 
 # GGN for mean squared loss
 def ggn_mse(tangents: torch.Tensor):
@@ -69,6 +71,7 @@ def ggn_mse(tangents: torch.Tensor):
         torch.Tensor: GGN matrix. size (k, k).
     """
     return torch.func.vmap(lambda t: t @ t.T, in_dims=1)(tangents)
+
 
 def sample_v(tangent_size, params, device, rng):
     """Samples a batch of random, normalized tangent vectors matching the structure of `params`.
@@ -100,16 +103,16 @@ def sample_v(tangent_size, params, device, rng):
 
     # Normalize each tangent
     normalized_v = {
-        name: vi / norm.view(-1, *([1] * (vi.ndim - 1)))
-        for name, vi in v.items()
+        name: vi / norm.view(-1, *([1] * (vi.ndim - 1))) for name, vi in v.items()
     }
 
     return normalized_v
 
 
-
-def value_and_sofo_grad(fun, loss, tangent_size=100, damping=1e-5, classification=False, device="cpu"):
-    """SOFO forward pass to compute loss and gradient. 
+def value_and_sofo_grad(
+    fun, loss, tangent_size=100, damping=1e-5, classification=False, device="cpu"
+):
+    """SOFO forward pass to compute loss and gradient.
 
     Args:
         fun (function): Forward pass of the network.
@@ -119,6 +122,7 @@ def value_and_sofo_grad(fun, loss, tangent_size=100, damping=1e-5, classificatio
         classification (bool, optional): Whether the task is classification. Defaults to False.
         device (str, optional): Device on which the network is run. Defaults to "cpu".
     """
+
     def wrapper(rng, params):
         """Wrapper for the forward pass of the function.
 
@@ -135,9 +139,9 @@ def value_and_sofo_grad(fun, loss, tangent_size=100, damping=1e-5, classificatio
         """
         # Sample tangents associated with params
         v = sample_v(tangent_size, params, device, rng)
-        
+
         # Compute model output and tangent outputs
-        outs, tangents_out = jmp(fun, params,v)
+        outs, tangents_out = jmp(fun, params, v)
         losses, vg = jmp(loss, outs[0], tangents_out)
 
         # Compute GGN matrix approx
@@ -156,20 +160,25 @@ def value_and_sofo_grad(fun, loss, tangent_size=100, damping=1e-5, classificatio
         vggv_vg = (u / damped_s) @ (u.T @ vg)
 
         h = {}
-        for name, vs in v.items(): 
+        for name, vs in v.items():
             # vs: tensor of shape [tangent_size, *param_shape]
             # vggv_vg: tensor of shape [tangent_size]
             # Move tangent dimension to the last
             permuted_vs = vs.movedim(0, -1)  # shape [..., tangent_size]
             # Contract with vggv_vg over last dimension
-            h[name] = torch.tensordot(permuted_vs, vggv_vg, dims=([-1], [0]))  # shape: param_shape
+            h[name] = torch.tensordot(
+                permuted_vs, vggv_vg, dims=([-1], [0])
+            )  # shape: param_shape
 
         return losses[0].detach(), h, s.max().detach()
+
     return wrapper
 
 
-def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, classification=False, device="cpu"):
-    """SOFO forward pass on a recurrent neural network to compute loss and gradient. 
+def value_and_sofo_grad_temporal(
+    rnn, loss, tangent_size=100, damping=1e-5, classification=False, device="cpu"
+):
+    """SOFO forward pass on a recurrent neural network to compute loss and gradient.
 
     Args:
         rnn (function): one-step update of the recurrent network.
@@ -179,6 +188,7 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
         classification (bool, optional): Whether the task is classification. Defaults to False.
         device (str, optional): Device on which the network is run. Defaults to "cpu".
     """
+
     def value_and_grad_f_batch(z_init, batch):
         """Compute loss and gradient on a data batch.
 
@@ -186,8 +196,9 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
             z_init (torch.Tensor): initial state of the RNN.
             batch (tuple): A tuple (inputs, labels), where:
                 - inputs (torch.Tensor): Input sequence of shape (tmax, batch_size, input_dim).
-                - labels (torch.Tensor): Target sequence of shape (tmax, batch_size, output_dim) 
-                  or (tmax, batch_size) for classification.        """
+                - labels (torch.Tensor): Target sequence of shape (tmax, batch_size, output_dim)
+                  or (tmax, batch_size) for classification."""
+
         def wrapper(rng, params):
             """Wrapper for the forward pass of the RNN.
 
@@ -219,12 +230,14 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
                 """
                 latent, latent_tangents, losses, vg, vggv = carry
                 inputs, labels = xs
-            
+
                 fun = lambda params, latent: rnn(params, latent, inputs)
                 fun_loss = lambda preds: loss(preds, labels)
 
                 # Compute next latent and tangents
-                latent_new, latent_tangents_out, preds = jmp_pair(fun, (params, latent), (v, latent_tangents), has_aux=True)
+                latent_new, latent_tangents_out, preds = jmp_pair(
+                    fun, (params, latent), (v, latent_tangents), has_aux=True
+                )
 
                 [latent_primal, primal_out] = latent_new
                 [new_latent_tangents_out, tangents_out] = latent_tangents_out
@@ -237,32 +250,40 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
                     vggv_new = ggn_vmapped(tangents_out, h_batch).mean(dim=0)
                 else:
                     vggv_new = ggn_mse(tangents_out).mean(dim=0)
-                                    
-                losses += losses_new[0]/tmax
-                vg += vg_new/tmax
-                vggv += vggv_new/tmax
-                return (latent_primal[0], new_latent_tangents_out, losses, vg, vggv), preds[0]
-            
+
+                losses += losses_new[0] / tmax
+                vg += vg_new / tmax
+                vggv += vggv_new / tmax
+                return (
+                    latent_primal[0],
+                    new_latent_tangents_out,
+                    losses,
+                    vg,
+                    vggv,
+                ), preds[0]
+
             # Intialise quantities to be accumulated
             latent_tangent = torch.zeros((tangent_size,) + z_init.shape, device=device)
-            losses = 0.
+            losses = 0.0
             vg = torch.zeros(tangent_size, device=device)
             vggv = torch.zeros((tangent_size, tangent_size), device=device)
 
             preds_list = []
             # Need to convert batch_y to a list
-            inputs, labels = batch 
+            inputs, labels = batch
             labels_lst = list(torch.unbind(labels, dim=0))
             inputs_lst = list(torch.unbind(inputs, dim=0))
             tmax = len(inputs_lst)
             # Recurrent pass through the RNN
             z = z_init
-            for (inputs, labels) in zip(inputs_lst, labels_lst):
-                (z, latent_tangent, losses, vg, vggv), preds = fun((z, latent_tangent, losses, vg, vggv), (inputs, labels), tmax)
+            for inputs, labels in zip(inputs_lst, labels_lst):
+                (z, latent_tangent, losses, vg, vggv), preds = fun(
+                    (z, latent_tangent, losses, vg, vggv), (inputs, labels), tmax
+                )
                 preds_list.append(preds)
 
             preds_t = torch.stack(preds_list, dim=0)
-            preds_final = torch.permute(preds_t, (1,0,2))
+            preds_final = torch.permute(preds_t, (1, 0, 2))
 
             # SVD of GGN
             u, s, _ = torch.linalg.svd(vggv)
@@ -272,14 +293,18 @@ def value_and_sofo_grad_temporal(rnn, loss, tangent_size=100, damping=1e-5, clas
             vggv_vg = (u / damped_s) @ (u.T @ vg)
 
             h = {}
-            for name, vs in v.items(): 
+            for name, vs in v.items():
                 # vs: tensor of shape [tangent_size, *param_shape]
                 # vggv_vg: tensor of shape [tangent_size]
                 # Move tangent dimension to the last
                 permuted_vs = vs.movedim(0, -1)  # shape [..., tangent_size]
                 # Contract with vggv_vg over last dimension
-                h[name] = torch.tensordot(permuted_vs, vggv_vg, dims=([-1], [0]))  # shape: param_shape
+                h[name] = torch.tensordot(
+                    permuted_vs, vggv_vg, dims=([-1], [0])
+                )  # shape: param_shape
 
             return losses.detach(), h, preds_final
+
         return wrapper
+
     return value_and_grad_f_batch
