@@ -64,70 +64,52 @@ module type T = sig
   (** Apply function [f] to each element in x and y. *)
   val iter2 : 'a p -> 'b p -> f:('a -> 'b -> unit) -> unit
 
-  type 'a elt = 'a t
-  type nonrec 'a t = 'a elt p
+  type nonrec t = t p
   type nonrec param = param p
 
   (** Extract value as Tensor.t in all elements in x. *)
-  val value : param -> const t
+  val value : param -> t
 
-  val any : _ some t -> any t
-  val of_tensor : Tensor.t p -> const t
-  val to_tensor : _ some t -> Tensor.t p
-  val const : _ some t -> const t
-  val numel : _ some t -> int
-  val tangent_exn : _ some t -> const t
-  val dual : tangent:const t -> const t -> dual t
-  val dual_on_demand : tangent:(Device.t -> const elt) p -> const t -> dual t
-  val zeros_like : _ some t -> const t
-  val zeros_like_k : k:int -> _ some t -> const t
-  val ones_like : _ some t -> const t
-  val rand_like : _ some t -> const t
-  val randn_like : _ some t -> const t
-  val randn_like_k : k:int -> _ some t -> const t
+  val const : Tensor.t p -> t
+  val primal : t -> Tensor.t p
+  val numel : t -> int
+  val tangent_exn : t -> Tensor.t p
+  val dual : tangent:Tensor.t p -> t -> t
+  val dual_on_demand : tangent:(Device.t -> Tensor.t) p -> t -> t
+  val zeros_like : t -> t
+  val zeros_like_k : k:int -> t -> t
+  val ones_like : t -> t
+  val rand_like : t -> t
+  val randn_like : t -> t
+  val randn_like_k : k:int -> t -> t
 
   (** Returns the dot product between x and y. *)
-  val dot_prod : _ some t -> _ some t -> any elt
+  val dot_prod : t -> t -> Maths.t
 
   (** Element-wise multiplication of two parameter sets *)
-  val ( * ) : _ some t -> _ some t -> any t
+  val ( * ) : t -> t -> t
 
   (** Element-wise addition of two parameter sets *)
-  val ( + ) : _ some t -> _ some t -> any t
+  val ( + ) : t -> t -> t
 
   (** Element-wise subtraction of two parameter sets *)
-  val ( - ) : _ some t -> _ some t -> any t
+  val ( - ) : t -> t -> t
 
   (** Element-wise division of two parameter sets *)
-  val ( / ) : _ some t -> _ some t -> any t
+  val ( / ) : t -> t -> t
 
   (** Multiplication of a parameter set with a scalar *)
-  val ( $* ) : float -> 'a some t -> 'a t
+  val ( *$ ) : t -> float -> t
 
   (** Adds a scalar to a parameter set *)
-  val ( $+ ) : float -> 'a some t -> 'a t
+  val ( +$ ) : t -> float -> t
 
-  module C : sig
-    val dot_prod : const t -> const t -> const elt
-    val ( * ) : const t -> const t -> const t
-    val ( + ) : const t -> const t -> const t
-    val ( - ) : const t -> const t -> const t
-    val ( / ) : const t -> const t -> const t
-    val ( $* ) : float -> const t -> const t
-    val ( $+ ) : float -> const t -> const t
+  (** Save the primal part of x as [kind] in [out]. *)
+  val save : t -> kind:('a, 'b) Bigarray.kind -> out:string -> unit
 
-    (** Save x as [kind] in [out]. *)
-    val save : const t -> kind:('a, 'b) Bigarray.kind -> out:string -> unit
+  (** Load params from file onto [device]. *)
+  val load : ?device:Device.t -> string -> t
 
-    (** Load params from file onto [device]. *)
-    val load : ?device:Device.t -> string -> const t
-
-    (** Save x as [kind] in [out] with [prefix] as .npy file. *)
-    val save_npz
-      :  ?prefix:string
-      -> kind:('a, 'b) Bigarray.kind
-      -> out:string
-      -> const t
-      -> unit
-  end
+  (** Save x as [kind] in [out] with [prefix] as .npy file. *)
+  val save_npz : ?prefix:string -> kind:('a, 'b) Bigarray.kind -> out:string -> t -> unit
 end

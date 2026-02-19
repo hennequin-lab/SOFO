@@ -6,41 +6,22 @@ open Torch
    have one more dimension in front, corresponding to tangent batch: [K; n1; n2; ... ]
 *)
 
-type explicit
-type on_demand
-type const = [ `const ]
-type dual = [ `dual ]
-
-type 'a num =
-  | C : Tensor.t -> const num
-  | D : Tensor.t * _ tangent -> dual num
-
-and _ tangent =
-  | Explicit : Tensor.t -> explicit tangent
-  | On_demand : (Device.t -> Tensor.t) -> on_demand tangent
-
-(* existential wrapper *)
-type +_ t = E : 'a num -> _ t [@@unboxed]
-type 'a some = [< const | dual ] as 'a
-
-type any =
-  [ const
-  | dual
-  ]
+let _print s = Stdio.print_endline (Sexp.to_string_hum s)
 
 exception Wrong_shape of int list * int list
 exception Wrong_device of Device.t * Device.t
 exception Check_grad_failed
+exception No_tangent
 exception Not_const
-exception Not_dual
 
-let _print s = Stdio.print_endline (Sexp.to_string_hum s)
+type tangent =
+  | Explicit of Tensor.t
+  | On_demand of (Device.t -> Tensor.t)
 
-let tangent_tensor_of : type a. Tensor.t -> a tangent -> Tensor.t =
-  fun x v ->
-  match v with
-  | Explicit v -> v
-  | On_demand v -> v (Tensor.device x)
+type t =
+  { p : Tensor.t
+  ; t : tangent option
+  }
 
 let repeat_list lst n = List.init n ~f:(fun _ -> lst) |> List.concat
 
@@ -56,113 +37,83 @@ let assert_right_device x dx =
   and ddx = Tensor.device dx in
   if Poly.(dx <> ddx) then raise (Wrong_device (dx, ddx))
 
-let any x = (x :> any t)
-let of_tensor x : const t = E (C x)
+let const p = { p; t = None }
+let primal x = x.p
 
-let to_tensor = function
-  | E (C x) -> x
-  | E (D (x, _)) -> x
+let tangent_tensor_of x = function
+  | Explicit v -> v
+  | On_demand v -> v (Tensor.device x.p)
+
+let tangent x =
+  match x.t with
+  | Some t -> Some (tangent_tensor_of x t)
+  | None -> None
+
+let tangent_exn x = Option.value_exn (tangent x)
 
 let of_array ?device ~shape x =
-  x |> Tensor.of_float1 ?device |> Tensor.reshape ~shape |> of_tensor
+  x |> Tensor.of_float1 ?device |> Tensor.reshape ~shape |> const
 
-let of_bigarray ?device x = E (C (Tensor.of_bigarray ?device x))
-let to_bigarray ~kind x = Tensor.to_bigarray ~kind (to_tensor x)
-let to_float_exn x = x |> to_tensor |> Tensor.to_float0_exn
+let of_bigarray ?device x = Tensor.of_bigarray ?device x |> const
+let to_bigarray ~kind x = Tensor.to_bigarray ~kind (primal x)
+let to_float_exn x = x |> primal |> Tensor.to_float0_exn
+let shape x = x |> primal |> Tensor.shape
+let device x = x |> primal |> Tensor.device
+let kind x = x |> primal |> Tensor.type_
+let numel x = x |> primal |> Tensor.shape |> List.fold ~init:1 ~f:Int.( * ) |> Int.max 1
 
-let const : _ some t -> const t = function
-  | E (C x) -> E (C x)
-  | E (D (x, _)) -> E (C x)
+let dual : tangent:Tensor.t -> t -> t =
+  fun ~tangent x ->
+  assert_right_device x.p tangent;
+  assert_right_shape x.p tangent;
+  { x with t = Some (Explicit tangent) }
 
-let shape x = x |> to_tensor |> Tensor.shape
-let device x = x |> to_tensor |> Tensor.device
-let kind x = x |> to_tensor |> Tensor.type_
-
-let numel x =
-  x |> to_tensor |> Tensor.shape |> List.fold ~init:1 ~f:Int.( * ) |> Int.max 1
-
-let tangent_exn (E x : _ some t) : const t =
-  match x with
-  | D (x, dx) -> E (C (tangent_tensor_of x dx))
-  | _ -> raise Not_dual
-
-let tangent (E x : _ some t) : const t option =
-  match x with
-  | D (x, dx) -> Some (E (C (tangent_tensor_of x dx)))
-  | _ -> None
-
-let tangent_tensor_exn (E x : _ some t) : Tensor.t =
-  match x with
-  | D (x, dx) -> tangent_tensor_of x dx
-  | _ -> raise Not_dual
-
-let tangent_tensor (E x : _ some t) : Tensor.t option =
-  match x with
-  | D (x, dx) -> Some (tangent_tensor_of x dx)
-  | _ -> None
-
-let dual : tangent:const t -> const t -> dual t =
-  fun ~tangent (E x) ->
-  match x with
-  | C x ->
-    let dxp = to_tensor tangent in
-    assert_right_device x dxp;
-    assert_right_shape x dxp;
-    E (D (x, Explicit dxp))
-  | _ -> raise Not_const
-
-let dual_on_demand : tangent:(Device.t -> const t) -> const t -> dual t =
-  fun ~tangent (E x) ->
-  match x with
-  | C x ->
-    let dx_wrap device =
-      let dx = tangent device in
-      let dxp = to_tensor dx in
-      assert_right_shape x dxp;
-      assert_right_device x dxp;
-      dxp
-    in
-    E (D (x, On_demand dx_wrap))
-  | _ -> raise Not_const
+let dual_on_demand : tangent:(Device.t -> Tensor.t) -> t -> t =
+  fun ~tangent x ->
+  let dx_wrap device =
+    let dx = tangent device in
+    assert_right_shape x.p dx;
+    assert_right_device x.p dx;
+    dx
+  in
+  { x with t = Some (On_demand dx_wrap) }
 
 let _all_dims_but_first a = List.range 1 (List.length (Tensor.shape a))
 let batch_dim dx = List.hd_exn (Tensor.shape dx)
-let first_dim x = List.hd_exn (Tensor.shape (to_tensor x))
+let first_dim x = List.hd_exn (Tensor.shape (primal x))
 
 (* constant scalar tensor *)
-let f x = E (C (Tensor.f x))
+let f x = const (Tensor.f x)
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
 
 (* detach primal tensor from graph *)
-let primal_tensor_detach x =
-  let x_t = to_tensor x |> Tensor.detach in
-  E (C x_t)
+let primal_tensor_detach x = x |> primal |> Tensor.detach |> const
 
 let eye ?device ?kind n =
   let x = Tensor.zeros ?device ?kind [ n; n ] in
   let x = Tensor.eye_out ~out:x ~n in
-  E (C x)
+  const x
 
-let zeros ?device ?kind shape = E (C (Tensor.zeros ?device ?kind shape))
-let ones ?device ?kind ?scale shape = E (C (Tensor.ones ?device ?kind ?scale shape))
-let rand ?device ?kind ?scale shape = E (C (Tensor.rand ?device ?kind ?scale shape))
-let randn ?device ?kind ?scale shape = E (C (Tensor.randn ?device ?kind ?scale shape))
-let zeros_like x = E (C (Tensor.zeros_like (to_tensor x)))
+let zeros ?device ?kind shape = const (Tensor.zeros ?device ?kind shape)
+let ones ?device ?kind ?scale shape = const (Tensor.ones ?device ?kind ?scale shape)
+let rand ?device ?kind ?scale shape = const (Tensor.rand ?device ?kind ?scale shape)
+let randn ?device ?kind ?scale shape = const (Tensor.randn ?device ?kind ?scale shape)
+let zeros_like x = const (Tensor.zeros_like (primal x))
 
 let zeros_like_k ~k x =
-  let x = to_tensor x in
+  let x = primal x in
   let x = Tensor.(broadcast_to x ~size:(k :: shape x)) in
-  E (C (Tensor.zeros_like x))
+  const (Tensor.zeros_like x)
 
-let ones_like x = E (C (Tensor.ones_like (to_tensor x)))
-let rand_like x = E (C (Tensor.rand_like (to_tensor x)))
-let randn_like x = E (C (Tensor.randn_like (to_tensor x)))
+let ones_like x = const (Tensor.ones_like (primal x))
+let rand_like x = const (Tensor.rand_like (primal x))
+let randn_like x = const (Tensor.randn_like (primal x))
 
 let randn_like_k ~k x =
-  let x = to_tensor x in
+  let x = primal x in
   let x = Tensor.(broadcast_to x ~size:(k :: shape x)) in
-  E (C (Tensor.randn_like x))
+  const (Tensor.randn_like x)
 
 type unary_info =
   { f : Tensor.t -> Tensor.t
@@ -393,21 +344,13 @@ module Ops = struct
     let df ~f:y ~x ~dx = Tensor.(neg x * y * dx) in
     { f; df }
 
-  (* TODO: keep getting gradient errors about cdf *)
-  (* let cdf =
-    let f x = Tensor.((f 1. + erf (x / f Float.(sqrt 2.))) / f 2.) in
-    let df ~f:_ ~x ~dx =
-      Tensor.(dx * exp (neg (square x / f 2.)) / f Float.(sqrt 2. * pi))
-    in
-    { f; df } *)
-
   let erf =
     let f = Tensor.erf in
     let df ~f:_ ~x ~dx = Tensor.(f Float.(2. / sqrt pi) * exp (neg (square x)) * dx) in
     { f; df }
 
   (* invert a square matrix; y = x^-1, dy = - x^-1 dx x^-1 *)
-  let inv_sqr =
+  let inv =
     let f x =
       let x_size = List.last_exn (Tensor.shape x) in
       let x_device = Tensor.device x in
@@ -420,7 +363,7 @@ module Ops = struct
     let df ~f:y ~x:_ ~dx = Tensor.(neg (matmul y (matmul dx y))) in
     { f; df }
 
-  let inv_rectangle ~rcond =
+  let pinv ~rcond =
     let f = Tensor.pinverse ~rcond in
     let df ~f:y ~x ~dx =
       let tran_2d = Tensor.transpose ~dim0:(-1) ~dim1:(-2) in
@@ -509,51 +452,6 @@ module Ops = struct
       Tensor.(mean_dim ~keepdim ~dtype:(type_ dx) ~dim:(Some dim) dx)
     in
     { f; df }
-
-  (* let[@warning "-16"] max ?(keepdim = false) ~dim =
-    let f x =
-      let values, indices = Tensor.(max_dim x ~dim ~keepdim) in
-      values
-    in
-    let df ~f ~x ~dx =
-      let values, indices = f in 
-    in
-    { f; df } *)
-
-  (* let[@warning "-16"] max ?(keepdim = false) ~dim =
-    let f x =
-      let values, _ = Tensor.(max_dim x ~dim ~keepdim) in
-      values
-    in
-    let df ~f:_ ~x ~dx =
-      let print s = Stdio.print_endline (Sexp.to_string_hum s) in
-      (* dx : [k; xshape...] *)
-      (* indices : xshape with dim removed *)
-      let values, indices = Tensor.(max_dim x ~dim ~keepdim) in
-      print [%message (dim : int) (keepdim : bool)];
-      print [%message (Tensor.shape x : int list)];
-      print [%message (Tensor.shape dx : int list)];
-      print [%message (Tensor.shape values : int list)];
-      print [%message (Tensor.shape indices : int list)];
-      (* Put back the reduced dimension for gather *)
-      let indices = if keepdim then indices else Tensor.unsqueeze indices ~dim in
-      (* Expand indices so k matches dx's leading dim *)
-      let dx_shape = Tensor.shape dx in
-      let k = List.hd_exn dx_shape in
-      let target_shape =
-        if keepdim
-        then dx_shape |> List.mapi ~f:(fun i s -> if i = dim + 1 then 1 else s)
-        else
-          k :: Tensor.shape values
-          |> List.mapi ~f:(fun i s -> if i = dim + 1 then 1 else s)
-      in
-      print [%message (target_shape : int list)];
-      let indices = Tensor.expand indices ~size:target_shape ~implicit:true in
-      print [%message (Tensor.shape indices : int list)];
-      (* gather the tangent along the max locations *)
-      Tensor.gather dx ~dim:(dim + 1) ~index:indices ~sparse_grad:false
-    in
-    { f; df } *)
 
   let[@warning "-16"] max ?(keepdim = false) ~dim =
     let f x =
@@ -745,32 +643,25 @@ module Ops = struct
     in
     { f; dfx; dfy; dfxy }
 
-  let ( $+ ) z =
+  let add_scalar z =
     let f x = Tensor.add_scalar x (Scalar.f z) in
     let df ~f:_ ~x:_ ~dx = dx in
     { f; df }
 
-  let ( $- ) z =
-    let f x = Tensor.(f z - x) in
+  let sub_scalar z =
+    let f x = Tensor.(x - f z) in
     let df ~f:_ ~x:_ ~dx = dx in
     { f; df }
 
-  let ( $* ) z =
+  let mul_by_scalar z =
     let f x = Tensor.mul_scalar x (Scalar.f z) in
     let df ~f:_ ~x:_ ~dx = Tensor.(mul_scalar dx Scalar.(f z)) in
     { f; df }
 
-  let ( $/ ) z =
-    let f x = Tensor.(mul_scalar (reciprocal x) (Scalar.f z)) in
-    let df ~f:_ ~x ~dx =
-      let x2 = Tensor.square x in
-      Tensor.(neg_ (div_ (mul_scalar dx (Scalar.f z)) x2))
-    in
-    { f; df }
-
-  let ( /$ ) z =
-    let f x = Tensor.(mul_scalar x (Scalar.f Float.(1. / z))) in
-    let df ~f:_ ~x:_ ~dx = Tensor.(mul_scalar dx (Scalar.f Float.(1. / z))) in
+  let div_by_scalar z =
+    let z = Scalar.f z in
+    let f x = Tensor.(div_scalar x z) in
+    let df ~f:_ ~x:_ ~dx = Tensor.(div_scalar dx z) in
     { f; df }
 
   let ( *@ ) =
@@ -917,115 +808,31 @@ module Ops = struct
     let dfy ~f:_ ~x ~y:_ ~dy = Tensor.(kron x dy) in
     let dfxy ~f:_ ~x ~y ~dx ~dy = Tensor.(kron dx y + kron x dy) in
     { f; dfx; dfy; dfxy }
-
-  (* apply a 2d convolution over x with weight [w] *)
-  let conv2d ?(padding = 0, 0) ?(dilation = 1, 1) ?(groups = 1) ~bias stride =
-    (* x has shape [bs x n_channels x w x h], w has shape [out_channels x in_channels x kerl_x x kerl_y] *)
-    let bias_p = Option.map bias ~f:to_tensor in
-    let bias_t =
-      match bias with
-      | Some bias ->
-        (match bias with
-         | E (D (x, dx)) -> Some (tangent_tensor_of x dx)
-         | _ -> None)
-      | _ -> None
-    in
-    let f x w =
-      let z = Tensor.conv2d ~padding ~dilation ~groups x w bias_p ~stride in
-      z
-    in
-    let maybe_add_db dz =
-      match bias_t with
-      | None -> dz
-      | Some db ->
-        let n_dim = List.length (Tensor.shape dz) in
-        let[@warning "-8"] [ num_tangents; c_out ] = Tensor.shape db in
-        (* broadcast db *)
-        let db =
-          Tensor.reshape
-            db
-            ~shape:
-              (List.init n_dim ~f:(function
-                 | 0 -> num_tangents
-                 | 2 -> c_out
-                 | _ -> 1))
-        in
-        Tensor.(db + dz)
-    in
-    let dfx ~f:_ ~x:_ ~y:w ~dx =
-      let[@warning "-8"] (num_tangents :: bs :: rest) = Tensor.shape dx in
-      (* collapse num_tangents and batch_size dimensions *)
-      let dx = Tensor.reshape dx ~shape:(-1 :: rest) in
-      let dz = Tensor.conv2d ~padding ~dilation ~groups dx w None ~stride in
-      (* un-collapse *)
-      let[@warning "-8"] (_ :: rest') = Tensor.shape dz in
-      Tensor.reshape dz ~shape:(num_tangents :: bs :: rest') |> maybe_add_db
-    in
-    let dfy ~f:_ ~x ~y:_ ~dy:dw =
-      let[@warning "-8"] (num_tangents :: nc_out :: rest) = Tensor.shape dw in
-      (* collapse num_tangents and num_out_channels dimensions *)
-      let dw = Tensor.reshape dw ~shape:(-1 :: rest) in
-      let dz = Tensor.conv2d ~padding ~dilation ~groups x dw None ~stride in
-      (* un-collapse *)
-      let[@warning "-8"] (bs :: _ :: rest') = Tensor.shape dz in
-      Tensor.reshape dz ~shape:(bs :: num_tangents :: nc_out :: rest')
-      |> Tensor.transpose_ ~dim0:1 ~dim1:0
-      |> maybe_add_db
-    in
-    let dfxy ~f:_ ~x ~y:w ~dx ~dy:dw =
-      let part1 =
-        let[@warning "-8"] (num_tangents :: bs :: rest) = Tensor.shape dx in
-        let dx = Tensor.reshape dx ~shape:(-1 :: rest) in
-        let tmp = Tensor.conv2d ~padding ~dilation ~groups dx w None ~stride in
-        let[@warning "-8"] (_ :: rest') = Tensor.shape tmp in
-        Tensor.reshape tmp ~shape:(num_tangents :: bs :: rest')
-      in
-      let part2 =
-        let[@warning "-8"] (num_tangents :: nc_out :: rest) = Tensor.shape dw in
-        (* collapse num_tangents and num_out_channels dimensions *)
-        let dw = Tensor.reshape dw ~shape:(-1 :: rest) in
-        let tmp = Tensor.conv2d ~padding ~dilation ~groups x dw None ~stride in
-        let[@warning "-8"] (bs :: _ :: rest') = Tensor.shape tmp in
-        Tensor.reshape tmp ~shape:(bs :: num_tangents :: nc_out :: rest')
-        |> Tensor.transpose_ ~dim0:1 ~dim1:0
-      in
-      Tensor.(part1 + part2) |> maybe_add_db
-    in
-    { f; dfx; dfy; dfxy }
 end
 
 (* ----------------------------------------------------
    -- Generic operations on [< `const | `dual] t
    ---------------------------------------------------- *)
 
-let make_unary (z : unary_info) =
-  let f (E x : 'a some t) : 'a t =
-    match x with
-    | C x -> E (C (z.f x))
-    | D (x, dx) ->
-      let f = z.f x in
-      let dx = tangent_tensor_of x dx in
-      E (D (f, Explicit (z.df ~f ~x ~dx)))
+let make_unary (z : unary_info) x =
+  let f = z.f x.p in
+  let df =
+    match tangent x with
+    | None -> None
+    | Some dx -> Some (Explicit (z.df ~f ~x:x.p ~dx))
   in
-  f
+  { p = f; t = df }
 
-let make_binary (z : binary_info) =
-  let f (E x : _ some t) (E y : _ some t) : any t =
-    match x, y with
-    | C x, C y -> E (C (z.f x y))
-    | D (x, dx), C y ->
-      let f = z.f x y in
-      E (D (f, Explicit (z.dfx ~f ~x ~y ~dx:(tangent_tensor_of x dx))))
-    | C x, D (y, dy) ->
-      let f = z.f x y in
-      E (D (f, Explicit (z.dfy ~f ~x ~y ~dy:(tangent_tensor_of y dy))))
-    | D (x, dx), D (y, dy) ->
-      let f = z.f x y in
-      let dx = tangent_tensor_of x dx in
-      let dy = tangent_tensor_of y dy in
-      E (D (f, Explicit (z.dfxy ~f ~x ~y ~dx ~dy)))
+let make_binary (z : binary_info) x y =
+  let f = z.f x.p y.p in
+  let df =
+    match tangent x, tangent y with
+    | None, None -> None
+    | Some dx, None -> Some (Explicit (z.dfx ~f ~x:x.p ~y:y.p ~dx))
+    | None, Some dy -> Some (Explicit (z.dfy ~f ~x:x.p ~y:y.p ~dy))
+    | Some dx, Some dy -> Some (Explicit (z.dfxy ~f ~x:x.p ~y:y.p ~dx ~dy))
   in
-  f
+  { p = f; t = df }
 
 let view ~size = make_unary (Ops.view ~size)
 let broadcast_to ~size = make_unary (Ops.broadcast_to ~size)
@@ -1053,8 +860,8 @@ let pdf x = make_unary Ops.pdf x
 
 (* let cdf x = make_unary Ops.cdf x *)
 let erf x = make_unary Ops.erf x
-let inv_sqr x = make_unary Ops.inv_sqr x
-let inv_rectangle ~rcond x = make_unary Ops.(inv_rectangle ~rcond) x
+let inv x = make_unary Ops.inv x
+let pinv ~rcond x = make_unary Ops.(pinv ~rcond) x
 let relu x = make_unary Ops.relu x
 let soft_relu x = make_unary Ops.soft_relu x
 let sigmoid x = make_unary Ops.sigmoid x
@@ -1074,105 +881,69 @@ let ( + ) x = make_binary Ops.( + ) x
 let ( - ) x = make_binary Ops.( - ) x
 let ( * ) x = make_binary Ops.( * ) x
 let ( / ) x = make_binary Ops.( / ) x
-let ( $+ ) z = make_unary Ops.(( $+ ) z)
-let ( $- ) z = make_unary Ops.(( $- ) z)
-let ( $* ) z = make_unary Ops.(( $* ) z)
-let ( $/ ) z = make_unary Ops.(( $/ ) z)
-let ( /$ ) z = make_unary Ops.(( /$ ) z)
+let ( +$ ) x z = make_unary (Ops.add_scalar z) x
+let ( -$ ) x z = make_unary Ops.(sub_scalar z) x
+let ( *$ ) x z = make_unary Ops.(mul_by_scalar z) x
+let ( /$ ) x z = make_unary Ops.(div_by_scalar z) x
 let ( *@ ) x = make_binary Ops.(( *@ )) x
 
-let einsum (operands : (_ some t * string) list) return : any t =
+let einsum operands return =
   let tangent_id = 'x' in
   assert (not (String.contains return tangent_id));
   assert (
     List.fold operands ~init:true ~f:(fun accu (_, eq) ->
       accu && not (String.contains eq tangent_id)));
-  let primal =
-    Ops.einsum (List.map operands ~f:(fun (x, eq) -> to_tensor x, eq)) return
-  in
+  let primal = Ops.einsum (List.map operands ~f:(fun (x, eq) -> primal x, eq)) return in
   let tangent =
-    List.foldi operands ~init:None ~f:(fun i accu (E op, eq) ->
-      match op with
-      | C _ -> accu
-      | D (op, dop) ->
+    List.foldi operands ~init:None ~f:(fun i accu (op, eq) ->
+      match tangent op with
+      | None -> accu
+      | Some dop ->
         let ops =
           List.mapi operands ~f:(fun j (op', eq') ->
-            if i = j
-            then tangent_tensor_of op dop, String.of_char tangent_id ^ eq
-            else to_tensor op', eq')
+            if i = j then dop, String.of_char tangent_id ^ eq else op'.p, eq')
         in
         let return = String.of_char tangent_id ^ return in
         let tangent_contrib = Ops.einsum ops return in
         (match accu with
          | None -> Some tangent_contrib
          | Some a -> Some Tensor.(a + tangent_contrib)))
+    |> Option.map ~f:(fun x -> Explicit x)
   in
-  match tangent with
-  | None -> E (C primal)
-  | Some dz -> E (D (primal, Explicit dz))
+  { p = primal; t = tangent }
 
 let concat ~dim x_list =
-  let y = List.map x_list ~f:to_tensor |> Tensor.concat ~dim in
+  let y = List.map x_list ~f:primal |> Tensor.concat ~dim in
   let all_const, n_tangents =
     List.fold_until
       x_list
       ~init:(true, 0)
-      ~f:(fun _ (E x) ->
-        match x with
-        | C _ -> Continue (true, 0)
-        | D (x, dx) ->
-          let k = batch_dim (tangent_tensor_of x dx) in
+      ~f:(fun _ x ->
+        match tangent x with
+        | None -> Continue (true, 0)
+        | Some dx ->
+          let k = batch_dim dx in
           Stop (false, k))
       ~finish:Fn.id
   in
   if all_const
-  then E (C y)
+  then { p = y; t = None }
   else (
     let dx_list =
-      List.map x_list ~f:(fun (E x) ->
-        match x with
-        | D (x, dx) ->
-          let dx = tangent_tensor_of x dx in
+      List.map x_list ~f:(fun x ->
+        match tangent x with
+        | None -> primal (zeros_like_k ~k:n_tangents (const x.p))
+        | Some dx ->
           assert (Int.(batch_dim dx = n_tangents));
-          dx
-        | C x -> to_tensor (zeros_like_k ~k:n_tangents (of_tensor x)))
+          dx)
     in
     let dy = Tensor.concat dx_list ~dim:Int.(dim + 1) in
-    E (D (y, Explicit dy)))
+    { p = y; t = Some (Explicit dy) })
 
-let block_diag x_list =
-  let y = Tensor.block_diag (List.map x_list ~f:to_tensor) in
-  let all_const, n_tangents =
-    List.fold_until
-      x_list
-      ~init:(true, 0)
-      ~f:(fun _ (E x) ->
-        match x with
-        | C _ -> Continue (true, 0)
-        | D (x, dx) ->
-          let k = batch_dim (tangent_tensor_of x dx) in
-          Stop (false, k))
-      ~finish:Fn.id
-  in
-  if all_const
-  then E (C y)
-  else (
-    let dy =
-      List.init n_tangents ~f:(fun k ->
-        List.map x_list ~f:(fun x ->
-          let dx' = tangent_tensor_exn x in
-          Tensor.slice dx' ~dim:0 ~start:(Some k) ~end_:(Some Int.(k + 1)) ~step:1
-          |> Tensor.squeeze_dim ~dim:0)
-        |> Tensor.block_diag
-        |> Tensor.unsqueeze ~dim:0)
-      |> Tensor.concat ~dim:0
-    in
-    E (D (y, Explicit dy)))
-
-(* if [hard], the returned samples will be discretized as one-hot vectors, 
+(* if [hard], the returned samples will be discretized as one-hot vectors,
   but will be differentiated as if it is the soft sample in autograd. *)
 let gumbel_softmax ~tau ~hard logits =
-  let logits_p = to_tensor logits in
+  let logits_p = primal logits in
   let gumbel_noise =
     let uniform_noise = Tensor.uniform logits_p ~from:0. ~to_:1. in
     Tensor.(neg_ (log_ (neg_ (log_ uniform_noise))))
@@ -1188,16 +959,15 @@ let gumbel_softmax ~tau ~hard logits =
       Tensor.one_hot pos ~num_classes |> Tensor.squeeze)
     else y
   in
-  match logits with
-  | E (C _) -> E (C y_final)
-  | E (D _) ->
+  match tangent logits with
+  | None -> { p = y_final; t = None }
+  | Some dlogits ->
     let dy =
-      let dlogits = tangent_tensor_exn logits in
       let tmp1 = Tensor.(div_scalar (y * dlogits) (Scalar.f tau)) in
       let tmp2 = Tensor.(div_scalar (y * y * dlogits) (Scalar.f tau)) in
       Tensor.(tmp1 - tmp2)
     in
-    E (D (y_final, Explicit dy))
+    { p = y_final; t = Some (Explicit dy) }
 
 let cholesky x = make_unary Ops.cholesky x
 
@@ -1207,192 +977,26 @@ let linsolve_triangular ?left ?upper x =
 let linsolve ~left x = make_binary (Ops.linsolve ~left) x
 let kron x = make_binary Ops.kron x
 
-let conv2d ?padding ?dilation ?groups ~bias ~stride ~w x =
-  make_binary (Ops.conv2d ?padding ?dilation ?groups ~bias stride) x w
-
-(* ----------------------------------------------------
-   -- Operations on [`const] t
-   ---------------------------------------------------- *)
-
-module C = struct
-  let make_unary (z : unary_info) =
-    let f (E x : const t) : const t =
-      match x with
-      | C x -> E (C (z.f x))
-      | D _ -> raise Not_const
-    in
-    f
-
-  let make_binary (z : binary_info) =
-    let f (E x : const t) (E y : const t) : const t =
-      match x, y with
-      | C x, C y -> E (C (z.f x y))
-      | _ -> raise Not_const
-    in
-    f
-
-  let direct_unary f = function
-    | E (C x) -> E (C (f x))
-    | _ -> raise Not_const
-
-  let f = f
-  let view ~size = make_unary (Ops.view ~size)
-  let broadcast_to ~size = make_unary (Ops.broadcast_to ~size)
-  let contiguous = make_unary Ops.contiguous
-  let shape x = shape x
-  let reshape ~shape = make_unary (Ops.reshape ~shape)
-  let permute ~dims = make_unary (Ops.permute ~dims)
-  let squeeze ~dim = make_unary (Ops.squeeze ~dim)
-  let unsqueeze ~dim = make_unary (Ops.unsqueeze ~dim)
-  let transpose ?dims x = make_unary Ops.(transpose ?dims) x
-  let btr = make_unary Ops.btr
-  let diagonal ~offset = make_unary (Ops.diagonal ~offset)
-  let diag_embed ~offset ~dim1 ~dim2 x = make_unary Ops.(diag_embed ~offset ~dim1 ~dim2) x
-  let tril ~_diagonal = make_unary Ops.(tril ~_diagonal)
-  let neg = make_unary Ops.neg
-  let abs x = make_unary Ops.abs x
-  let trace = make_unary Ops.trace
-  let sin = make_unary Ops.sin
-  let cos = make_unary Ops.cos
-  let sqr = make_unary Ops.sqr
-  let sqrt = make_unary Ops.sqrt
-  let log = make_unary Ops.log
-  let exp = make_unary Ops.exp
-  let tanh = make_unary Ops.tanh
-  let pdf = make_unary Ops.pdf
-
-  (* let cdf = make_unary Ops.cdf *)
-  let erf = make_unary Ops.erf
-  let inv_sqr x = make_unary Ops.inv_sqr x
-  let inv_rectangle ~rcond x = make_unary Ops.(inv_rectangle ~rcond) x
-  let relu = make_unary Ops.relu
-  let soft_relu x = make_unary Ops.soft_relu x
-  let sigmoid = make_unary Ops.sigmoid
-  let softplus = make_unary Ops.softplus
-  let lgamma = make_unary Ops.lgamma
-  let sign = direct_unary Tensor.sign
-  let slice ?start ?end_ ?step ~dim = make_unary Ops.(slice ?start ?end_ ?step ~dim)
-  let sum ?keepdim ?dim = make_unary (Ops.sum ?keepdim ?dim)
-  let mean ?keepdim ?dim = make_unary (Ops.mean ?keepdim ?dim)
-  let max ?keepdim ~dim = make_unary (Ops.max ?keepdim ~dim)
-  let logsumexp ?keepdim ~dim = make_unary (Ops.logsumexp ?keepdim ~dim)
-  let max_2d_dim1 ~keepdim = make_unary (Ops.max_2d_dim1 ~keepdim)
-
-  let maxpool2d ?padding ?dilation ?ceil_mode ?stride ksize =
-    make_unary (Ops.maxpool2d ?padding ?dilation ?ceil_mode ?stride ksize)
-
-  let ( + ) = make_binary Ops.( + )
-  let ( - ) = make_binary Ops.( - )
-  let ( * ) = make_binary Ops.( * )
-  let ( / ) = make_binary Ops.( / )
-  let ( $+ ) z = make_unary Ops.(( $+ ) z)
-  let ( $- ) z = make_unary Ops.(( $- ) z)
-  let ( $* ) z = make_unary Ops.(( $* ) z)
-  let ( $/ ) z = make_unary Ops.(( $/ ) z)
-  let ( /$ ) z = make_unary Ops.(( /$ ) z)
-  let ( *@ ) = make_binary Ops.(( *@ ))
-
-  let einsum (operands : ([ `const ] t * string) list) return : [ `const ] t =
-    let tangent_id = 'x' in
-    assert (not (String.contains return tangent_id));
-    assert (
-      List.fold operands ~init:true ~f:(fun accu (_, eq) ->
-        accu && not (String.contains eq tangent_id)));
-    let all_const =
-      List.fold operands ~init:true ~f:(fun accu (E x, _) ->
-        match x with
-        | C _ -> accu
-        | _ -> false)
-    in
-    if not all_const then raise Not_const;
-    let z = Ops.einsum (List.map operands ~f:(fun (x, eq) -> to_tensor x, eq)) return in
-    E (C z)
-
-  let concat ~dim x_list =
-    let y = List.map x_list ~f:to_tensor |> Tensor.concat ~dim in
-    let all_const =
-      List.fold_until
-        x_list
-        ~init:true
-        ~f:(fun _ (E x) ->
-          match x with
-          | C _ -> Continue true
-          | D _ -> Stop false)
-        ~finish:Fn.id
-    in
-    if all_const then E (C y) else raise Not_const
-
-  let block_diag x_list =
-    let y = Tensor.block_diag (List.map x_list ~f:to_tensor) in
-    let all_const =
-      List.fold_until
-        x_list
-        ~init:true
-        ~f:(fun _ (E x) ->
-          match x with
-          | C _ -> Continue true
-          | D _ -> Stop false)
-        ~finish:Fn.id
-    in
-    if all_const then E (C y) else raise Not_const
-
-  let gumbel_softmax ~tau ~with_noise ~discrete (E x) =
+module Const = struct
+  let svd x =
     match x with
-    | C x ->
-      let gumbel_noise =
-        if with_noise
-        then (
-          let uniform_noise = Tensor.uniform x ~from:0. ~to_:1. in
-          Some Tensor.(neg_ (log_ (neg_ (log_ uniform_noise)))))
-        else None
-      in
-      let logits =
-        match gumbel_noise with
-        | None -> Tensor.(div_scalar x (Scalar.f tau))
-        | Some gumbel_noise -> Tensor.(div_scalar (x + gumbel_noise) (Scalar.f tau))
-      in
-      let reduce_dim_list = List.tl_exn (Tensor.shape x) in
-      let num_classes = List.nth_exn (Tensor.shape x) 1 in
-      let y =
-        Tensor.(exp (logits - logsumexp ~dim:reduce_dim_list ~keepdim:true logits))
-      in
-      if discrete
-      then (
-        let pos = Tensor.argmax y ~dim:1 ~keepdim:true in
-        Tensor.one_hot pos ~num_classes |> Tensor.squeeze |> of_tensor)
-      else of_tensor y
-    | _ -> raise Not_const
-
-  let svd (E x) =
-    match x with
-    | C x ->
-      let u, s, vt = Tensor.svd ~some:true ~compute_uv:true x in
-      of_tensor u, of_tensor s, of_tensor vt
+    | { p; t = None } ->
+      let u, s, vt = Tensor.svd ~some:true ~compute_uv:true p in
+      const u, const s, const vt
     | _ -> raise Not_const
 
   (* x = Q diag(l) Q^H *)
-  let eigh ?(uplo = "l") (E x) =
+  let eigh ?(uplo = "l") x =
     match x with
-    | C x ->
-      let l, q = Tensor.linalg_eigh ~uplo x in
-      of_tensor l, of_tensor q
+    | { p; t = None } ->
+      let l, q = Tensor.linalg_eigh ~uplo p in
+      const l, const q
     | _ -> raise Not_const
 
-  let qr (E x) =
+  let qr x =
     match x with
-    | C x ->
-      let q, r = Tensor.linalg_qr ~a:x ~mode:"complete" in
-      of_tensor q, of_tensor r
+    | { p; t = None } ->
+      let q, r = Tensor.linalg_qr ~a:p ~mode:"reduced" in
+      const q, const r
     | _ -> raise Not_const
-
-  let cholesky x = make_unary Ops.cholesky x
-
-  let linsolve_triangular ?left ?upper x =
-    make_binary (Ops.linsolve_triangular ?left ?upper) x
-
-  let linsolve ~left x = make_binary (Ops.linsolve ~left) x
-  let kron = make_binary Ops.kron
-
-  let conv2d ?padding ?dilation ?groups ~bias ~stride ~w x =
-    make_binary (Ops.conv2d ?padding ?dilation ?groups ~bias stride) x w
 end

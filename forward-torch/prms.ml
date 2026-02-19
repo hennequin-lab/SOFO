@@ -8,9 +8,9 @@ open Maths
    ------------------------------------------------------------ *)
 
 let value = function
-  | Pinned x -> of_tensor x
-  | Free x -> of_tensor x
-  | Bounded x -> of_tensor x.v
+  | Pinned x -> const x
+  | Free x -> const x
+  | Bounded x -> const x.v
 
 let enforce_bounds ?lb ?ub x =
   let x =
@@ -40,20 +40,18 @@ let cat label =
 module Make (B : Basic) : T with type 'a p = 'a B.p = struct
   include B
 
-  type 'a elt = 'a t
-  type nonrec 'a t = 'a elt p
-  type nonrec param = param p
-
   let iter x ~f = fold ?path:None x ~init:() ~f:(fun () (x, _) -> f x)
   let iter2 x y ~f = fold2 ?path:None x y ~init:() ~f:(fun () (x, y, _) -> f x y)
+
+  type nonrec t = t p
+  type nonrec param = param p
+
   let value = map ~f:value
-  let any = map ~f:any
-  let of_tensor = map ~f:of_tensor
-  let to_tensor = map ~f:to_tensor
   let const = map ~f:const
+  let primal = map ~f:primal
   let numel x = fold x ~init:0 ~f:(fun accu (x, _) -> Int.(accu + numel x))
   let tangent_exn = map ~f:tangent_exn
-  let dual ~tangent:dx x = map2 x dx ~f:(fun x dx -> dual ~tangent:dx x)
+  let dual ~tangent:dx (x : t) = map2 x dx ~f:(fun x dx -> dual ~tangent:dx x)
 
   let dual_on_demand ~tangent:dx x =
     map2 x dx ~f:(fun x dx -> dual_on_demand ~tangent:dx x)
@@ -77,54 +75,37 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
   let ( - ) = map2 ~f:( - )
   let ( * ) = map2 ~f:( * )
   let ( / ) = map2 ~f:( / )
-  let ( $+ ) z = map ~f:(( $+ ) z)
-  let ( $* ) z = map ~f:(( $* ) z)
+  let ( +$ ) x z = map x ~f:(fun x -> x +$ z)
+  let ( *$ ) x z = map x ~f:(fun x -> x *$ z)
 
-  module C = struct
-    let dot_prod x y =
-      fold2 x y ~init:None ~f:(fun accu (x, y, _) ->
-        let z = C.(sum (x * y)) in
-        match accu with
-        | None -> Some z
-        | Some a -> Some C.(a + z))
-      |> Option.value_exn
+  let save m ~kind ~out:filename =
+    let m = map m ~f:(fun x -> Tensor.to_bigarray (Maths.primal x) ~kind) in
+    let output = Stdio.Out_channel.create filename in
+    Stdlib.Marshal.to_channel output m [ Stdlib.Marshal.No_sharing ];
+    Stdio.Out_channel.close output
 
-    let ( + ) = map2 ~f:C.( + )
-    let ( - ) = map2 ~f:C.( - )
-    let ( * ) = map2 ~f:C.( * )
-    let ( / ) = map2 ~f:C.( / )
-    let ( $+ ) z = map ~f:C.(( $+ ) z)
-    let ( $* ) z = map ~f:C.(( $* ) z)
+  let load ?device filename =
+    let input = Stdio.In_channel.create filename in
+    let m = Stdlib.Marshal.from_channel input in
+    Stdio.In_channel.close input;
+    map m ~f:(fun x -> Maths.const (Tensor.of_bigarray ?device x))
 
-    let save m ~kind ~out:filename =
-      let m = map m ~f:(fun x -> Tensor.to_bigarray (Maths.to_tensor x) ~kind) in
-      let output = Stdio.Out_channel.create filename in
-      Stdlib.Marshal.to_channel output m [ Stdlib.Marshal.No_sharing ];
-      Stdio.Out_channel.close output
-
-    let load ?device filename =
-      let input = Stdio.In_channel.create filename in
-      let m = Stdlib.Marshal.from_channel input in
-      Stdio.In_channel.close input;
-      map m ~f:(fun x -> Maths.of_tensor (Tensor.of_bigarray ?device x))
-
-    let save_npz ?prefix ~kind ~out prms =
-      let prms = map prms ~f:(fun x -> Tensor.to_bigarray (Maths.to_tensor x) ~kind) in
-      let path = Option.map prefix ~f:(fun s -> [ s ]) in
-      let file = Npy.Npz.open_out out in
-      fold ?path prms ~init:() ~f:(fun () (prm, path) ->
-        let descr =
-          match path with
-          | None -> assert false
-          | Some p -> String.concat ~sep:"/" (List.rev p)
-        in
-        Npy.Npz.write file descr prm);
-      Npy.Npz.close_out file
-  end
+  let save_npz ?prefix ~kind ~out prms =
+    let prms = map prms ~f:(fun x -> Tensor.to_bigarray (Maths.primal x) ~kind) in
+    let path = Option.map prefix ~f:(fun s -> [ s ]) in
+    let file = Npy.Npz.open_out out in
+    fold ?path prms ~init:() ~f:(fun () (prm, path) ->
+      let descr =
+        match path with
+        | None -> assert false
+        | Some p -> String.concat ~sep:"/" (List.rev p)
+      in
+      Npy.Npz.write file descr prm);
+    Npy.Npz.close_out file
 end
 
 (* ------------------------------------------------------------
-   -- Single parameter 
+   -- Single parameter
    ------------------------------------------------------------ *)
 
 module Single = struct
@@ -137,15 +118,11 @@ module Single = struct
       let fold2 ?path x y ~init ~f = f init (x, y, path)
     end)
 
-  let pinned x = Pinned (to_tensor x)
-  let free x = Free (to_tensor x)
+  let pinned x = Pinned (primal x)
+  let free x = Free (primal x)
 
   let bounded ?above:lb ?below:ub x =
-    Bounded
-      { v = to_tensor x
-      ; lb = Option.map ~f:to_tensor lb
-      ; ub = Option.map ~f:to_tensor ub
-      }
+    Bounded { v = primal x; lb = Option.map ~f:primal lb; ub = Option.map ~f:primal ub }
 end
 
 (* ------------------------------------------------------------

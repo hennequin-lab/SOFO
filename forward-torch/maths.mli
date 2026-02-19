@@ -4,66 +4,56 @@
 open Base
 open Torch
 
-type +'a t
-type const = [ `const ]
-type dual = [ `dual ]
-type 'a some = [< const | dual ] as 'a
-
-type any =
-  [ const
-  | dual
-  ]
-
 exception Wrong_shape of int list * int list
 exception Wrong_device of Device.t * Device.t
 exception Check_grad_failed
+exception No_tangent
+exception Not_const
 
-val any : _ some t -> any t
-val of_tensor : Tensor.t -> const t
-val to_tensor : _ some t -> Tensor.t
-val of_array : ?device:Device.t -> shape:int list -> float array -> const t
+type tangent =
+  | Explicit of Tensor.t
+  | On_demand of (Device.t -> Tensor.t)
 
-val of_bigarray
-  :  ?device:Device.t
-  -> ('a, 'b, Bigarray.c_layout) Bigarray.Genarray.t
-  -> const t
+type t
+
+val const : Tensor.t -> t
+val primal : t -> Tensor.t
+val of_array : ?device:Device.t -> shape:int list -> float array -> t
+val of_bigarray : ?device:Device.t -> ('a, 'b, Bigarray.c_layout) Bigarray.Genarray.t -> t
 
 val to_bigarray
   :  kind:('a, 'b) Bigarray.kind
-  -> const t
+  -> t
   -> ('a, 'b, Bigarray.c_layout) Bigarray.Genarray.t
 
-val to_float_exn : const t -> float
-val const : _ some t -> const t
-val shape : _ some t -> int list
-val device : _ some t -> Device.t
-val kind : _ some t -> Torch_core.Kind.packed
-val numel : _ some t -> int
-val tangent_exn : _ some t -> const t
-val tangent : _ some t -> const t option
-val tangent_tensor_exn : _ some t -> Tensor.t
-val tangent_tensor : _ some t -> Tensor.t option
-val dual : tangent:const t -> const t -> dual t
-val dual_on_demand : tangent:(Device.t -> const t) -> const t -> dual t
-val first_dim : _ some t -> int
+val to_float_exn : t -> float
+val shape : t -> int list
+val device : t -> Device.t
+val kind : t -> Torch_core.Kind.packed
+val numel : t -> int
+val tangent : t -> Tensor.t option
+val tangent_exn : t -> Tensor.t
+val dual : tangent:Tensor.t -> t -> t
+val dual_on_demand : tangent:(Device.t -> Tensor.t) -> t -> t
+val first_dim : t -> int
 
 (** Create a constant scalar tensor by pairing the primal with None as tangent. *)
-val f : float -> const t
+val f : float -> t
 
 type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed -> 'a
 
-val primal_tensor_detach : _ some t -> const t
-val eye : (int -> const t) with_tensor_params
-val zeros : (int list -> const t) with_tensor_params
-val ones : (?scale:float -> int list -> const t) with_tensor_params
-val rand : (?scale:float -> int list -> const t) with_tensor_params
-val randn : (?scale:float -> int list -> const t) with_tensor_params
-val zeros_like : _ some t -> const t
-val zeros_like_k : k:int -> _ some t -> const t
-val ones_like : _ some t -> const t
-val rand_like : _ some t -> const t
-val randn_like : _ some t -> const t
-val randn_like_k : k:int -> _ some t -> const t
+val primal_tensor_detach : t -> t
+val eye : (int -> t) with_tensor_params
+val zeros : (int list -> t) with_tensor_params
+val ones : (?scale:float -> int list -> t) with_tensor_params
+val rand : (?scale:float -> int list -> t) with_tensor_params
+val randn : (?scale:float -> int list -> t) with_tensor_params
+val zeros_like : t -> t
+val zeros_like_k : k:int -> t -> t
+val ones_like : t -> t
+val rand_like : t -> t
+val randn_like : t -> t
+val randn_like_k : k:int -> t -> t
 
 type unary_info =
   { f : Tensor.t -> Tensor.t
@@ -78,47 +68,47 @@ type binary_info =
       f:Tensor.t -> x:Tensor.t -> y:Tensor.t -> dx:Tensor.t -> dy:Tensor.t -> Tensor.t
   }
 
-val make_unary : unary_info -> 'a some t -> 'a t
-val make_binary : binary_info -> _ some t -> _ some t -> any t
-val view : size:int list -> 'a some t -> 'a t
-val broadcast_to : size:int list -> 'a some t -> 'a t
-val contiguous : 'a some t -> 'a t
-val reshape : shape:int list -> 'a some t -> 'a t
-val permute : dims:int list -> 'a some t -> 'a t
-val squeeze : dim:int -> 'a some t -> 'a t
-val unsqueeze : dim:int -> 'a some t -> 'a t
-val transpose : ?dims:int list -> 'a some t -> 'a t
-val btr : 'a some t -> 'a t
-val diagonal : offset:int -> 'a some t -> 'a t
-val diag_embed : offset:int -> dim1:int -> dim2:int -> 'a some t -> 'a t
-val tril : _diagonal:int -> 'a some t -> 'a t
-val neg : 'a some t -> 'a t
-val abs : 'a some t -> 'a t
-val trace : 'a some t -> 'a t
-val sin : 'a some t -> 'a t
-val cos : 'a some t -> 'a t
-val sqr : 'a some t -> 'a t
-val sqrt : 'a some t -> 'a t
-val log : 'a some t -> 'a t
-val exp : 'a some t -> 'a t
-val tanh : 'a some t -> 'a t
-val pdf : 'a some t -> 'a t
+val make_unary : unary_info -> t -> t
+val make_binary : binary_info -> t -> t -> t
+val view : size:int list -> t -> t
+val broadcast_to : size:int list -> t -> t
+val contiguous : t -> t
+val reshape : shape:int list -> t -> t
+val permute : dims:int list -> t -> t
+val squeeze : dim:int -> t -> t
+val unsqueeze : dim:int -> t -> t
+val transpose : ?dims:int list -> t -> t
+val btr : t -> t
+val diagonal : offset:int -> t -> t
+val diag_embed : offset:int -> dim1:int -> dim2:int -> t -> t
+val tril : _diagonal:int -> t -> t
+val neg : t -> t
+val abs : t -> t
+val trace : t -> t
+val sin : t -> t
+val cos : t -> t
+val sqr : t -> t
+val sqrt : t -> t
+val log : t -> t
+val exp : t -> t
+val tanh : t -> t
+val pdf : t -> t
 
-(* val cdf : 'a some t -> 'a t *)
-val erf : 'a some t -> 'a t
-val inv_sqr : 'a some t -> 'a t
-val inv_rectangle : rcond:float -> 'a some t -> 'a t
-val relu : 'a some t -> 'a t
-val soft_relu : 'a some t -> 'a t
-val sigmoid : 'a some t -> 'a t
-val softplus : 'a some t -> 'a t
-val lgamma : 'a some t -> 'a t
-val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> 'a some t -> 'a t
-val sum : ?keepdim:bool -> ?dim:int list -> 'a some t -> 'a t
-val mean : ?keepdim:bool -> ?dim:int list -> 'a some t -> 'a t
-val max : ?keepdim:bool -> dim:int -> 'a some t -> 'a t
-val logsumexp : ?keepdim:bool -> dim:int list -> 'a some t -> 'a t
-val max_2d_dim1 : keepdim:bool -> 'a some t -> 'a t
+(* val cdf : t -> t *)
+val erf : t -> t
+val inv : t -> t
+val pinv : rcond:float -> t -> t
+val relu : t -> t
+val soft_relu : t -> t
+val sigmoid : t -> t
+val softplus : t -> t
+val lgamma : t -> t
+val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> t -> t
+val sum : ?keepdim:bool -> ?dim:int list -> t -> t
+val mean : ?keepdim:bool -> ?dim:int list -> t -> t
+val max : ?keepdim:bool -> dim:int -> t -> t
+val logsumexp : ?keepdim:bool -> dim:int list -> t -> t
+val max_2d_dim1 : keepdim:bool -> t -> t
 
 val maxpool2d
   :  ?padding:int * int
@@ -126,125 +116,28 @@ val maxpool2d
   -> ?ceil_mode:bool
   -> ?stride:int * int
   -> int * int
-  -> 'a some t
-  -> 'a t
+  -> t
+  -> t
 
-val ( + ) : _ some t -> _ some t -> any t
-val ( - ) : _ some t -> _ some t -> any t
-val ( * ) : _ some t -> _ some t -> any t
-val ( / ) : _ some t -> _ some t -> any t
-val ( $+ ) : float -> 'a some t -> 'a t
-val ( $- ) : float -> 'a some t -> 'a t
-val ( $* ) : float -> 'a some t -> 'a t
-val ( $/ ) : float -> 'a some t -> 'a t
-val ( /$ ) : float -> 'a some t -> 'a t
-val ( *@ ) : _ some t -> _ some t -> any t
-val einsum : (_ some t * string) list -> string -> any t
-val concat : dim:int -> _ some t list -> any t
-val block_diag : _ some t list -> any t
-val gumbel_softmax : tau:float -> hard:bool -> 'a some t -> any t
-val cholesky : 'a some t -> 'a some t
-val linsolve_triangular : ?left:bool -> ?upper:bool -> _ some t -> _ some t -> any t
-val linsolve : left:bool -> _ some t -> _ some t -> any t
-val kron : _ some t -> _ some t -> any t
+val ( + ) : t -> t -> t
+val ( - ) : t -> t -> t
+val ( * ) : t -> t -> t
+val ( / ) : t -> t -> t
+val ( +$ ) : t -> float -> t
+val ( -$ ) : t -> float -> t
+val ( *$ ) : t -> float -> t
+val ( /$ ) : t -> float -> t
+val ( *@ ) : t -> t -> t
+val einsum : (t * string) list -> string -> t
+val concat : dim:int -> t list -> t
+val gumbel_softmax : tau:float -> hard:bool -> t -> t
+val cholesky : t -> t
+val linsolve_triangular : ?left:bool -> ?upper:bool -> t -> t -> t
+val linsolve : left:bool -> t -> t -> t
+val kron : t -> t -> t
 
-val conv2d
-  :  ?padding:int * int
-  -> ?dilation:int * int
-  -> ?groups:int
-  -> bias:_ some t option
-  -> stride:int * int
-  -> w:_ some t
-  -> _ some t
-  -> any t
-
-(* ---------------------------------------------------
-   -- Type-preserving ops on constants
-   --------------------------------------------------- *)
-module C : sig
-  val f : float -> const t
-  val make_unary : unary_info -> const t -> const t
-  val make_binary : binary_info -> const t -> const t -> const t
-  val view : size:int list -> const t -> const t
-  val broadcast_to : size:int list -> const t -> const t
-  val contiguous : const t -> const t
-  val shape : const t -> int list
-  val reshape : shape:int list -> const t -> const t
-  val permute : dims:int list -> const t -> const t
-  val squeeze : dim:int -> const t -> const t
-  val unsqueeze : dim:int -> const t -> const t
-  val transpose : ?dims:int list -> const t -> const t
-  val btr : const t -> const t
-  val diagonal : offset:int -> const t -> const t
-  val diag_embed : offset:int -> dim1:int -> dim2:int -> const t -> const t
-  val tril : _diagonal:int -> const some t -> const t
-  val neg : const t -> const t
-  val abs : const t -> const t
-  val trace : const t -> const t
-  val sin : const t -> const t
-  val cos : const t -> const t
-  val sqr : const t -> const t
-  val sqrt : const t -> const t
-  val log : const t -> const t
-  val exp : const t -> const t
-  val tanh : const t -> const t
-  val pdf : const t -> const t
-
-  (* val cdf : const t -> const t *)
-  val erf : const t -> const t
-  val inv_sqr : const t -> const t
-  val inv_rectangle : rcond:float -> const some t -> const t
-  val relu : const t -> const t
-  val soft_relu : const t -> const t
-  val sigmoid : const t -> const t
-  val softplus : const t -> const t
-  val lgamma : const t -> const t
-  val sign : const t -> const t
-  val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> const t -> const t
-  val sum : ?keepdim:bool -> ?dim:int list -> const t -> const t
-  val mean : ?keepdim:bool -> ?dim:int list -> const t -> const t
-  val max : ?keepdim:bool -> dim:int -> const t -> const t
-  val logsumexp : ?keepdim:bool -> dim:int list -> const t -> const t
-  val max_2d_dim1 : keepdim:bool -> const t -> const t
-
-  val maxpool2d
-    :  ?padding:int * int
-    -> ?dilation:int * int
-    -> ?ceil_mode:bool
-    -> ?stride:int * int
-    -> int * int
-    -> const t
-    -> const t
-
-  val ( + ) : const t -> const t -> const t
-  val ( - ) : const t -> const t -> const t
-  val ( * ) : const t -> const t -> const t
-  val ( / ) : const t -> const t -> const t
-  val ( $+ ) : float -> const t -> const t
-  val ( $- ) : float -> const t -> const t
-  val ( $* ) : float -> const t -> const t
-  val ( $/ ) : float -> const t -> const t
-  val ( /$ ) : float -> const t -> const t
-  val ( *@ ) : const t -> const t -> const t
-  val einsum : (const t * string) list -> string -> const t
-  val concat : dim:int -> const t list -> const t
-  val block_diag : const t list -> const t
-  val gumbel_softmax : tau:float -> with_noise:bool -> discrete:bool -> const t -> const t
-  val svd : const t -> const t * const t * const t
-  val eigh : ?uplo:string -> const t -> const t * const t
-  val qr : const t -> const t * const t
-  val cholesky : const t -> const t
-  val linsolve_triangular : ?left:bool -> ?upper:bool -> const t -> const t -> const t
-  val linsolve : left:bool -> const t -> const t -> const t
-  val kron : const t -> const t -> const t
-
-  val conv2d
-    :  ?padding:int * int
-    -> ?dilation:int * int
-    -> ?groups:int
-    -> bias:const t option
-    -> stride:int * int
-    -> w:const t
-    -> const t
-    -> const t
+module Const : sig
+  val svd : t -> t * t * t
+  val eigh : ?uplo:string -> t -> t * t
+  val qr : t -> t * t
 end
