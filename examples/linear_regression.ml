@@ -15,11 +15,11 @@ let base = Optimizer.Config.Base.default
 module Model = struct
   module P = Prms.Single
 
-  let f ~(theta : _ some P.t) input = Maths.(input *@ theta)
+  let f ~theta input = input *@ theta
 
-  let init ~d_in ~d_out : P.param =
+  let init ~d_in ~d_out =
     let sigma = Float.(1. / sqrt (of_int d_in)) in
-    let theta = sigma $* randn ~kind:base.kind ~device:base.device [ d_in; d_out ] in
+    let theta = randn ~kind:base.kind ~device:base.device [ d_in; d_out ] *$ sigma in
     P.free theta
 end
 
@@ -27,7 +27,7 @@ module O = Optimizer.SOFO (Model.P)
 
 let config =
   Optimizer.Config.SOFO.
-    { base; learning_rate = Some 0.1; n_tangents = 10; damping = `none }
+    { base; learning_rate = Some 0.1; n_tangents = 128; damping = `none }
 
 (* -----------------------------------------
    -- Generate linear regression data.
@@ -38,16 +38,16 @@ let d_in, d_out = 100, 3
 let data_minibatch =
   let teacher = Model.init ~d_in ~d_out |> Model.P.value in
   let input_cov_sqrt =
-    let u, _ = C.qr (randn ~device:base.device [ d_in; d_in ]) in
+    let u, _ = Const.qr (randn ~device:base.device [ d_in; d_in ]) in
     let lambda =
       Array.init d_in ~f:(fun i -> Float.(1. / (1. + square (of_int Int.(i + 1)))))
       |> of_array ~device:base.device ~shape:[ d_in; 1 ]
-      |> fun x -> C.(x / mean x)
+      |> fun x -> x / mean x
     in
-    C.(sqrt lambda * u)
+    sqrt lambda * u
   in
   fun bs ->
-    let x = C.(randn ~device:base.device [ bs; d_in ] *@ input_cov_sqrt) in
+    let x = randn ~device:base.device [ bs; d_in ] *@ input_cov_sqrt in
     let y = Model.f ~theta:teacher x in
     x, y
 
@@ -64,11 +64,11 @@ let rec loop ~t ~out ~state =
   let theta, tangents = O.prepare ~config state in
   let y_pred = Model.f ~theta x in
   let loss = Loss.mse ~output_dims:[ 1 ] (y - y_pred) in
-  let ggn = Loss.mse_ggn ~output_dims:[ 1 ] (const y) ~vtgt:(tangent_exn y_pred) in
+  let ggn = Loss.mse_ggn ~output_dims:[ 1 ] ~vtgt:(tangent_exn y_pred) in
   let new_state = O.step ~config ~info:{ loss; ggn; tangents } state in
   if t % 100 = 0
   then (
-    let loss = to_float_exn (const loss) in
+    let loss = to_float_exn loss in
     print [%message (t : int) (loss : float)];
     Owl.Mat.(save_txt ~append:true ~out (of_array [| Float.of_int t; loss |] 1 2)));
   if t < max_iter then loop ~t:Int.(t + 1) ~out ~state:new_state

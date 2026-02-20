@@ -44,14 +44,9 @@ let tangent_tensor_of x = function
   | Explicit v -> v
   | On_demand v -> v (Tensor.device x.p)
 
-let _tangent x =
-  match x.t with
-  | Some t -> Some (tangent_tensor_of x t)
-  | None -> None
-
 let tangent x =
   match x.t with
-  | Some t -> Some (const (tangent_tensor_of x t))
+  | Some t -> Some (tangent_tensor_of x t)
   | None -> None
 
 let tangent_exn x = Option.value_exn (tangent x)
@@ -822,7 +817,7 @@ end
 let make_unary (z : unary_info) x =
   let f = z.f x.p in
   let df =
-    match _tangent x with
+    match tangent x with
     | None -> None
     | Some dx -> Some (Explicit (z.df ~f ~x:x.p ~dx))
   in
@@ -831,7 +826,7 @@ let make_unary (z : unary_info) x =
 let make_binary (z : binary_info) x y =
   let f = z.f x.p y.p in
   let df =
-    match _tangent x, _tangent y with
+    match tangent x, tangent y with
     | None, None -> None
     | Some dx, None -> Some (Explicit (z.dfx ~f ~x:x.p ~y:y.p ~dx))
     | None, Some dy -> Some (Explicit (z.dfy ~f ~x:x.p ~y:y.p ~dy))
@@ -901,7 +896,7 @@ let einsum operands return =
   let primal = Ops.einsum (List.map operands ~f:(fun (x, eq) -> primal x, eq)) return in
   let tangent =
     List.foldi operands ~init:None ~f:(fun i accu (op, eq) ->
-      match _tangent op with
+      match tangent op with
       | None -> accu
       | Some dop ->
         let ops =
@@ -924,7 +919,7 @@ let concat ~dim x_list =
       x_list
       ~init:(true, 0)
       ~f:(fun _ x ->
-        match _tangent x with
+        match tangent x with
         | None -> Continue (true, 0)
         | Some dx ->
           let k = batch_dim dx in
@@ -936,7 +931,7 @@ let concat ~dim x_list =
   else (
     let dx_list =
       List.map x_list ~f:(fun x ->
-        match _tangent x with
+        match tangent x with
         | None -> primal (zeros_like_k ~k:n_tangents (const x.p))
         | Some dx ->
           assert (Int.(batch_dim dx = n_tangents));
@@ -964,7 +959,7 @@ let gumbel_softmax ~tau ~hard logits =
       Tensor.one_hot pos ~num_classes |> Tensor.squeeze)
     else y
   in
-  match _tangent logits with
+  match tangent logits with
   | None -> { p = y_final; t = None }
   | Some dlogits ->
     let dy =

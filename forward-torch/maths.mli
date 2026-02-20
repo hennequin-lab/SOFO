@@ -31,8 +31,8 @@ val shape : t -> int list
 val device : t -> Device.t
 val kind : t -> Torch_core.Kind.packed
 val numel : t -> int
-val tangent : t -> t option
-val tangent_exn : t -> t
+val tangent : t -> Tensor.t option
+val tangent_exn : t -> Tensor.t
 val dual : tangent:Tensor.t -> t -> t
 val dual_on_demand : tangent:(Device.t -> Tensor.t) -> t -> t
 val first_dim : t -> int

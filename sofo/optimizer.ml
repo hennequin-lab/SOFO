@@ -90,7 +90,7 @@ module SOFO (P : Prms.T) = struct
   let prepare ~(config : (_, _) config) state =
     let theta = params state in
     let vs = random_tangents ~n_tangents:config.n_tangents theta in
-    P.dual ~tangent:vs (P.value theta), vs
+    P.dual ~tangent:vs (P.value theta), P.map ~f:const vs
 
   (* fold vs over sets of v_i s, multiply with associated weights. *)
   let weighted_vs_sum ~vs weights =
@@ -104,7 +104,7 @@ module SOFO (P : Prms.T) = struct
     let u, s, _ = Const.svd ggn in
     (* how each V should be weighted, as a row array *)
     let weights =
-      let tmp = transpose u *@ vtg in
+      let tmp = transpose u *@ const vtg in
       let s =
         match damping with
         | `none -> s

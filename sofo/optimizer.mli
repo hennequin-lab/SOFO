@@ -22,7 +22,7 @@ module SOFO (P : Prms.T) : sig
       (* carry on with the new optimizer state *)
       ]}
      *)
-  val prepare : config:(_, _) config -> state -> P.t * Torch.Tensor.t P.p
+  val prepare : config:(_, _) config -> state -> P.t * P.t
 end
 
 (** Stochastic gradient descent *)

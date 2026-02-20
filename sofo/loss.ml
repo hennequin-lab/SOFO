@@ -14,6 +14,7 @@ let mse ~output_dims err = mean ~keepdim:false ~dim:(0 :: output_dims) (sqr err)
   C.(Float.(2. / of_int m) $* vtgt) *)
 
 let mse_ggn ~output_dims:_ ~vtgt =
+  let vtgt = const vtgt in
   let vtgt_shape = Maths.shape vtgt in
   let vtgt_reshaped = reshape vtgt ~shape:[ List.hd_exn vtgt_shape; -1 ] in
   einsum [ vtgt_reshaped, "ka"; vtgt_reshaped, "la" ] "kl"
@@ -26,6 +27,7 @@ let cross_entropy ~output_dims ~(labels : t) y =
   neg (sum ~keepdim:false ~dim:output_dims tmp) |> mean ~dim:[ 0 ] ~keepdim:false
 
 let cross_entropy_ggn ~output_dims y ~vtgt =
+  let vtgt = const vtgt in
   let vtgt_shape = shape vtgt in
   let n_samples = List.hd_exn vtgt_shape in
   let vtgt_mat = reshape vtgt ~shape:[ n_samples; -1 ] in
