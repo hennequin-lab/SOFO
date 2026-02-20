@@ -37,6 +37,29 @@ module Momentum (P : Prms.T) = struct
        | Some g_avg -> P.((g_avg *$ beta) + (g *$ Float.(1. - beta))))
 end
 
+module Value_and_grad_helper (P : Prms.T) = struct
+  let prepare_for_reverse x =
+    let device = Tensor.device x in
+    let x = Tensor.copy x |> Tensor.to_device ~device in
+    let x = Tensor.set_requires_grad x ~r:true in
+    Tensor.zero_grad x;
+    const x
+
+  let value_and_grad ~f params =
+    let theta =
+      P.map params ~f:(function
+        | Prms.Pinned x -> prepare_for_reverse x
+        | Free x -> prepare_for_reverse x
+        | Bounded { v = x; _ } -> prepare_for_reverse x)
+    in
+    let loss, collateral = f theta in
+    let loss = Tensor.mean (primal loss) in
+    Tensor.backward loss;
+    ( Tensor.to_float0_exn loss
+    , P.map theta ~f:(fun x -> x |> primal |> Tensor.grad |> const)
+    , collateral )
+end
+
 module SOFO (P : Prms.T) = struct
   module P = P
 
@@ -184,6 +207,8 @@ module SGDm (P : Prms.T) = struct
   let manual_state_update state f =
     let p = P.value state.theta in
     { state with theta = U.manual_replace ~theta:state.theta (f p) }
+
+  include Value_and_grad_helper (P)
 end
 
 module Adam (P : Prms.T) = struct
@@ -247,4 +272,6 @@ module Adam (P : Prms.T) = struct
   let manual_state_update state f =
     let p = P.value state.theta in
     { state with theta = U.manual_replace ~theta:state.theta (f p) }
+
+  include Value_and_grad_helper (P)
 end

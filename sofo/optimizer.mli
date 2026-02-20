@@ -26,17 +26,27 @@ module SOFO (P : Prms.T) : sig
 end
 
 (** Stochastic gradient descent *)
-module SGDm (P : Prms.T) :
-  T
-  with module P = P
-   and type ('a, 'b) config = ('a, 'b) Config.SGDm.t
-   and type ('a, 'b, 'c) init_opts = P.param -> 'c
-   and type info = P.t
+module SGDm (P : Prms.T) : sig
+  include
+    T
+    with module P = P
+     and type ('a, 'b) config = ('a, 'b) Config.SGDm.t
+     and type ('a, 'b, 'c) init_opts = P.param -> 'c
+     and type info = P.t
+
+  (* 'a is some arbitrary stuff which your loss function also returns as collateral *)
+  val value_and_grad : f:(P.t -> t * 'a) -> P.param -> float * P.t * 'a
+end
 
 (** Adam optimizer *)
-module Adam (P : Prms.T) :
-  T
-  with module P = P
-   and type ('a, 'b) config = ('a, 'b) Config.Adam.t
-   and type (_, _, 'c) init_opts = P.param -> 'c
-   and type info = P.t
+module Adam (P : Prms.T) : sig
+  include
+    T
+    with module P = P
+     and type ('a, 'b) config = ('a, 'b) Config.Adam.t
+     and type (_, _, 'c) init_opts = P.param -> 'c
+     and type info = P.t
+
+  (* 'a is some arbitrary stuff which your loss function also returns as collateral *)
+  val value_and_grad : f:(P.t -> t * 'a) -> P.param -> float * P.t * 'a
+end
