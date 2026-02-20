@@ -14,16 +14,12 @@ module type T = sig
   val init : ('a, 'b, state) init_opts
   val clone_state : state -> state
   val step : config:('a, 'b) config -> info:info -> state -> state
-
-  val manual_state_update
-    :  state
-    -> (Maths.const Maths.t P.p -> Maths.const Maths.t P.p)
-    -> state
+  val manual_state_update : state -> (Maths.t P.p -> Maths.t P.p) -> state
 end
 
 type 'v sofo_info =
-  { loss : Maths.any Maths.t
-  ; ggn : Maths.const Maths.t
+  { loss : Maths.t
+  ; ggn : Maths.t
   ; tangents : 'v
   }
 

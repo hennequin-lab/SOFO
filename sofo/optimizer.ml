@@ -8,7 +8,7 @@ include Optimizer_typ
 module Update_params (P : Prms.T) = struct
   let update ~learning_rate:eta ~theta delta =
     let open Prms in
-    let update x delta = Tensor.(sub_ x (mul_scalar_ (to_tensor delta) (Scalar.f eta))) in
+    let update x delta = Tensor.(sub_ x (mul_scalar_ (primal delta) (Scalar.f eta))) in
     P.map2 theta delta ~f:(fun theta delta ->
       match theta with
       | Pinned x -> Pinned x
@@ -16,14 +16,14 @@ module Update_params (P : Prms.T) = struct
       | Bounded { v = x; lb; ub } ->
         Bounded { v = Prms.enforce_bounds ?lb ?ub (update x delta); lb; ub })
 
-  let manual_replace ~theta (theta' : const P.t) =
+  let manual_replace ~theta (theta' : P.t) =
     let open Prms in
     P.map2 theta theta' ~f:(fun theta theta' ->
       match theta with
       | Pinned x -> Pinned x
-      | Free _ -> Free (to_tensor theta')
+      | Free _ -> Free (primal theta')
       | Bounded { v = _; lb; ub } ->
-        Bounded { v = Prms.enforce_bounds ?lb ?ub (to_tensor theta'); lb; ub })
+        Bounded { v = Prms.enforce_bounds ?lb ?ub (primal theta'); lb; ub })
 end
 
 (* apply momentum to anything *)
@@ -33,8 +33,8 @@ module Momentum (P : Prms.T) = struct
     | None -> g
     | Some beta ->
       (match avg with
-       | None -> P.C.(Float.(1. - beta) $* g)
-       | Some g_avg -> P.C.((beta $* g_avg) + (Float.(1. - beta) $* g)))
+       | None -> P.(g *$ Float.(1. - beta))
+       | Some g_avg -> P.((g_avg *$ beta) + (g *$ Float.(1. - beta))))
 end
 
 module SOFO (P : Prms.T) = struct
@@ -43,7 +43,7 @@ module SOFO (P : Prms.T) = struct
   type ('a, 'b) config = ('a, 'b) Config.SOFO.t
   type ('a, 'b, 'c) init_opts = P.param -> 'c
   type state = { theta : P.param }
-  type info = const P.t sofo_info
+  type info = P.t sofo_info
 
   let params state = state.theta
   let init theta = { theta }
@@ -66,15 +66,15 @@ module SOFO (P : Prms.T) = struct
       P.fold vs ~init:(f 0.) ~f:(fun accu (v, _) ->
         let n_tangents = first_dim v in
         let v = view v ~size:[ n_tangents; -1 ] in
-        C.(accu + einsum [ v, "ij"; v, "kj" ] "ik"))
+        accu + einsum [ v, "ij"; v, "kj" ] "ik")
     in
-    let u, s, _ = C.svd vtv in
-    let normalizer = C.(u / sqrt s |> transpose) in
+    let u, s, _ = Const.svd vtv in
+    let normalizer = u / sqrt s |> transpose in
     P.map vs ~f:(fun v ->
       let n_tangents = first_dim v in
       let s = shape v in
       let v = reshape v ~shape:[ n_tangents; -1 ] in
-      let v = C.(normalizer *@ v) in
+      let v = normalizer *@ v in
       reshape v ~shape:s)
 
   (* initialise tangents, where each tangent is normalised. *)
@@ -83,7 +83,9 @@ module SOFO (P : Prms.T) = struct
        that's important, because we orthonormalize everything;
        however, these tangents don't matter anyway as those parameters
        won't be udpated *)
-    P.map theta ~f:(fun x -> randn_like_k ~k (Prms.value x)) |> orthonormalise
+    P.map theta ~f:(fun x -> randn_like_k ~k (Prms.value x))
+    |> orthonormalise
+    |> P.map ~f:primal
 
   let prepare ~(config : (_, _) config) state =
     let theta = params state in
@@ -94,26 +96,26 @@ module SOFO (P : Prms.T) = struct
   let weighted_vs_sum ~vs weights =
     P.map vs ~f:(fun v_i ->
       let[@warning "-8"] (n_samples :: s) = shape v_i in
-      let v_i = C.view v_i ~size:[ n_samples; -1 ] in
-      C.(view (reshape weights ~shape:[ 1; -1 ] *@ v_i) ~size:s))
+      let v_i = view v_i ~size:[ n_samples; -1 ] in
+      view (reshape weights ~shape:[ 1; -1 ] *@ v_i) ~size:s)
 
   (* calculate natural gradient = V(VtGtGV)^-1 V^t g *)
   let sofo_update ~damping ~tangents:vs ~ggn vtg =
-    let u, s, _ = C.svd ggn in
+    let u, s, _ = Const.svd ggn in
     (* how each V should be weighted, as a row array *)
     let weights =
-      let tmp = C.(transpose u *@ vtg) in
+      let tmp = transpose u *@ vtg in
       let s =
         match damping with
         | `none -> s
         | `relative_from_top gamma ->
-          let offset = Float.(gamma * Tensor.(maximum (to_tensor s) |> to_float0_exn)) in
-          C.(offset $+ s)
+          let offset = Float.(gamma * Tensor.(maximum (primal s) |> to_float0_exn)) in
+          s +$ offset
         | `relative_from_bottom gamma ->
-          let offset = Float.(gamma * Tensor.(minimum (to_tensor s) |> to_float0_exn)) in
-          C.(offset $+ s)
+          let offset = Float.(gamma * Tensor.(minimum (primal s) |> to_float0_exn)) in
+          s +$ offset
       in
-      C.(u / s *@ tmp)
+      u / s *@ tmp
     in
     weighted_vs_sum ~vs weights
 
@@ -124,7 +126,7 @@ module SOFO (P : Prms.T) = struct
     | None -> state
     | Some eta ->
       Stdlib.Gc.major ();
-      let loss_t = tangent_exn info.loss in
+      let loss_t = tangent_exn info.loss |> const in
       let delta =
         sofo_update ~damping:config.damping ~tangents:info.tangents ~ggn:info.ggn loss_t
       in
@@ -141,11 +143,11 @@ module SGDm (P : Prms.T) = struct
 
   type ('a, 'b) config = ('a, 'b) Config.SGDm.t
   type ('a, 'b, 'c) init_opts = P.param -> 'c
-  type info = const P.t
+  type info = P.t
 
   type state =
     { theta : P.param
-    ; g_avg : const P.t option
+    ; g_avg : P.t option
     ; beta_t : float
     }
 
@@ -189,12 +191,12 @@ module Adam (P : Prms.T) = struct
 
   type ('a, 'b) config = ('a, 'b) Config.Adam.t
   type (_, _, 'c) init_opts = P.param -> 'c
-  type info = const P.t
+  type info = P.t
 
   type state =
     { theta : P.param
-    ; m : const P.t option
-    ; v : const P.t option
+    ; m : P.t option
+    ; v : P.t option
     ; beta1_t : float
     ; beta2_t : float
     }
@@ -230,15 +232,15 @@ module Adam (P : Prms.T) = struct
       let c = config in
       let beta1_t = Float.(state.beta1_t * c.beta_1) in
       let beta2_t = Float.(state.beta2_t * c.beta_2) in
-      let g_squared = P.map ~f:Maths.C.sqr g in
+      let g_squared = P.map ~f:sqr g in
       let m = M.apply ~momentum:config.beta_1 ~avg:state.m g in
       let v = M.apply ~momentum:config.beta_2 ~avg:state.v g_squared in
-      let m_hat = if config.debias then P.C.(Float.(1. / (1. - beta1_t)) $* m) else m in
-      let v_hat = P.C.(Float.(1. / (1. - beta2_t)) $* v) in
-      let v_hat_sqrt = P.map ~f:Maths.C.sqrt v_hat in
+      let m_hat = if config.debias then P.(m *$ Float.(1. / (1. - beta1_t))) else m in
+      let v_hat = P.(v *$ Float.(1. / (1. - beta2_t))) in
+      let v_hat_sqrt = P.map ~f:sqrt v_hat in
       (* momentum correction of learning rate *)
       let eta = Float.(eta / (1. - beta1_t)) in
-      let dtheta = P.C.(m_hat / (c.eps $+ v_hat_sqrt)) in
+      let dtheta = P.(m_hat / (v_hat_sqrt +$ c.eps)) in
       let new_theta = U.update ~learning_rate:eta ~theta:(params state) dtheta in
       { theta = new_theta; beta1_t; beta2_t; m = Some m; v = Some v }
 
