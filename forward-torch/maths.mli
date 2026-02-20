@@ -93,8 +93,6 @@ val log : t -> t
 val exp : t -> t
 val tanh : t -> t
 val pdf : t -> t
-
-(* val cdf : t -> t *)
 val erf : t -> t
 val inv : t -> t
 val pinv : rcond:float -> t -> t
