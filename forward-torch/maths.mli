@@ -44,6 +44,7 @@ type 'a with_tensor_params = ?device:Device.t -> ?kind:Torch_core.Kind.packed ->
 
 val primal_tensor_detach : t -> t
 val eye : (int -> t) with_tensor_params
+val eye_like : t -> t
 val zeros : (int list -> t) with_tensor_params
 val ones : (?scale:float -> int list -> t) with_tensor_params
 val rand : (?scale:float -> int list -> t) with_tensor_params

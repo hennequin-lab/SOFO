@@ -95,6 +95,11 @@ let eye ?device ?kind n =
   let x = Tensor.eye_out ~out:x ~n in
   const x
 
+let eye_like x =
+  match shape x with
+  | [ n; m ] when Int.(n = m) -> eye ~device:(device x) ~kind:(kind x) n
+  | _ -> failwith "Not a square matrix"
+
 let zeros ?device ?kind shape = const (Tensor.zeros ?device ?kind shape)
 let ones ?device ?kind ?scale shape = const (Tensor.ones ?device ?kind ?scale shape)
 let rand ?device ?kind ?scale shape = const (Tensor.rand ?device ?kind ?scale shape)

@@ -5,7 +5,7 @@ open Maths
 
 let n_tests = 100
 let device = Torch.Device.Cpu
-let kind = Torch_core.Kind.(T f64)
+let kind = Torch_core.Kind.(T f32)
 
 (* generate a random shape with a specified minimum order. *)
 let random_shape min_order =
@@ -121,12 +121,9 @@ let test_unary ((name, input_constr, f) : unary) =
         Alcotest.(check @@ rel_tol) name 0.0 (check_grad1 f (const x))) )
 
 let inv x =
-  let x_primal = primal x in
-  let x_device = Tensor.device x_primal in
   (* make sure x is positive definite *)
   let x_sym = x *@ btr x in
-  let x_size = List.last_exn (Tensor.shape x_primal) in
-  let x_final = x_sym + eye x_size ~device:x_device in
+  let x_final = x_sym + eye_like x_sym in
   inv x_final
 
 let unary_tests =
@@ -254,12 +251,14 @@ let unary_tests =
       , [ `specified_unary [ 5; 5 ] ]
       , any_shape (fun x ->
           let xxt = x *@ transpose x in
+          let xxt = xxt + (eye_like xxt *$ 0.001) in
           cholesky xxt) )
     ; ( "batch_cholesky"
       , [ `specified_unary [ 3; 5; 5 ] ]
       , any_shape (fun x ->
           let xxt = einsum [ x, "ijk"; x, "ilk" ] "ijl" in
-          cholesky xxt) )
+          let e = eye ~device ~kind 5 |> broadcast_to ~size:(shape xxt) in
+          cholesky (xxt + e)) )
     ]
   in
   List.map ~f:test_unary test_list
@@ -375,14 +374,7 @@ let batch_matmul_with_einsum_32 a b = einsum [ a, "mij"; b, "mj" ] "mi"
 let batch_trans_matmul_with_einsum a b = einsum [ a, "mij"; b, "mik" ] "mjk"
 let batch_vecmat_with_einsum a b = einsum [ a, "mi"; b, "mij" ] "mj"
 let batch_vecmat_trans_with_einsum a b = einsum [ a, "mi"; b, "mji" ] "mj"
-
-let linsolve ~left a b =
-  let a_primal = primal a in
-  let a_device = Tensor.device a_primal in
-  let n = List.last_exn (Tensor.shape a_primal) in
-  (* improve condition number of a *)
-  let a = const a_primal + (eye n ~device:a_device *$ Float.(10. *. of_int n)) in
-  linsolve ~left a b
+let linsolve ~left a b = linsolve ~left a b
 
 let linsolve_tri ~left ~upper a b =
   let a =
