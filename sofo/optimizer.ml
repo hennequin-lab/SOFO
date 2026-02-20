@@ -126,7 +126,7 @@ module SOFO (P : Prms.T) = struct
     | None -> state
     | Some eta ->
       Stdlib.Gc.major ();
-      let loss_t = tangent_exn info.loss |> const in
+      let loss_t = tangent_exn info.loss in
       let delta =
         sofo_update ~damping:config.damping ~tangents:info.tangents ~ggn:info.ggn loss_t
       in
