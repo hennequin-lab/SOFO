@@ -13,7 +13,7 @@ let mse ~output_dims err = mean ~keepdim:false ~dim:(0 :: output_dims) (sqr err)
   let m = n_reduction average_over y in
   C.(Float.(2. / of_int m) $* vtgt) *)
 
-let mse_ggn ~output_dims:_ y ~vtgt =
+let mse_ggn ~output_dims:_ ~vtgt =
   let vtgt_shape = Maths.shape vtgt in
   let vtgt_reshaped = reshape vtgt ~shape:[ List.hd_exn vtgt_shape; -1 ] in
   einsum [ vtgt_reshaped, "ka"; vtgt_reshaped, "la" ] "kl"
