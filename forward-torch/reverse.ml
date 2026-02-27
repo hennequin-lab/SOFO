@@ -180,13 +180,13 @@ let grad f x =
     let o = zero_adj y in
     let result = Stdlib.Effect.Deep.continue k o in
     Option.iter o.a ~f:(fun r_bar ->
-      let cum_start = ref 0 in
-      List.iteri x_list_p ~f:(fun i x_p ->
-        let sizes = Maths.shape x_p in
-        let end_ = Base.(!cum_start + List.nth_exn sizes dim) in
-        let dx_bar = Maths.slice ~dim ~start:!cum_start ~end_ r_bar in
-        update_adj (List.nth_exn x_list i) dx_bar;
-        cum_start := end_));
+      List.fold ~init:0 x_list ~f:(fun offset x ->
+        let sizes = Maths.shape x.p in
+        let end_ = Int.(offset + List.nth_exn sizes dim) in
+        let dx_bar = Maths.slice ~dim ~start:offset ~end_ r_bar in
+        update_adj x dx_bar;
+        end_)
+      |> ignore);
     result
 
 module Make (P : Prms.T) = struct
