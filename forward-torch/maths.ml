@@ -1004,4 +1004,6 @@ module Const = struct
       let q, r = Tensor.linalg_qr ~a:p ~mode:"reduced" in
       const q, const r
     | _ -> raise Not_const
+
+  let sign x = const (Tensor.sign (primal x))
 end

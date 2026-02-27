@@ -139,4 +139,5 @@ module Const : sig
   val svd : t -> t * t * t
   val eigh : ?uplo:string -> t -> t * t
   val qr : t -> t * t
+  val sign : t -> t
 end
