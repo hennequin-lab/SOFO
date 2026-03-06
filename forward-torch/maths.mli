@@ -102,6 +102,7 @@ val soft_relu : t -> t
 val sigmoid : t -> t
 val softplus : t -> t
 val lgamma : t -> t
+val get_slice : int list list -> t -> t
 val slice : ?start:int -> ?end_:int -> ?step:int -> dim:int -> t -> t
 val sum : ?keepdim:bool -> ?dim:int list -> t -> t
 val mean : ?keepdim:bool -> ?dim:int list -> t -> t
