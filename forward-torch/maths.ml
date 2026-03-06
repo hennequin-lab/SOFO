@@ -419,6 +419,41 @@ module Ops = struct
     let df ~f:_ ~x ~dx = Tensor.(mul (digamma x) dx) in
     { f; df }
 
+  let get_slice_inplace slice =
+    let f x =
+      let xs = Tensor.shape x |> Array.of_list in
+      List.foldi slice ~init:x ~f:(fun dim acc s ->
+        match s with
+        | [] -> acc
+        | _ ->
+          let start, end_ =
+            match s with
+            | [ j ] -> Some j, Some Int.(j + 1)
+            | [ j; k ] when Int.(k < 0) -> Some j, Some Int.(xs.(dim) + k + 1)
+            | [ j; k ] -> Some j, Some Int.(k + 1)
+            | _ -> failwith "get_slice_inplace: wrong argument"
+          in
+          Tensor.slice acc ~dim ~start ~end_ ~step:1)
+    in
+    let df ~f:_ ~x ~dx =
+      let xs = Tensor.shape x |> Array.of_list in
+      List.foldi slice ~init:dx ~f:(fun dim acc s ->
+        let dim = Int.(dim + 1) in
+        (* correct for first dim being the tangent axis *)
+        match s with
+        | [] -> acc
+        | _ ->
+          let start, end_ =
+            match s with
+            | [ j ] -> Some j, Some Int.(j + 1)
+            | [ j; k ] when Int.(k < 0) -> Some j, Some Int.(xs.(dim) + k + 1)
+            | [ j; k ] -> Some j, Some Int.(k + 1)
+            | _ -> failwith "get_slice_inplace: wrong argument"
+          in
+          Tensor.slice acc ~dim ~start ~end_ ~step:1)
+    in
+    { f; df }
+
   let get_slice slice =
     let f x =
       let xs = Tensor.shape x |> Array.of_list in
@@ -431,7 +466,7 @@ module Ops = struct
             | [ j ] -> Some j, Some Int.(j + 1)
             | [ j; k ] when Int.(k < 0) -> Some j, Some Int.(xs.(dim) + k + 1)
             | [ j; k ] -> Some j, Some Int.(k + 1)
-            | _ -> failwith "get slice: wrong argument"
+            | _ -> failwith "get_slice: wrong argument"
           in
           Tensor.slice_copy acc ~dim ~start ~end_ ~step:1)
     in
@@ -448,7 +483,7 @@ module Ops = struct
             | [ j ] -> Some j, Some Int.(j + 1)
             | [ j; k ] when Int.(k < 0) -> Some j, Some Int.(xs.(dim) + k + 1)
             | [ j; k ] -> Some j, Some Int.(k + 1)
-            | _ -> failwith "get slice: wrong argument"
+            | _ -> failwith "get_slice: wrong argument"
           in
           Tensor.slice_copy acc ~dim ~start ~end_ ~step:1)
     in
@@ -908,6 +943,7 @@ let sigmoid x = make_unary Ops.sigmoid x
 let softplus x = make_unary Ops.softplus x
 let lgamma x = make_unary Ops.lgamma x
 let get_slice s = make_unary Ops.(get_slice s)
+let get_slice_inplace s = make_unary Ops.(get_slice_inplace s)
 let slice ?start ?end_ ?step ~dim = make_unary Ops.(slice ?start ?end_ ?step ~dim)
 let mean ?keepdim ?dim x = make_unary (Ops.mean ?keepdim ?dim) x
 let max ?keepdim ~dim x = make_unary (Ops.max ?keepdim ~dim) x
