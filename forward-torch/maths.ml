@@ -268,7 +268,7 @@ module Ops = struct
 
   let abs =
     let f = Tensor.abs in
-    let df ~f:_ ~x:_ ~dx = Tensor.abs dx in
+    let df ~f:_ ~x:_ ~dx = Tensor.sign dx in
     { f; df }
 
   let trace =
@@ -968,9 +968,14 @@ let gumbel_softmax ~tau ~hard logits =
   | None -> { p = y_final; t = None }
   | Some dlogits ->
     let dy =
-      let tmp1 = Tensor.(div_scalar (y * dlogits) (Scalar.f tau)) in
-      let tmp2 = Tensor.(div_scalar (y * y * dlogits) (Scalar.f tau)) in
-      Tensor.(tmp1 - tmp2)
+      let tmp =
+        Tensor.sum_dim_intlist
+          Tensor.(y * dlogits)
+          ~dim:(Some reduce_dim_list)
+          ~keepdim:true
+          ~dtype:(Tensor.type_ dlogits)
+      in
+      Tensor.(div_scalar (y * (dlogits - tmp)) (Scalar.f tau))
     in
     { p = y_final; t = Some (Explicit dy) }
 
