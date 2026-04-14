@@ -961,7 +961,12 @@ let gumbel_softmax ~tau ~hard logits =
     if hard
     then (
       let pos = Tensor.argmax y ~dim:1 ~keepdim:true in
-      Tensor.one_hot pos ~num_classes |> Tensor.squeeze)
+      Tensor.one_hot pos ~num_classes
+      |> Tensor.squeeze
+      |> Torch.Tensor.to_dtype
+           ~non_blocking:false
+           ~copy:false
+           ~dtype:(Torch.Tensor.type_ logits_))
     else y
   in
   match tangent logits with
