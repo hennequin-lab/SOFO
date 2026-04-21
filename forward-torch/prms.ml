@@ -49,7 +49,7 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
   let iter2 x y ~f = fold2 ?path:None x y ~init:() ~f:(fun () (x, y, _) -> f x y)
 
   type nonrec t = t p
-  type nonrec 'a param = 'a param p
+  type param = Tensor.t tagged p
 
   let value = map ~f:value
   let const = map ~f:const
@@ -95,7 +95,7 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
     Stdio.In_channel.close input;
     map m ~f:(fun x -> Maths.const (Tensor.of_bigarray ?device x))
 
-  let save_with_tags (m : Tensor.t param) ~kind ~out:filename =
+  let save_with_tags (m : param) ~kind ~out:filename =
     let m = map m ~f:(map_tagged ~f:(Tensor.to_bigarray ~kind)) in
     let output = Stdio.Out_channel.create filename in
     Stdlib.Marshal.to_channel output m [ Stdlib.Marshal.No_sharing ];

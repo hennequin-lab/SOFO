@@ -12,7 +12,7 @@ type 'tensor bounded =
   ; ub : 'tensor option
   }
 
-type 'tensor param =
+type 'tensor tagged =
   | Pinned of 'tensor
   | Free of 'tensor
   | Bounded of 'tensor bounded
@@ -65,10 +65,10 @@ module type T = sig
   val iter2 : 'a p -> 'b p -> f:('a -> 'b -> unit) -> unit
 
   type nonrec t = t p
-  type nonrec 'a param = 'a param p
+  type param = Tensor.t tagged p
 
   (** Extract value as Tensor.t in all elements in x. *)
-  val value : Tensor.t param -> t
+  val value : param -> t
 
   val const : Tensor.t p -> t
   val primal : t -> Tensor.t p
@@ -110,8 +110,8 @@ module type T = sig
   (** Load params from file onto [device]. *)
   val load : ?device:Device.t -> string -> t
 
-  val save_with_tags : Tensor.t param -> kind:('a, 'b) Bigarray.kind -> out:string -> unit
-  val load_with_tags : ?device:Device.t -> string -> Tensor.t param
+  val save_with_tags : param -> kind:('a, 'b) Bigarray.kind -> out:string -> unit
+  val load_with_tags : ?device:Device.t -> string -> param
 
   (** Save x as [kind] in [out] with [prefix] as .npy file. *)
   val save_npz : ?prefix:string -> kind:('a, 'b) Bigarray.kind -> out:string -> t -> unit

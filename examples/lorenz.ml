@@ -72,7 +72,7 @@ module RNN = struct
     in
     Option.value_exn result
 
-  let init ~d ~dh : Tensor.t P.param =
+  let init ~d ~dh : P.param =
     let w =
       Sofo.gaussian_tensor_normed ~kind:base.kind ~device:base.device ~sigma:0.1 [ dh; d ]
       |> Maths.const

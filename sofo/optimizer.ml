@@ -55,8 +55,8 @@ module SOFO (P : Prms.T) = struct
   module P = P
 
   type ('a, 'b) config = ('a, 'b) Config.SOFO.t
-  type ('a, 'b, 'c) init_opts = Torch.Tensor.t P.param -> 'c
-  type state = Torch.Tensor.t P.param
+  type ('a, 'b, 'c) init_opts = P.param -> 'c
+  type state = P.param
   type info = P.t sofo_info
 
   let params state = state
@@ -89,7 +89,7 @@ module SOFO (P : Prms.T) = struct
       reshape v ~shape:s)
 
   (* initialise tangents, where each tangent is normalised. *)
-  let random_tangents ~n_tangents:k (theta : Torch.Tensor.t P.param) =
+  let random_tangents ~n_tangents:k (theta : P.param) =
     (* note that even [Pinned] parameters have non-zero tangents;
        that's important, because we orthonormalize everything;
        however, these tangents don't matter anyway as those parameters
@@ -153,11 +153,11 @@ module SGDm (P : Prms.T) = struct
   module P = P
 
   type ('a, 'b) config = ('a, 'b) Config.SGDm.t
-  type ('a, 'b, 'c) init_opts = Torch.Tensor.t P.param -> 'c
+  type ('a, 'b, 'c) init_opts = P.param -> 'c
   type info = P.t
 
   type state =
-    { theta : Torch.Tensor.t P.param
+    { theta : P.param
     ; g_avg : P.t option
     ; beta_t : float
     }
@@ -199,11 +199,11 @@ module Adam (P : Prms.T) = struct
   module P = P
 
   type ('a, 'b) config = ('a, 'b) Config.Adam.t
-  type (_, _, 'c) init_opts = Torch.Tensor.t P.param -> 'c
+  type (_, _, 'c) init_opts = P.param -> 'c
   type info = P.t
 
   type state =
-    { theta : Torch.Tensor.t P.param
+    { theta : P.param
     ; m : P.t option
     ; v : P.t option
     ; beta1_t : float

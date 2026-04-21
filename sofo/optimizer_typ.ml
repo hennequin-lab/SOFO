@@ -10,7 +10,7 @@ module type T = sig
   type ('a, 'b) config
   type ('a, 'b, 'c) init_opts
 
-  val params : state -> Torch.Tensor.t P.param
+  val params : state -> P.param
   val init : ('a, 'b, state) init_opts
   val clone_state : state -> state
   val step : config:('a, 'b) config -> info:info -> state -> state
