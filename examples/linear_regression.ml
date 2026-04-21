@@ -27,7 +27,7 @@ module O = Optimizer.SOFO (Model.P)
 
 let config =
   Optimizer.Config.SOFO.
-    { base; learning_rate = Some 0.1; n_tangents = 128; damping = `none }
+    { default with base; learning_rate = Some 0.1; n_tangents = 128; damping = `none }
 
 (* -----------------------------------------
    -- Generate linear regression data.

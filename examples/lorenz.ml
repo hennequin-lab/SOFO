@@ -72,7 +72,7 @@ module RNN = struct
     in
     Option.value_exn result
 
-  let init ~d ~dh : P.param =
+  let init ~d ~dh : Tensor.t P.param =
     let w =
       Sofo.gaussian_tensor_normed ~kind:base.kind ~device:base.device ~sigma:0.1 [ dh; d ]
       |> Maths.const
@@ -147,7 +147,12 @@ module O = Optimizer.SOFO (RNN.P)
 
 let config =
   Optimizer.Config.SOFO.
-    { base; learning_rate = Some 1.; n_tangents = 128; damping = `relative_from_top 1e-5 }
+    { default with
+      base
+    ; learning_rate = Some 1.
+    ; n_tangents = 128
+    ; damping = `relative_from_top 1e-5
+    }
 
 let rec loop ~t ~out ~state running_avg =
   Stdlib.Gc.major ();
