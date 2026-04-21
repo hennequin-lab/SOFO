@@ -1022,28 +1022,39 @@ let concat ~dim x_list =
   but will be differentiated as if it is the soft sample in autograd. *)
 let gumbel_softmax ~tau ~hard logits =
   let logits_p = primal logits in
+  assert (Int.(List.length (Tensor.shape logits_p) = 2));
   let gumbel_noise =
     let uniform_noise = Tensor.uniform logits_p ~from:0. ~to_:1. in
     Tensor.(neg_ (log_ (neg_ (log_ uniform_noise))))
   in
-  let logits_ = Tensor.(div_scalar (logits_p + gumbel_noise) (Scalar.f tau)) in
-  let reduce_dim_list = List.tl_exn (Tensor.shape logits_p) in
+  let logits_ = Tensor.(div_scalar_ (logits_p + gumbel_noise) (Scalar.f tau)) in
   let num_classes = List.nth_exn (Tensor.shape logits_p) 1 in
-  let y = Tensor.(exp (logits_ - logsumexp ~dim:reduce_dim_list ~keepdim:true logits_)) in
+  let y = Tensor.(exp_ (logits_ - logsumexp ~dim:[ 1 ] ~keepdim:true logits_)) in
   let y_final =
     if hard
     then (
       let pos = Tensor.argmax y ~dim:1 ~keepdim:true in
-      Tensor.one_hot pos ~num_classes |> Tensor.squeeze)
+      Tensor.one_hot pos ~num_classes
+      |> Tensor.squeeze
+      |> Torch.Tensor.to_dtype
+           ~non_blocking:false
+           ~copy:false
+           ~dtype:(Torch.Tensor.type_ logits_))
     else y
   in
   match tangent logits with
   | None -> { p = y_final; t = None }
   | Some dlogits ->
     let dy =
-      let tmp1 = Tensor.(div_scalar (y * dlogits) (Scalar.f tau)) in
-      let tmp2 = Tensor.(y * tmp1) in
-      Tensor.(tmp1 - tmp2)
+      let y_expanded = Tensor.unsqueeze y ~dim:0 in
+      let tmp =
+        Tensor.sum_dim_intlist
+          Tensor.(y_expanded * dlogits)
+          ~dim:(Some [ 2 ])
+          ~keepdim:true
+          ~dtype:(Tensor.type_ dlogits)
+      in
+      Tensor.(div_scalar_ (y_expanded * (dlogits - tmp)) (Scalar.f tau))
     in
     { p = y_final; t = Some (Explicit dy) }
 

@@ -32,11 +32,11 @@ module P = PP.Make (Prms.Single)
 module RNN = struct
   module P = P
 
-  let forward ~(theta : _ Maths.some P.t) ~input:_ y =
+  let forward ~(theta : P.t) ~input:_ y =
     let bs = Maths.shape y |> List.hd_exn in
     let y_tmp =
       Maths.concat
-        [ y; Maths.(any (ones ~device:base.device ~kind:base.kind [ bs; 1 ])) ]
+        [ y; Maths.(ones ~device:base.device ~kind:base.kind [ bs; 1 ]) ]
         ~dim:1
     in
     Maths.((y *@ theta.a) + (relu (y_tmp *@ theta.c) *@ theta.w))
@@ -47,7 +47,7 @@ module RNN = struct
     let result, _ =
       List.foldi
         data
-        ~init:(None, Maths.(any (of_tensor y0)))
+        ~init:(None, Maths.(const y0))
         ~f:(fun t (accu, y) (x, labels) ->
           if t % 1 = 0 then Stdlib.Gc.major ();
           let y = forward ~theta ~input:x y in
@@ -56,22 +56,17 @@ module RNN = struct
             | None -> accu
             | Some labels ->
               let delta_ell =
-                Maths.(
-                  scaling $* Loss.mse ~output_dims:[ 1 ] Maths.(of_tensor labels - y))
+                Maths.(f scaling * Loss.mse ~output_dims:[ 1 ] Maths.(const labels - y))
               in
               let delta_ggn =
-                Maths.C.(
-                  scaling
-                  $* Loss.mse_ggn
-                       ~output_dims:[ 1 ]
-                       (Maths.const y)
-                       ~vtgt:(Maths.tangent_exn y))
+                Maths.(
+                  f scaling * Loss.mse_ggn ~output_dims:[ 1 ] ~vtgt:(Maths.tangent_exn y))
               in
               (match accu with
                | None -> Some (delta_ell, delta_ggn)
                | Some accu ->
                  let ell_accu, ggn_accu = accu in
-                 Some (Maths.(ell_accu + delta_ell), Maths.C.(ggn_accu + delta_ggn)))
+                 Some (Maths.(ell_accu + delta_ell), Maths.(ggn_accu + delta_ggn)))
           in
           accu, y)
     in
@@ -80,7 +75,7 @@ module RNN = struct
   let init ~d ~dh : P.param =
     let w =
       Sofo.gaussian_tensor_normed ~kind:base.kind ~device:base.device ~sigma:0.1 [ dh; d ]
-      |> Maths.of_tensor
+      |> Maths.const
       |> Prms.Single.free
     and c =
       Sofo.gaussian_tensor_normed
@@ -88,18 +83,18 @@ module RNN = struct
         ~device:base.device
         ~sigma:1.
         [ d + 1; dh ]
-      |> Maths.of_tensor
+      |> Maths.const
       |> Prms.Single.free
     and a = Maths.(eye ~device:base.device ~kind:base.kind d) |> Prms.Single.free in
     PP.{ w; c; a }
 
-  let simulate ~(theta : _ Maths.some P.t) ~horizon y0 =
+  let simulate ~(theta : P.t) ~horizon y0 =
     let rec iter t accu y =
       if t = 0
       then List.rev accu
       else iter (t - 1) (y :: accu) (forward ~theta ~input:() y)
     in
-    iter horizon [] Maths.(any (of_tensor y0))
+    iter horizon [] Maths.(const y0)
 end
 
 (* -----------------------------------------
@@ -120,8 +115,8 @@ let max_iter = Int.(full_batch_size * num_epochs_to_run / batch_size)
 (* simulate n trials from saved parameters; first 3 columns are predictions and last 3 columns are ground truth *)
 let simulate ~f_name n_trials =
   let model_params =
-    let params_ba = P.C.load (in_dir f_name ^ "_params") in
-    RNN.P.map params_ba ~f:(fun x -> x |> Maths.const)
+    let params_ba = P.load (in_dir f_name ^ "_params") in
+    RNN.P.map params_ba ~f:(fun x -> x)
   in
   let n_list = List.range 0 n_trials in
   List.iter n_list ~f:(fun j ->
@@ -135,7 +130,7 @@ let simulate ~f_name n_trials =
         ~horizon:test_horizon
         Tensor.(of_bigarray ~device:base.device init_cond_sim)
       |> List.map ~f:(fun yt ->
-        let yt = Maths.to_tensor yt in
+        let yt = Maths.primal yt in
         let yt = Tensor.to_bigarray ~kind:base.ba_kind yt in
         Arr.expand yt 3)
       |> Array.of_list
@@ -171,7 +166,7 @@ let rec loop ~t ~out ~state running_avg =
   let theta, tangents = O.prepare ~config state in
   let loss, ggn = RNN.f ~data ~y0:init_cond theta in
   let new_state = O.step ~config ~info:{ loss; ggn; tangents } state in
-  let loss = Maths.to_float_exn (Maths.const loss) in
+  let loss = Maths.to_float_exn loss in
   let running_avg =
     let loss_avg =
       match running_avg with
@@ -181,7 +176,7 @@ let rec loop ~t ~out ~state running_avg =
     if t % 10 = 0
     then (
       (* save params *)
-      O.P.C.save
+      O.P.save
         (RNN.P.value (O.params new_state))
         ~kind:base.ba_kind
         ~out:(in_dir "sofo_params");
