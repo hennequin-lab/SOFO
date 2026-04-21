@@ -4,14 +4,22 @@ open Maths
 (** Four types of optimizers supported in this library. *)
 include module type of Optimizer_typ
 
+module Value_and_grad_helper (P : Prms.T) : sig
+  val prepare_for_reverse : Torch.Tensor.t -> t
+  val value_and_grad : f:(P.t -> t * 'a) -> Torch.Tensor.t P.param -> float * P.t * 'a
+end
+
 (** SOFO optimizer *)
 module SOFO (P : Prms.T) : sig
   include
     T
     with module P = P
      and type ('a, 'b) config = ('a, 'b) Config.SOFO.t
-     and type ('a, 'b, 'c) init_opts = P.param -> 'c
+     and type ('a, 'b, 'c) init_opts = Torch.Tensor.t P.param -> 'c
      and type info = P.t sofo_info
+     and type state = Torch.Tensor.t P.param
+
+  val orthonormalise : P.t -> P.t
 
   (** Initialise parameters with random tangents (also returned), ready to go into forward pass;
       in your optimization loop, just do
@@ -31,11 +39,11 @@ module SGDm (P : Prms.T) : sig
     T
     with module P = P
      and type ('a, 'b) config = ('a, 'b) Config.SGDm.t
-     and type ('a, 'b, 'c) init_opts = P.param -> 'c
+     and type ('a, 'b, 'c) init_opts = Torch.Tensor.t P.param -> 'c
      and type info = P.t
 
   (* 'a is some arbitrary stuff which your loss function also returns as collateral *)
-  val value_and_grad : f:(P.t -> t * 'a) -> P.param -> float * P.t * 'a
+  val value_and_grad : f:(P.t -> t * 'a) -> Torch.Tensor.t P.param -> float * P.t * 'a
 end
 
 (** Adam optimizer *)
@@ -44,9 +52,9 @@ module Adam (P : Prms.T) : sig
     T
     with module P = P
      and type ('a, 'b) config = ('a, 'b) Config.Adam.t
-     and type (_, _, 'c) init_opts = P.param -> 'c
+     and type (_, _, 'c) init_opts = Torch.Tensor.t P.param -> 'c
      and type info = P.t
 
   (* 'a is some arbitrary stuff which your loss function also returns as collateral *)
-  val value_and_grad : f:(P.t -> t * 'a) -> P.param -> float * P.t * 'a
+  val value_and_grad : f:(P.t -> t * 'a) -> Torch.Tensor.t P.param -> float * P.t * 'a
 end

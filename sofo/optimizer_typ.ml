@@ -10,11 +10,10 @@ module type T = sig
   type ('a, 'b) config
   type ('a, 'b, 'c) init_opts
 
-  val params : state -> P.param
+  val params : state -> Torch.Tensor.t P.param
   val init : ('a, 'b, state) init_opts
   val clone_state : state -> state
   val step : config:('a, 'b) config -> info:info -> state -> state
-  val manual_state_update : state -> (Maths.t P.p -> Maths.t P.p) -> state
 end
 
 type 'v sofo_info =
@@ -46,10 +45,16 @@ module Config = struct
       ; learning_rate : float option
       ; n_tangents : int
       ; damping : [ `none | `relative_from_top of float | `relative_from_bottom of float ]
+      ; sqrt : bool
       }
 
     let default =
-      { base = Base.default; learning_rate = None; n_tangents = 10; damping = `none }
+      { base = Base.default
+      ; learning_rate = None
+      ; n_tangents = 10
+      ; damping = `none
+      ; sqrt = false
+      }
   end
 
   module SGDm = struct

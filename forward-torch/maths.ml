@@ -58,6 +58,7 @@ let of_bigarray ?device x = Tensor.of_bigarray ?device x |> const
 let to_bigarray ~kind x = Tensor.to_bigarray ~kind (primal x)
 let to_float_exn x = x |> primal |> Tensor.to_float0_exn
 let shape x = x |> primal |> Tensor.shape
+let shape' x = x |> shape |> Array.of_list
 let device x = x |> primal |> Tensor.device
 let kind x = x |> primal |> Tensor.type_
 let numel x = x |> primal |> Tensor.shape |> List.fold ~init:1 ~f:Int.( * ) |> Int.max 1
@@ -268,7 +269,7 @@ module Ops = struct
 
   let abs =
     let f = Tensor.abs in
-    let df ~f:_ ~x:_ ~dx = Tensor.abs dx in
+    let df ~f:_ ~x ~dx = Tensor.(sign x * dx) in
     { f; df }
 
   let trace =
@@ -1041,7 +1042,7 @@ let gumbel_softmax ~tau ~hard logits =
   | Some dlogits ->
     let dy =
       let tmp1 = Tensor.(div_scalar (y * dlogits) (Scalar.f tau)) in
-      let tmp2 = Tensor.(div_scalar (y * y * dlogits) (Scalar.f tau)) in
+      let tmp2 = Tensor.(y * tmp1) in
       Tensor.(tmp1 - tmp2)
     in
     { p = y_final; t = Some (Explicit dy) }

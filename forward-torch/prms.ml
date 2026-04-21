@@ -22,6 +22,11 @@ let enforce_bounds ?lb ?ub x =
   | None -> x
   | Some ub -> Tensor.min x ub
 
+let map_tagged ~f = function
+  | Pinned x -> Pinned (f x)
+  | Free x -> Free (f x)
+  | Bounded x -> Bounded { v = f x.v; lb = Option.map x.lb ~f; ub = Option.map x.ub ~f }
+
 (** Path specified as a list of strings. *)
 type path = String.t List.t
 
@@ -44,7 +49,7 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
   let iter2 x y ~f = fold2 ?path:None x y ~init:() ~f:(fun () (x, y, _) -> f x y)
 
   type nonrec t = t p
-  type nonrec param = param p
+  type nonrec 'a param = 'a param p
 
   let value = map ~f:value
   let const = map ~f:const
@@ -89,6 +94,18 @@ module Make (B : Basic) : T with type 'a p = 'a B.p = struct
     let m = Stdlib.Marshal.from_channel input in
     Stdio.In_channel.close input;
     map m ~f:(fun x -> Maths.const (Tensor.of_bigarray ?device x))
+
+  let save_with_tags (m : Tensor.t param) ~kind ~out:filename =
+    let m = map m ~f:(map_tagged ~f:(Tensor.to_bigarray ~kind)) in
+    let output = Stdio.Out_channel.create filename in
+    Stdlib.Marshal.to_channel output m [ Stdlib.Marshal.No_sharing ];
+    Stdio.Out_channel.close output
+
+  let load_with_tags ?device filename =
+    let input = Stdio.In_channel.create filename in
+    let m = Stdlib.Marshal.from_channel input in
+    Stdio.In_channel.close input;
+    map m ~f:(map_tagged ~f:(Tensor.of_bigarray ?device))
 
   let save_npz ?prefix ~kind ~out prms =
     let prms = map prms ~f:(fun x -> Tensor.to_bigarray (Maths.primal x) ~kind) in

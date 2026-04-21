@@ -28,6 +28,7 @@ val to_bigarray
 
 val to_float_exn : t -> float
 val shape : t -> int list
+val shape' : t -> int array
 val device : t -> Device.t
 val kind : t -> Torch_core.Kind.packed
 val numel : t -> int

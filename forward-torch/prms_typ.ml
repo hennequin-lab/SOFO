@@ -6,16 +6,16 @@ open Maths
    -- Basic types for parameters
    ------------------------------------------------------------ *)
 
-type bounded =
-  { v : Tensor.t
-  ; lb : Tensor.t option
-  ; ub : Tensor.t option
+type 'tensor bounded =
+  { v : 'tensor
+  ; lb : 'tensor option
+  ; ub : 'tensor option
   }
 
-type param =
-  | Pinned of Tensor.t
-  | Free of Tensor.t
-  | Bounded of bounded
+type 'tensor param =
+  | Pinned of 'tensor
+  | Free of 'tensor
+  | Bounded of 'tensor bounded
 
 (** Path specified as a list of strings. *)
 type path = String.t List.t
@@ -65,10 +65,10 @@ module type T = sig
   val iter2 : 'a p -> 'b p -> f:('a -> 'b -> unit) -> unit
 
   type nonrec t = t p
-  type nonrec param = param p
+  type nonrec 'a param = 'a param p
 
   (** Extract value as Tensor.t in all elements in x. *)
-  val value : param -> t
+  val value : Tensor.t param -> t
 
   val const : Tensor.t p -> t
   val primal : t -> Tensor.t p
@@ -109,6 +109,9 @@ module type T = sig
 
   (** Load params from file onto [device]. *)
   val load : ?device:Device.t -> string -> t
+
+  val save_with_tags : Tensor.t param -> kind:('a, 'b) Bigarray.kind -> out:string -> unit
+  val load_with_tags : ?device:Device.t -> string -> Tensor.t param
 
   (** Save x as [kind] in [out] with [prefix] as .npy file. *)
   val save_npz : ?prefix:string -> kind:('a, 'b) Bigarray.kind -> out:string -> t -> unit

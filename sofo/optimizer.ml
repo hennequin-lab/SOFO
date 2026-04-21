@@ -15,15 +15,6 @@ module Update_params (P : Prms.T) = struct
       | Free x -> Free (update x delta)
       | Bounded { v = x; lb; ub } ->
         Bounded { v = Prms.enforce_bounds ?lb ?ub (update x delta); lb; ub })
-
-  let manual_replace ~theta (theta' : P.t) =
-    let open Prms in
-    P.map2 theta theta' ~f:(fun theta theta' ->
-      match theta with
-      | Pinned x -> Pinned x
-      | Free _ -> Free (primal theta')
-      | Bounded { v = _; lb; ub } ->
-        Bounded { v = Prms.enforce_bounds ?lb ?ub (primal theta'); lb; ub })
 end
 
 (* apply momentum to anything *)
@@ -64,24 +55,21 @@ module SOFO (P : Prms.T) = struct
   module P = P
 
   type ('a, 'b) config = ('a, 'b) Config.SOFO.t
-  type ('a, 'b, 'c) init_opts = P.param -> 'c
-  type state = { theta : P.param }
+  type ('a, 'b, 'c) init_opts = Torch.Tensor.t P.param -> 'c
+  type state = Torch.Tensor.t P.param
   type info = P.t sofo_info
 
-  let params state = state.theta
-  let init theta = { theta }
+  let params state = state
+  let init theta = theta
 
   let clone_state (state : state) : state =
     let open Prms in
-    let theta_cloned =
-      P.map state.theta ~f:(fun theta ->
-        match theta with
-        | Pinned x -> Pinned Tensor.(x + f 0.)
-        | Free x -> Free Tensor.(x + f 0.)
-        | Bounded { v = x; lb; ub } ->
-          Bounded { v = Prms.enforce_bounds ?lb ?ub Tensor.(x + f 0.); lb; ub })
-    in
-    { theta = theta_cloned }
+    P.map state ~f:(fun theta ->
+      match theta with
+      | Pinned x -> Pinned Tensor.(x + f 0.)
+      | Free x -> Free Tensor.(x + f 0.)
+      | Bounded { v = x; lb; ub } ->
+        Bounded { v = Prms.enforce_bounds ?lb ?ub Tensor.(x + f 0.); lb; ub })
 
   (* orthonormalize tangents *)
   let orthonormalise vs =
@@ -101,7 +89,7 @@ module SOFO (P : Prms.T) = struct
       reshape v ~shape:s)
 
   (* initialise tangents, where each tangent is normalised. *)
-  let random_tangents ~n_tangents:k (theta : P.param) =
+  let random_tangents ~n_tangents:k (theta : Torch.Tensor.t P.param) =
     (* note that even [Pinned] parameters have non-zero tangents;
        that's important, because we orthonormalize everything;
        however, these tangents don't matter anyway as those parameters
@@ -123,7 +111,7 @@ module SOFO (P : Prms.T) = struct
       view (reshape weights ~shape:[ 1; -1 ] *@ v_i) ~size:s)
 
   (* calculate natural gradient = V(VtGtGV)^-1 V^t g *)
-  let sofo_update ~damping ~tangents:vs ~ggn vtg =
+  let sofo_update ~sqrt ~damping ~tangents:vs ~ggn vtg =
     let u, s, _ = Const.svd ggn in
     (* how each V should be weighted, as a row array *)
     let weights =
@@ -138,7 +126,7 @@ module SOFO (P : Prms.T) = struct
           let offset = Float.(gamma * Tensor.(minimum (primal s) |> to_float0_exn)) in
           s +$ offset
       in
-      u / s *@ tmp
+      u / (if sqrt then Maths.sqrt s else s) *@ tmp
     in
     weighted_vs_sum ~vs weights
 
@@ -151,25 +139,25 @@ module SOFO (P : Prms.T) = struct
       Stdlib.Gc.major ();
       let loss_t = tangent_exn info.loss in
       let delta =
-        sofo_update ~damping:config.damping ~tangents:info.tangents ~ggn:info.ggn loss_t
+        sofo_update
+          ~sqrt:config.sqrt
+          ~damping:config.damping
+          ~tangents:info.tangents
+          ~ggn:info.ggn
+          loss_t
       in
-      let new_theta = U.update ~learning_rate:eta ~theta:(params state) delta in
-      { theta = new_theta }
-
-  let manual_state_update state f =
-    let p = P.value state.theta in
-    { theta = U.manual_replace ~theta:state.theta (f p) }
+      U.update ~learning_rate:eta ~theta:(params state) delta
 end
 
 module SGDm (P : Prms.T) = struct
   module P = P
 
   type ('a, 'b) config = ('a, 'b) Config.SGDm.t
-  type ('a, 'b, 'c) init_opts = P.param -> 'c
+  type ('a, 'b, 'c) init_opts = Torch.Tensor.t P.param -> 'c
   type info = P.t
 
   type state =
-    { theta : P.param
+    { theta : Torch.Tensor.t P.param
     ; g_avg : P.t option
     ; beta_t : float
     }
@@ -204,10 +192,6 @@ module SGDm (P : Prms.T) = struct
       let new_theta = U.update ~learning_rate:eta ~theta:(params state) g_avg in
       { theta = new_theta; g_avg = Some g_avg; beta_t }
 
-  let manual_state_update state f =
-    let p = P.value state.theta in
-    { state with theta = U.manual_replace ~theta:state.theta (f p) }
-
   include Value_and_grad_helper (P)
 end
 
@@ -215,11 +199,11 @@ module Adam (P : Prms.T) = struct
   module P = P
 
   type ('a, 'b) config = ('a, 'b) Config.Adam.t
-  type (_, _, 'c) init_opts = P.param -> 'c
+  type (_, _, 'c) init_opts = Torch.Tensor.t P.param -> 'c
   type info = P.t
 
   type state =
-    { theta : P.param
+    { theta : Torch.Tensor.t P.param
     ; m : P.t option
     ; v : P.t option
     ; beta1_t : float
@@ -268,10 +252,6 @@ module Adam (P : Prms.T) = struct
       let dtheta = P.(m_hat / (v_hat_sqrt +$ c.eps)) in
       let new_theta = U.update ~learning_rate:eta ~theta:(params state) dtheta in
       { theta = new_theta; beta1_t; beta2_t; m = Some m; v = Some v }
-
-  let manual_state_update state f =
-    let p = P.value state.theta in
-    { state with theta = U.manual_replace ~theta:state.theta (f p) }
 
   include Value_and_grad_helper (P)
 end
