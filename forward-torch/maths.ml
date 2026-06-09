@@ -592,7 +592,7 @@ module Ops = struct
       in
       (* cast as integer and collapse to one long vector. *)
       let indices_offset =
-        Tensor._cast_int indices_offset ~non_blocking:true
+        Tensor._cast_int indices_offset ~non_blocking:false
         |> Tensor.view ~size:[ 1; -1 ]
         |> Tensor.squeeze
       in
@@ -676,7 +676,7 @@ module Ops = struct
         Tensor.(first_dim_offset + second_dim_offset + indices_collapse_last_two)
       in
       (* cast as integer and collapse to one long vector. *)
-      let indices_offset = Tensor._cast_int indices_offset ~non_blocking:true in
+      let indices_offset = Tensor._cast_int indices_offset ~non_blocking:false in
       let indices_collapsed =
         Tensor.reshape indices_offset ~shape:[ 1; -1 ] |> Tensor.squeeze
       in
@@ -1070,8 +1070,8 @@ module Const = struct
   let svd x =
     match x with
     | { p; t = None } ->
-      let u, s, vt = Tensor.svd ~some:true ~compute_uv:true p in
-      const u, const s, const vt
+      let u, s, v = Tensor.svd ~some:true ~compute_uv:true p in
+      const u, const s, transpose (const v)
     | _ -> raise Not_const
 
   (* x = Q diag(l) Q^H *)
