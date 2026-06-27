@@ -347,12 +347,12 @@ module Ops = struct
   (* pdf of standard normal *)
   let pdf =
     let f x = Tensor.(exp (neg (square x / f 2.)) / f Float.(sqrt 2. * pi)) in
-    let df ~f:y ~x ~dx = Tensor.(neg x * y * dx) in
+    let df ~f:y ~x ~dx = Tensor.(dx * neg x * y) in
     { f; df }
 
   let erf =
     let f = Tensor.erf in
-    let df ~f:_ ~x ~dx = Tensor.(f Float.(2. / sqrt pi) * exp (neg (square x)) * dx) in
+    let df ~f:_ ~x ~dx = Tensor.(f Float.(2. / sqrt pi) * dx * exp (neg (square x))) in
     { f; df }
 
   (* invert a square matrix; y = x^-1, dy = - x^-1 dx x^-1 *)
