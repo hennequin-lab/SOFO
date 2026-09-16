@@ -1071,7 +1071,12 @@ module Const = struct
     match x with
     | { p; t = None } ->
       let u, s, v = Tensor.svd ~some:true ~compute_uv:true p in
-      const u, const s, transpose (const v)
+      let vh =
+        if List.length (Tensor.shape v) = 3
+        then transpose ~dims:[ 0; 2; 1 ] (const v)
+        else transpose (const v)
+      in
+      const u, const s, vh
     | _ -> raise Not_const
 
   (* x = Q diag(l) Q^H *)

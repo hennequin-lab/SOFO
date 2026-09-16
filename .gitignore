@@ -1,6 +1,7 @@
 results
 _results
 _results_kf
+.vscode
 *.annot
 *.cmo
 *.cma
