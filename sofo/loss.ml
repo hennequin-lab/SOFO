@@ -18,7 +18,7 @@ let mse_ggn ~output_dims:_ ~vtgt =
   let vtgt_shape = Maths.shape vtgt in
   let vtgt_reshaped = reshape vtgt ~shape:[ List.hd_exn vtgt_shape; -1 ] in
   einsum [ vtgt_reshaped, "ka"; vtgt_reshaped, "la" ] "kl"
-  *$ Float.(2. / of_int (List.hd_exn vtgt_shape))
+  *$ Float.(2. / of_int (List.nth_exn vtgt_shape 1))
 
 let cross_entropy ~output_dims ~(labels : t) y =
   let lse = logsumexp ~keepdim:true ~dim:output_dims y in
